@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────────────────────────────
+  # PostgreSQL — audit log database
+  # ─────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: algo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-algo_broker}
+      POSTGRES_USER: ${POSTGRES_USER:-algo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-algo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trading_net
+
+  # ─────────────────────────────────────────────────────────────────
+  # BROKER — webhook server + ZMQ PUB + ZMQ PULL + DB logging
+  # ─────────────────────────────────────────────────────────────────
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile.broker
+    image: algo-trading-broker:latest
+    container_name: algo_broker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${WEBHOOK_PORT:-8080}:8080"      # TradingView webhook
+      - "${ZMQ_PUB_PORT:-5555}:5555"      # ZMQ PUB  (broker → subscribers)
+      - "${ZMQ_PULL_PORT:-5556}:5556"     # ZMQ PULL (subscribers → broker)
+    env_file:
+      - .env
+    environment:
+      ZMQ_BROKER_HOST: "*"                # bind to all interfaces inside container
+      ZMQ_PULL_HOST: "*"
+      POSTGRES_HOST: postgres             # service name resolves via docker network
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+
+volumes:
+  postgres_data:
+
+networks:
+  trading_net:
+    driver: bridge
