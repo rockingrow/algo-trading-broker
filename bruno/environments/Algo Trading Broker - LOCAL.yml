@@ -1,0 +1,4 @@
+name: Algo Trading Broker - LOCAL
+variables:
+  - name: url
+    value: http://0.0.0.0:8080

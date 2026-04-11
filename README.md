@@ -1,125 +1,170 @@
 # 🚀 Algo Trading Broker
 
-A **broker-only** service that:
+A high-performance, decentralized **trading signal broker** built with FastAPI and ZeroMQ. It acts as a central hub between TradingView alerts and distributed execution nodes (VPS).
 
-1. **Receives** TradingView JSON webhook alerts
-2. **Logs** every signal to **PostgreSQL** (`signal_log` table)
-3. **Publishes** signals via **ZeroMQ PUB** to subscriber VPS nodes
+## ⚡ Features
 
-```
-TradingView Alert (JSON webhook)
-        │  POST :8080/webhook
-        ▼
-┌───────────────────────────────────────┐
-│           BROKER (this repo)          │
-│                                       │
-│  FastAPI  :8080                       │
-│  ├── POST /webhook   ← TV alert       │
-│  ├── GET  /status    ← in-memory stat │
-│  └── GET  /health                     │
-│                                       │
-│  PostgreSQL                           │
-│  ├── signal_log   ← every TV signal   │
-│  └── trade_event  ← subscriber events│
-│                                       │
-│  ZMQ PUB  :5555  ──────────────────┐  │
-│  ZMQ PULL :5556  ◄─────────────────┘  │
-└───────────────────────────────────────┘
-         :5555 ↓              ↑ :5556
-   ┌──────────────┐   ┌──────────────┐
-   │  VPS #1 SUB  │   │  VPS #1 PUSH │
-   │  (executor)  │   │  (reporter)  │
-   └──────────────┘   └──────────────┘
+- **Webhook Hub**: Receives and validates TradingView JSON alerts.
+- **Persistence**: Logs every signal to **PostgreSQL** for auditing and analytics.
+- **Distribution**: Fans out signals via **ZeroMQ PUB** to multiple subscriber nodes.
+- **Developer Friendly**: Includes Makefile, Bruno API collections, and Ruff for linting.
+
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+graph TD
+    TV[TradingView Alert] -- "POST :8080/webhook" --> Broker
+    subgraph "Broker Node (This Repo)"
+        Broker[FastAPI Webhook Server]
+        DB[(PostgreSQL)]
+        ZMQ[ZeroMQ PUB :5555]
+        Broker -- "Log Signal" --> DB
+        Broker -- "Publish" --> ZMQ
+    end
+    ZMQ -- "TCP Broadcast" --> VPS1[VPS Node #1]
+    ZMQ -- "TCP Broadcast" --> VPS2[VPS Node #2]
+    ZMQ -- "TCP Broadcast" --> VPSN[VPS Node #N]
 ```
 
-## Project Structure
+---
 
-```
+## 📂 Project Structure
+
+```text
 algo-trading-broker/
 ├── broker/
-│   ├── main.py              # Entry point
-│   ├── webhook.py           # FastAPI — POST /webhook, GET /status
-│   ├── publisher.py         # ZeroMQ PUB (signals → subscribers)
-│   ├── trade_listener.py    # ZeroMQ PULL (trade events ← subscribers)
-│   ├── signal_parser.py     # TradingView JSON → TradingSignal
-│   ├── models.py            # Pydantic models
-│   └── db/
-│       ├── engine.py        # Async SQLAlchemy engine + session
-│       ├── models.py        # ORM: signal_log, trade_event tables
-│       └── repository.py    # log_signal(), log_trade_event()
-├── shared/
-│   ├── config.py            # Pydantic settings from .env
-│   └── logger.py            # Structured logger
-├── docker-compose.yml       # Broker + PostgreSQL
-├── Dockerfile.broker
-├── requirements.txt
-└── .env.example
+│   ├── main.py              # Application entry point
+│   ├── webhook.py           # FastAPI routes & logic
+│   ├── publisher.py         # ZeroMQ PUB implementation
+│   ├── settings.py          # Configuration (Pydantic Settings)
+│   ├── logger.py            # Structured logging setup
+│   ├── db/
+│   │   ├── engine.py        # SQLAlchemy connection pool
+│   │   ├── models.py        # SQLAlchemy ORM models
+│   │   └── repository.py    # Database CRUD operations
+│   └── schemas/
+│       └── webhook.py       # Pydantic validation models
+├── bruno/                   # Bruno API client collections
+├── examples/                # Example scripts and payloads
+├── Makefile                 # Automation shortcuts (Poetry, Linters)
+├── Dockerfile               # Production container definition
+├── docker-compose.yml       # Infrastructure (PostgreSQL)
+└── pyproject.toml           # Poetry dependencies & tool config
 ```
 
-## Quick Start
+---
 
+## 🚀 Quick Start
+
+### 1. Prerequisites
+- Python 3.13+
+- [Poetry](https://python-poetry.org/)
+- Docker & Docker Compose
+
+### 2. Installation
 ```bash
-# 1. Clone
-git clone <this-repo> && cd algo-trading-broker
+# Clone the repository
+git clone <repository-url>
+cd algo-trading-broker
 
-# 2. Configure
-cp .env.example .env        # Edit with your values
+# Setup environment variables
+cp .env.example .env  # Update values in .env
 
-# 3a. Docker (recommended)
-docker compose up -d
-
-# 3b. Manual
-pip install -r requirements.txt
-python3 -m broker.main
+# Install dependencies
+make install-dev
 ```
 
-## PostgreSQL Schema
+### 3. Start Infrastructure
+```bash
+# Start PostgreSQL via Docker
+docker compose up -d
+```
 
-### `signal_log` — TradingView webhook signals
+### 4. Run the Broker
+```bash
+# Run locally
+make run
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigserial PK | Auto ID |
-| `signal_id` | varchar(64) | UUID generated per signal |
-| `received_at` | timestamptz | When webhook arrived |
-| `action` | varchar(20) | `open` / `close` / `close_all` / `modify` |
-| `symbol` | varchar(20) | e.g. `XAUUSD` |
-| `direction` | varchar(10) | `buy` / `sell` / null |
-| `volume` | float | Lot size |
-| `sl` / `tp` | float | Stop loss / take profit prices |
-| `ticket` | bigint | MT5 ticket (if provided) |
-| `comment` | varchar | Free-text comment |
-| `raw_payload` | jsonb | Full original JSON |
-| `published` | bool | Did ZMQ publish succeed? |
-| `error` | text | Error message if any |
+# Or via Docker
+docker compose up --build -d
+```
 
-## TradingView Webhook Payload
+---
 
+## 🛠️ Development
+
+We use `make` to simplify common tasks:
+
+| Command | Description |
+|---------|-------------|
+| `make install` | Install production dependencies |
+| `make install-dev` | Install all dependencies including dev tools |
+| `make run` | Run the broker locally |
+| `make format` | Format code with Ruff |
+| `make lint` | Run Ruff check |
+| `make fix` | Automatically fix linting issues |
+
+---
+
+## 📡 Webhook API
+
+### POST `/webhook`
+
+Receives signals from TradingView. Requires a valid `token` in the payload (if configured).
+
+**Example Payload:**
 ```json
 {
-  "action":    "open",
-  "symbol":    "XAUUSD",
-  "direction": "buy",
-  "volume":    0.1,
-  "sl":        1900.00,
-  "tp":        1950.00,
-  "comment":   "{{strategy.order.id}}"
+  "token": "your_secure_token",
+  "symbol": "XAUUSD",
+  "timeframe": "M5",
+  "timestamp": "2024-03-20T10:00:00Z",
+  "position": {
+    "action": "LONG",
+    "price": 1900.50,
+    "quantity": 0.1,
+    "sl": 1890.00,
+    "tp1": 1920.00,
+    "tp2": 1950.00,
+    "is_running": true
+  },
+  "indicators": {
+    "wt1": 12.5,
+    "wt2": 10.2,
+    "ema200": 1880.0
+  },
+  "inputs": {
+    "risk_percent": 1.0,
+    "use_session": true
+  }
 }
 ```
 
-Supported `action` values: `open`, `close`, `close_all`, `modify`
+**Supported Actions:** `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`, `SL`.
 
-## Environment Variables
+---
 
-See `.env.example` for all settings.
+## 🗄️ PostgreSQL Schema (`signal_log`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WEBHOOK_PORT` | `8080` | Webhook HTTP port |
-| `WEBHOOK_SECRET` | `""` | HMAC secret (blank = disabled) |
-| `ZMQ_PUB_PORT` | `5555` | ZMQ PUB — signals to subscribers |
-| `POSTGRES_HOST` | `localhost` | PostgreSQL host |
-| `POSTGRES_PORT` | `5432` | PostgreSQL port |
-| `POSTGRES_DB` | `algo_broker` | Database name |
-| `POSTGRES_USER` | `algo` | Database user |
-| `POSTGRES_PASSWORD` | `changeme` | Database password |
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | Unique record identifier |
+| `symbol` | String(50) | Trading symbol (e.g., XAUUSD) |
+| `timeframe` | String(20) | Chart timeframe (e.g., M15) |
+| `timestamp` | DateTime | Signal generation time from TV |
+| `action` | Enum | LONG, SHORT, TP1, TP2, R_SL, SL |
+| `price` | Float | Entry/Trigger price |
+| `quantity` | Float | Lot size / Volume |
+| `sl`, `tp1`, `tp2` | Float | Exit prices |
+| `is_running`| Boolean | Strategy state |
+| `indicators` | JSONB | Full technical indicator state |
+| `inputs` | JSONB | Strategy inputs / settings |
+| `createdAt` | DateTime | Broker log insertion time |
+
+---
+
+## 🧪 Testing
+
+Open the `/bruno` directory with the [Bruno API Client](https://www.usebruno.com/) to find pre-configured requests for testing the webhook and health endpoints.

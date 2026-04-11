@@ -6,19 +6,19 @@ services:
   # ─────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: algo_postgres
-    restart: unless-stopped
+    container_name: algo_trading_postgres
+    restart: on-failure
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-algo_broker}
-      POSTGRES_USER: ${POSTGRES_USER:-algo}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
+      POSTGRES_USER: ${POSTGRES_USER:-algo_trading}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algotrading_broker_db_password}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./broker/db/migrations:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-algo}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-algo_trading} -d ${POSTGRES_DB:-algo_trading_broker}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -26,28 +26,29 @@ services:
       - trading_net
 
   # ─────────────────────────────────────────────────────────────────
-  # BROKER — webhook server + ZMQ PUB + ZMQ PULL + DB logging
+  # BROKER — webhook server + ZMQ PUB + DB logging
   # ─────────────────────────────────────────────────────────────────
   broker:
     build:
       context: .
-      dockerfile: Dockerfile.broker
+      dockerfile: Dockerfile
     image: algo-trading-broker:latest
-    container_name: algo_broker
-    restart: unless-stopped
+    container_name: algo_trading_broker
+    restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "${WEBHOOK_PORT:-8080}:8080"      # TradingView webhook
       - "${ZMQ_PUB_PORT:-5555}:5555"      # ZMQ PUB  (broker → subscribers)
-      - "${ZMQ_PULL_PORT:-5556}:5556"     # ZMQ PULL (subscribers → broker)
     env_file:
       - .env
     environment:
       ZMQ_BROKER_HOST: "*"                # bind to all interfaces inside container
-      ZMQ_PULL_HOST: "*"
       POSTGRES_HOST: postgres             # service name resolves via docker network
+      POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
+      POSTGRES_USER: ${POSTGRES_USER:-algo_trading}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algotrading_broker_db_password}
     volumes:
       - ./logs:/app/logs
     networks:

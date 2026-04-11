@@ -1,5 +1,5 @@
 """
-shared/config.py — Centralised settings loaded from .env / environment variables.
+broker/settings.py — Centralised settings loaded from .env / environment variables.
 """
 
 from __future__ import annotations
@@ -28,9 +28,15 @@ class Settings(BaseSettings):
   # ── PostgreSQL ───────────────────────────────────────────────────
   POSTGRES_HOST: str = "localhost"
   POSTGRES_PORT: int = 5432
-  POSTGRES_DB: str = "algo_broker"
-  POSTGRES_USER: str = "algo"
-  POSTGRES_PASSWORD: str = "changeme"
+  POSTGRES_DB: str = "algo_trading_broker"
+  POSTGRES_USER: str = "algo_trading"
+  POSTGRES_PASSWORD: str = "algotrading_broker_db_password"
+
+  # Instrument map "UNIVERSAL=BROKER,..." → parsed to dict
+  INSTRUMENT_MAP: str = "EURUSD=EURUSD,XAUUSD=XAUUSD,BTCUSD=BTCUSD"
+
+  # ── Logging ──────────────────────────────────────────────────────
+  LOG_LEVEL: str = "INFO"
 
   @property
   def postgres_dsn(self) -> str:
@@ -38,12 +44,6 @@ class Settings(BaseSettings):
       f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
       f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
     )
-
-  # Instrument map "UNIVERSAL=BROKER,..." → parsed to dict
-  INSTRUMENT_MAP: str = "EURUSD=EURUSD,XAUUSD=XAUUSD,BTCUSD=BTCUSD"
-
-  # ── Logging ──────────────────────────────────────────────────────
-  LOG_LEVEL: str = "INFO"
 
   @property
   def instrument_map_dict(self) -> Dict[str, str]:
