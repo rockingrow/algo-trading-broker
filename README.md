@@ -5,8 +5,6 @@ A **broker-only** service that:
 1. **Receives** TradingView JSON webhook alerts
 2. **Logs** every signal to **PostgreSQL** (`signal_log` table)
 3. **Publishes** signals via **ZeroMQ PUB** to subscriber VPS nodes
-4. **Listens** for trade event reports from subscribers via **ZeroMQ PULL**
-5. **Logs** those events to PostgreSQL (`trade_event` table)
 
 ```
 TradingView Alert (JSON webhook)
@@ -95,22 +93,6 @@ python3 -m broker.main
 | `published` | bool | Did ZMQ publish succeed? |
 | `error` | text | Error message if any |
 
-### `trade_event` — Reports from subscriber VPS nodes
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | bigserial PK | Auto ID |
-| `received_at` | timestamptz | When PULL message arrived |
-| `event_type` | varchar(50) | `entry_confirmed`, `close_confirmed`, `error`, `status`, … |
-| `signal_id` | varchar(64) | Links back to `signal_log.signal_id` |
-| `subscriber_id` | varchar(100) | Which VPS reported this |
-| `ticket` | bigint | MT5 position ticket |
-| `symbol` | varchar(20) | Instrument |
-| `direction` | varchar(10) | `buy` / `sell` |
-| `volume` / `open_price` / `close_price` / `sl` / `tp` / `profit` | float | Trade details |
-| `message` | text | Free-text from subscriber |
-| `raw` | jsonb | Full original JSON |
-
 ## TradingView Webhook Payload
 
 ```json
@@ -127,25 +109,6 @@ python3 -m broker.main
 
 Supported `action` values: `open`, `close`, `close_all`, `modify`
 
-## Subscriber → Broker Trade Event Format (ZMQ PUSH to port 5556)
-
-```json
-{
-  "event_type":    "entry_confirmed",
-  "signal_id":     "uuid-of-original-signal",
-  "subscriber_id": "vps-01",
-  "ticket":        12345,
-  "symbol":        "XAUUSD",
-  "direction":     "buy",
-  "volume":        0.10,
-  "open_price":    2350.50,
-  "sl":            2330.00,
-  "tp":            2400.00,
-  "timestamp":     "2024-01-01T12:00:00+00:00",
-  "message":       "Order opened successfully"
-}
-```
-
 ## Environment Variables
 
 See `.env.example` for all settings.
@@ -155,7 +118,6 @@ See `.env.example` for all settings.
 | `WEBHOOK_PORT` | `8080` | Webhook HTTP port |
 | `WEBHOOK_SECRET` | `""` | HMAC secret (blank = disabled) |
 | `ZMQ_PUB_PORT` | `5555` | ZMQ PUB — signals to subscribers |
-| `ZMQ_PULL_PORT` | `5556` | ZMQ PULL — events from subscribers |
 | `POSTGRES_HOST` | `localhost` | PostgreSQL host |
 | `POSTGRES_PORT` | `5432` | PostgreSQL port |
 | `POSTGRES_DB` | `algo_broker` | Database name |

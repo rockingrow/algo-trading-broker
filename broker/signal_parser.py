@@ -1,60 +1,44 @@
 """
 broker/signal_parser.py — Converts raw WebhookPayload into a validated TradingSignal.
 """
+
 from __future__ import annotations
 
-from broker.models import OrderDirection, SignalAction, TradingSignal, WebhookPayload
-from shared.config import settings
-from shared.logger import get_logger
+from broker.schemas.webhook import TradingSignal, WebhookPayload
+from broker.logger import get_logger
 
 log = get_logger(__name__)
 
 
 def parse_signal(payload: WebhookPayload) -> TradingSignal:
-    """
-    Validate and normalise a raw TradingView webhook payload into a TradingSignal.
+  """
+  Validate and normalise a raw TradingView webhook payload into a TradingSignal.
 
-    Raises:
-        ValueError: if required fields are missing or invalid.
-    """
-    action_raw = payload.action.lower().strip()
-    try:
-        action = SignalAction(action_raw)
-    except ValueError:
-        raise ValueError(
-            f"Unknown action '{action_raw}'. "
-            f"Supported: {[a.value for a in SignalAction]}"
-        )
+  The payload is structured according to the examples/*.json format.
+  """
+  position = payload.position
+  action = position.action
 
-    symbol = payload.symbol.upper().strip()
+  # The incoming action is already a SignalAction enum due to Pydantic validation
+  # in WebhookPayload.
 
-    direction: OrderDirection | None = None
-    if payload.direction:
-        try:
-            direction = OrderDirection(payload.direction.lower().strip())
-        except ValueError:
-            raise ValueError(
-                f"Unknown direction '{payload.direction}'. Must be 'buy' or 'sell'."
-            )
+  # Normalise symbol (e.g. OANDA:XAUUSD -> XAUUSD)
+  symbol = payload.symbol.split(":")[-1].upper().strip()
 
-    if action == SignalAction.open and direction is None:
-        raise ValueError("'direction' (buy/sell) is required for action='open'.")
+  # Use the first TP as the main target if available
+  tp = position.tp1 or position.tp2
 
-    volume = payload.volume if payload.volume is not None else settings.DEFAULT_VOLUME
-    if volume <= 0:
-        raise ValueError(f"Volume must be > 0, got {volume}")
+  # Action is already validated by Pydantic
 
-    signal = TradingSignal(
-        action=action,
-        symbol=symbol,
-        direction=direction,
-        volume=volume,
-        sl=payload.sl,
-        tp=payload.tp,
-        ticket=payload.ticket,
-        comment=payload.comment or "TV_Signal",
-        magic=payload.magic or settings.INSTRUMENT_MAGIC,
-    )
+  signal = TradingSignal(
+    action=action,
+    symbol=symbol,
+    price=position.price,
+    volume=position.quantity,
+    sl=position.sl,
+    tp=tp,
+    comment="TV_Signal",
+  )
 
-    log.debug("Parsed signal: %s", signal.model_dump_json())
-    return signal
+  log.debug("Parsed signal: %s", signal.model_dump_json())
+  return signal
