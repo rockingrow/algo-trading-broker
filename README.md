@@ -48,10 +48,10 @@ algo-trading-broker/
 │       └── webhook.py       # Pydantic validation models
 ├── bruno/                   # Bruno API client collections
 ├── examples/                # Example scripts and payloads
-├── Makefile                 # Automation shortcuts (Poetry, Linters)
+├── Makefile                 # Automation shortcuts (uv, Linters)
 ├── Dockerfile               # Production container definition
 ├── docker-compose.yml       # Infrastructure (PostgreSQL)
-└── pyproject.toml           # Poetry dependencies & tool config
+└── pyproject.toml           # uv dependencies & tool config
 ```
 
 ---
@@ -60,7 +60,7 @@ algo-trading-broker/
 
 ### 1. Prerequisites
 - Python 3.13+
-- [Poetry](https://python-poetry.org/)
+- [uv](https://docs.astral.sh/uv/)
 - Docker & Docker Compose
 
 ### 2. Installation

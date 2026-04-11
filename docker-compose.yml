@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ─────────────────────────────────────────────────────────────────
   # PostgreSQL — audit log database
@@ -7,7 +5,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: algo_trading_postgres
-    restart: on-failure
+    restart: always
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
       POSTGRES_USER: ${POSTGRES_USER:-algo_trading}
@@ -32,9 +30,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./broker
+          target: /app/broker
+        - action: rebuild
+          path: ./pyproject.toml
+        - action: rebuild
+          path: ./uv.lock
     image: algo-trading-broker:latest
     container_name: algo_trading_broker
-    restart: on-failure
+    restart: always
     depends_on:
       postgres:
         condition: service_healthy

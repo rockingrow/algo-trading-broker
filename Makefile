@@ -5,36 +5,48 @@ help:
 	@echo "  make install     - Install production dependencies"
 	@echo "  make install-dev - Install all dependencies including dev"
 	@echo "  make update      - Update dependencies and regenerate lock file"
-	@echo "  make lock        - Regenerate poetry.lock without updating"
+	@echo "  make lock        - Regenerate uv.lock"
 	@echo "  make fix         - Run ruff format and check --fix"
 	@echo "  make format      - Run ruff format"
 	@echo "  make lint        - Run ruff check"
 	@echo "  make check       - Alias for lint"
 	@echo "  make run         - Run the broker locally"
+	@echo "  make dev         - Run docker compose locally with hot module reload on code change"
 
 install:
-	poetry install --only main
+	uv sync --no-dev
 
 install-dev:
-	poetry install
+	uv sync
 
 update:
-	poetry update
+	uv lock --upgrade
+	uv sync
 
 lock:
-	poetry lock --no-update
+	uv lock
 
 fix:
-	poetry run ruff format .
-	poetry run ruff check --fix .
+	uv run ruff format .
+	uv run ruff check --fix .
 
 format:
-	poetry run ruff format .
+	uv run ruff format .
 
 lint:
-	poetry run ruff check .
+	uv run ruff check .
 
 check: lint
 
 run:
-	poetry run python -m broker.main
+	uv run python -m broker.main
+
+dev:
+	docker compose up --build -d
+	docker compose watch
+
+start:
+	docker compose up --build -d
+
+stop:
+	docker compose down

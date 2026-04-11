@@ -10,23 +10,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry
-ENV POETRY_VERSION=2.1.2
-ENV POETRY_HOME=/opt/poetry
-ENV POETRY_VENV_IN_PROJECT=1
-ENV POETRY_NO_INTERACTION=1
-RUN curl -sSL https://install.python-poetry.org | python3 -
-ENV PATH="${POETRY_HOME}/bin:${PATH}"
+# Install uv
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
 
 # Copy dependency files first (layer cache)
-COPY pyproject.toml poetry.lock* ./
+COPY pyproject.toml uv.lock ./
 
 # Install only production dependencies (no dev group)
-RUN poetry install --only main --no-root
+RUN uv sync --no-dev --no-install-project
 
 # Copy application source
+COPY README.md ./
 COPY broker/ broker/
+
+# Install the project itself
+RUN uv sync --no-dev
 
 EXPOSE 8080 5555 5556
 
-CMD ["poetry", "run", "python", "-m", "broker.main"]
+CMD ["uv", "run", "python", "-m", "broker.main"]
