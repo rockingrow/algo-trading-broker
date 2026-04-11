@@ -1,0 +1,53 @@
+{
+  "token": "secret_token_tu_tradingview",
+  "symbol": "OANDA:XAUUSD",
+  "timeframe": "5",
+  "timestamp": "2026-04-11 15:05:00",
+  "position": {
+    "action": "TP1",
+    "price": 2345.00,
+    "quantity": 1.8000,
+    "is_running": true
+  },
+  "indicators": {
+    "wt1": 20.10,
+    "wt2": 35.50,
+    "close": 2345.00,
+    "upper": 2351.00,
+    "lower": 2339.00,
+    "basis": 2345.00,
+    "ema200_visual": 2360.00,
+    "ema200_filter": 2360.00,
+    "atr_val": 2.40,
+    "in_session": true,
+    "vol_spike": false,
+    "in_cooldown": false,
+    "sl_too_wide": false
+  },
+  "inputs": {
+    "watching_candles": 2,
+    "over_wt_value": 60,
+    "safe_wt_value": 60,
+    "use_session": true,
+    "skip_windows": "10:00-11:00,23:00-00:00",
+    "bb_len": 20,
+    "bb_mult": 2.0,
+    "show_imb": true,
+    "atr_len": 14,
+    "atr_sl_mult": 2.0,
+    "min_rr_ratio": 0.75,
+    "risk_percent": 3.0,
+    "use_basis_exit": false,
+    "basis_exit_buffer": 1.5,
+    "tp1_qty_pc": 30.0,
+    "use_max_sl_dist": true,
+    "max_sl_distance": 30,
+    "vol_spike_mult": 2.0,
+    "vol_spike_lookback": 50,
+    "use_vol_filter": true,
+    "ema_visual_tf": "15",
+    "ema_filter_tf": "240",
+    "use_cooldown": false,
+    "cooldown_bars": 6
+  }
+}
