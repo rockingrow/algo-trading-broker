@@ -1,17 +1,49 @@
+# ====== Environments & Secrets ======
 .env
-*.pyc
-__pycache__/
-*.egg-info/
-.eggs/
-dist/
-build/
-logs/
-*.log
-.DS_Store
+.env.*
+!.env.example
 
-# Virtual environments
+# ====== Byte-compiled / Optimized ======
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ====== Virtual Environments ======
 venv/
 .venv/
+env/
 
-# Poetry
+# ====== IDEs / Editors ======
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ====== Testing & Coverage ======
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ====== Linters / Formatters ======
+.mypy_cache/
+.ruff_cache/
+
+# ====== OS-generated files ======
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# ====== Logs ======
+logs/
+*.log
+
+# ====== Build & Distribution ======
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ====== Dependency Management ======
 poetry.toml
