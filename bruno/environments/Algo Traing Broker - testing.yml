@@ -1,4 +1,4 @@
 name: Algo Traing Broker - testing
 variables:
   - name: url
-    value: http://cebzf-118-70-78-142.run.pinggy-free.link
+    value: https://algotradingbotvn.a.pinggy.link

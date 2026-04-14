@@ -64,6 +64,7 @@ def create_app(publisher: SignalPublisher) -> FastAPI:
     # 1. Verify token
     _verify_token(payload.token)
 
+    log.info("Webhook payload: %s", payload)
     log.info("Webhook received for symbol: %s", payload.symbol)
 
     # 2. Parse & validate mapping
