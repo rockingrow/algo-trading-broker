@@ -17,6 +17,8 @@ from broker.schemas.webhook import TradingSignal, WebhookPayload
 from broker.signal_parser import parse_signal
 from broker.settings import settings
 from broker.logger import get_logger
+from broker.notification import TelegramNotification
+from broker.api import get_router
 
 log = get_logger(__name__)
 
@@ -33,6 +35,9 @@ def create_app(publisher: SignalPublisher) -> FastAPI:
     version="2.0.0",
   )
 
+  # Include other APIs
+  app.include_router(get_router())
+
   # ── Helpers ────────────────────────────────────────────────────
 
   def _verify_token(token: str) -> None:
@@ -45,10 +50,6 @@ def create_app(publisher: SignalPublisher) -> FastAPI:
       return  # skipped, no need to raise exception
 
   # ── Routes ─────────────────────────────────────────────────────
-
-  @app.get("/health", tags=["system"])
-  async def health() -> Dict[str, str]:
-    return {"status": "ok"}
 
   @app.post("/webhook", status_code=status.HTTP_202_ACCEPTED, tags=["webhook"])
   async def receive_webhook(
@@ -100,6 +101,11 @@ def create_app(publisher: SignalPublisher) -> FastAPI:
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail=f"Signal logged but publish failed: {publish_error}",
       )
+
+    # 5. Send Telegram notification
+    if settings.TELEGRAM_ENABLED:
+      notification = TelegramNotification()
+      notification.send_message(str(payload))
 
     return {
       "status": "accepted",

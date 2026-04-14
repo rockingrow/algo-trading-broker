@@ -1,4 +1,5 @@
 name: Algo Trading Broker - LOCAL
+color: "#C77A0F"
 variables:
   - name: url
     value: http://localhost:8080

@@ -38,6 +38,11 @@ class Settings(BaseSettings):
   # ── Logging ──────────────────────────────────────────────────────
   LOG_LEVEL: str = "INFO"
 
+  # ── Telegram ─────────────────────────────────────────────────────
+  TELEGRAM_ENABLED: bool = False
+  TELEGRAM_BOT_TOKEN: str = ""
+  TELEGRAM_CHAT_ID: str = ""
+
   @property
   def postgres_dsn(self) -> str:
     return (
