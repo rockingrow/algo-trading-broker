@@ -1,5 +1,5 @@
 """
-broker/schemas/webhook.py — Pydantic models for validated TradingView webhooks.
+broker/schemas/webhook_schema.py — Pydantic models for validated TradingView webhooks.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ class TradingSignal(BaseModel):
 
   model_config = ConfigDict(use_enum_values=True)
 
-  signal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+  signal_id: str
   timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
   action: SignalActionEnum

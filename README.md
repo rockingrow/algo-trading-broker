@@ -36,16 +36,25 @@ graph TD
 algo-trading-broker/
 ├── broker/
 │   ├── main.py              # Application entry point
-│   ├── webhook.py           # FastAPI routes & logic
-│   ├── publisher.py         # ZeroMQ PUB implementation
+│   ├── app.py               # FastAPI application factory
 │   ├── settings.py          # Configuration (Pydantic Settings)
 │   ├── logger.py            # Structured logging setup
+│   ├── router.py        # Core router aggregation
+│   ├── apis/            # Web API & routing
+│   │   ├── api.py       # Health & system routes
+│   │   └── webhook.py   # TradingView webhook routes
+│   ├── helpers/             # Utility & mapping helpers
+│   │   └── signal_helper.py # Webhook to Signal mapping logic
+│   ├── services/            # Business & infrastructure services
+│   │   ├── notification_service.py  # Telegram notification service
+│   │   └── publisher_service.py     # ZeroMQ PUB implementation
 │   ├── db/
 │   │   ├── engine.py        # SQLAlchemy connection pool
 │   │   ├── models.py        # SQLAlchemy ORM models
 │   │   └── repository.py    # Database CRUD operations
 │   └── schemas/
-│       └── webhook.py       # Pydantic validation models
+│       ├── trade_schema.py   # Trade status enums
+│       └── webhook_schema.py # Pydantic validation models
 ├── bruno/                   # Bruno API client collections
 ├── examples/                # Example scripts and payloads
 ├── Makefile                 # Automation shortcuts (uv, Linters)
@@ -146,7 +155,7 @@ Receives signals from TradingView. Requires a valid `token` in the payload (if c
 
 ---
 
-## 🗄️ PostgreSQL Schema (`signal_log`)
+## 🗄️ PostgreSQL Schema (`signal_s`)
 
 | Column | Type | Description |
 |--------|------|-------------|

@@ -10,15 +10,9 @@ Startup sequence
 
 from __future__ import annotations
 
-import asyncio
-import signal
-import sys
-
 import uvicorn
 
-from broker.db.engine import close_db, init_db
-from broker.publisher import SignalPublisher
-from broker.webhook import create_app
+from broker.app import create_app
 from broker.settings import settings
 from broker.logger import get_logger
 
@@ -40,34 +34,14 @@ def main() -> None:
     settings.POSTGRES_DB,
   )
 
-  # ── 1. Initialise DB (synchronously via asyncio.run) ──────────
-  asyncio.run(init_db())
-
-  # ── 2. ZeroMQ PUB publisher ───────────────────────────────────
-  publisher = SignalPublisher()
-
-  # ── 3. Event Loop ─────────────────────────────────────────────
-  loop = asyncio.new_event_loop()
-
-  # ── 4. Graceful shutdown handler ──────────────────────────────
-  def _shutdown(sig, frame):  # noqa: ANN001
-    log.info("Shutdown signal received — cleaning up...")
-    publisher.close()
-    asyncio.run_coroutine_threadsafe(close_db(), loop)
-    sys.exit(0)
-
-  signal.signal(signal.SIGINT, _shutdown)
-  signal.signal(signal.SIGTERM, _shutdown)
-
-  # ── 5. Build FastAPI app + run uvicorn ────────────────────────
-  app = create_app(publisher)
+  # ── Start Webhook Server ────────────────────────
+  app = create_app()
 
   uvicorn.run(
     app,
     host=settings.WEBHOOK_HOST,
     port=settings.WEBHOOK_PORT,
     log_level=settings.LOG_LEVEL.lower(),
-    loop="none",  # we manage our own loop
   )
 
 

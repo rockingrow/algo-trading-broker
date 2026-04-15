@@ -1,5 +1,5 @@
 """
-broker/publisher.py — ZeroMQ PUB socket that broadcasts trading signals to all subscribers.
+broker/services/publisher_service.py — ZeroMQ PUB socket that broadcasts trading signals to all subscribers.
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import threading
 
 import zmq
 
-from broker.schemas.webhook import TradingSignal
+from broker.schemas.webhook_schema import TradingSignal
 from broker.settings import settings
 from broker.logger import get_logger
 

@@ -20,7 +20,7 @@ class Settings(BaseSettings):
   WEBHOOK_PORT: int = 8080
   WEBHOOK_SECRET: str = ""  # empty = no HMAC validation
 
-  # ── ZeroMQ Publisher (broker → subscribers) ──────────────────────
+  # ── ZeroMQ Publisher (broker → workers) ──────────────────────
   ZMQ_BROKER_HOST: str = "*"  # bind to all interfaces
   ZMQ_PUB_PORT: int = 5555
   ZMQ_TOPIC: str = "SIGNAL"

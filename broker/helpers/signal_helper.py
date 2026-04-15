@@ -1,16 +1,16 @@
 """
-broker/signal_parser.py — Converts raw WebhookPayload into a validated TradingSignal.
+broker/helpers/signal_helper.py — Converts raw WebhookPayload into a validated TradingSignal.
 """
 
 from __future__ import annotations
 
-from broker.schemas.webhook import TradingSignal, WebhookPayload
+from broker.schemas.webhook_schema import TradingSignal, WebhookPayload
 from broker.logger import get_logger
 
 log = get_logger(__name__)
 
 
-def parse_signal(payload: WebhookPayload) -> TradingSignal:
+def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   """
   Validate and normalise a raw TradingView webhook payload into a TradingSignal.
 
@@ -31,6 +31,7 @@ def parse_signal(payload: WebhookPayload) -> TradingSignal:
   # Action is already validated by Pydantic
 
   signal = TradingSignal(
+    signal_id=signal_id,
     action=action,
     symbol=symbol,
     price=position.price,

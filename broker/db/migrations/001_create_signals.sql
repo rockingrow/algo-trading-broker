@@ -1,5 +1,5 @@
--- Migration: Create SignalLog table
--- Description: Creates the signal_log table and associated Enum type for audit logging.
+-- Migration: Create Signal table
+-- Description: Creates the signals table and associated Enum type for audit logging.
 -- Run this after PostgreSQL is installed and started.
 
 -- 1. Create the action enum type for TradingView signals
@@ -10,8 +10,8 @@ BEGIN
     END IF;
 END $$;
 
--- 2. Create the signal_log table
-CREATE TABLE IF NOT EXISTS signal_log (
+-- 2. Create the signals table
+CREATE TABLE IF NOT EXISTS signals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS signal_log (
 );
 
 -- 3. Create indices for performance
-CREATE INDEX IF NOT EXISTS idx_signal_log_symbol ON signal_log (symbol);
-CREATE INDEX IF NOT EXISTS idx_signal_log_timestamp ON signal_log ("timestamp");
+CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals (symbol);
+CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals ("timestamp");
 
 -- 4. Set up auto-update for updatedAt column
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -49,9 +49,9 @@ END;
 $$ language 'plpgsql';
 
 -- Drop trigger if exists to avoid errors on re-run
-DROP TRIGGER IF EXISTS trg_update_signal_log_updated_at ON signal_log;
+DROP TRIGGER IF EXISTS trg_update_signals_updated_at ON signals;
 
-CREATE TRIGGER trg_update_signal_log_updated_at
-    BEFORE UPDATE ON signal_log
+CREATE TRIGGER trg_update_signals_updated_at
+    BEFORE UPDATE ON signals
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();

@@ -8,25 +8,29 @@ callers (webhook.py, trade_listener.py) stay clean.
 
 from __future__ import annotations
 
+import uuid
+
 from broker.db.engine import get_session
-from broker.db.models import SignalLog
-from broker.schemas.webhook import WebhookPayload
+from broker.db.models import Signal
+from broker.schemas.webhook_schema import WebhookPayload
 from broker.logger import get_logger
 
 log = get_logger(__name__)
 
 
-async def log_signal(payload: WebhookPayload) -> None:
+async def log_signal(payload: WebhookPayload) -> str | None:
   """
-  Persist a received TradingView webhook signal to the signal_log table.
+  Persist a received TradingView webhook signal to the signals table.
 
-  Parameters
-  ----------
-  payload : the validated WebhookPayload object
+  Returns
+  -------
+  str | None
+      The UUID of the inserted row, or None if the insert failed.
   """
   pos = payload.position
-  row = SignalLog(
-    token=payload.token,
+  new_id = uuid.uuid4()
+  row = Signal(
+    id=new_id,
     symbol=payload.symbol,
     timeframe=payload.timeframe,
     timestamp=payload.timestamp,
@@ -43,6 +47,8 @@ async def log_signal(payload: WebhookPayload) -> None:
   try:
     async with get_session() as session:
       session.add(row)
-    log.debug("signal_log written for symbol=%s", payload.symbol)
+    log.debug("signals written for symbol=%s id=%s", payload.symbol, str(new_id))
+    return str(new_id)
   except Exception as exc:
-    log.error("Failed to write signal_log: %s", exc)
+    log.error("Failed to write signals: %s", exc)
+    return None
