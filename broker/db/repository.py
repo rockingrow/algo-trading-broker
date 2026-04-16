@@ -41,6 +41,9 @@ async def log_signal(payload: WebhookPayload) -> str | None:
     tp1=pos.tp1,
     tp2=pos.tp2,
     is_running=pos.is_running if pos.is_running is not None else False,
+    risk_percent=payload.inputs.risk_percent
+    if payload.inputs.risk_percent is not None
+    else 0.0,
     indicators=payload.indicators.model_dump(),
     inputs=payload.inputs.model_dump(),
   )

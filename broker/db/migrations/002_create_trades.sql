@@ -1,7 +1,7 @@
--- Migration: Create Trades table
--- Description: Creates the trades table and associated Enum type for trade statuses.
+-- Migration: Create trades table
+-- Description: Creates the trades table and the tradestatusenum type.
 
--- 1. Create the status enum type for Trade
+-- 1. Create the tradestatusenum type
 DO $$ 
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tradestatusenum') THEN
@@ -15,21 +15,16 @@ CREATE TABLE IF NOT EXISTS trades (
     "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     
-    -- Foreign key to signals
     signal_id UUID NOT NULL,
-    
-    -- Trading Account info
     account_id VARCHAR(50) NOT NULL,
     account_leverage INTEGER NOT NULL,
     account_balance_init DOUBLE PRECISION,
     account_balance DOUBLE PRECISION,
     
-    -- Broker-specific fields
     ticket DOUBLE PRECISION,
     comment VARCHAR(255),
     magic VARCHAR(50) NOT NULL,
     
-    -- Trade details
     symbol VARCHAR(50) NOT NULL,
     action signalactionenum NOT NULL,
     price DOUBLE PRECISION NOT NULL,
@@ -38,23 +33,17 @@ CREATE TABLE IF NOT EXISTS trades (
     tp1 DOUBLE PRECISION,
     tp2 DOUBLE PRECISION,
     is_running BOOLEAN NOT NULL DEFAULT FALSE,
-    
-    -- Status
-    status tradestatusenum NOT NULL
-    );
+    status tradestatusenum NOT NULL,
+    risk_percent DOUBLE PRECISION NOT NULL DEFAULT 0.0
+);
 
--- 3. Create indices for performance
+-- 3. Create indices for trades
 CREATE INDEX IF NOT EXISTS idx_trades_signal_id ON trades (signal_id);
 CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades (account_id);
 CREATE INDEX IF NOT EXISTS idx_trades_magic ON trades (magic);
-CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
 
--- 4. Set up auto-update for updatedAt column
--- (Function update_updated_at_column() should already exist from 001_create_signals.sql)
-
--- Drop trigger if exists to avoid errors on re-run
+-- 4. Set up auto-update for updatedAt column on trades
 DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;
-
 CREATE TRIGGER trg_update_trades_updated_at
     BEFORE UPDATE ON trades
     FOR EACH ROW

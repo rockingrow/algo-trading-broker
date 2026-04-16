@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS signals (
     tp1 DOUBLE PRECISION,
     tp2 DOUBLE PRECISION,
     is_running BOOLEAN NOT NULL DEFAULT FALSE,
+    risk_percent DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     
     -- Complex objects stored as JSONB
     indicators JSONB NOT NULL,

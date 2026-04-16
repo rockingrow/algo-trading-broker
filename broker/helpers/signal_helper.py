@@ -19,26 +19,23 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   position = payload.position
   action = position.action
 
-  # The incoming action is already a SignalAction enum due to Pydantic validation
-  # in WebhookPayload.
-
   # Normalise symbol (e.g. OANDA:XAUUSD -> XAUUSD)
   symbol = payload.symbol.split(":")[-1].upper().strip()
 
-  # Use the first TP as the main target if available
-  tp = position.tp1 or position.tp2
-
   # Action is already validated by Pydantic
-
   signal = TradingSignal(
     signal_id=signal_id,
     action=action,
     symbol=symbol,
     price=position.price,
-    volume=position.quantity,
+    quantity=position.quantity,
     sl=position.sl,
-    tp=tp,
-    comment="TV_Signal",
+    tp1=position.tp1,
+    tp2=position.tp2,
+    is_running=position.is_running if position.is_running is not None else False,
+    risk_percent=payload.inputs.risk_percent
+    if payload.inputs.risk_percent is not None
+    else 0.0,
   )
 
   log.debug("Parsed signal: %s", signal.model_dump_json())

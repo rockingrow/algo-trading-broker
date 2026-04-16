@@ -98,18 +98,13 @@ class TradingSignal(BaseModel):
 
   action: SignalActionEnum
   symbol: str = Field(..., description="Instrument symbol, e.g. XAUUSD")
-
   price: float
-  volume: float
+  quantity: float
   sl: Optional[float] = None
-  tp: Optional[float] = None
-
-  # Fields used by DB logging
-  ticket: Optional[int] = None
-
-  # Meta info
-  comment: Optional[str] = "TV_Signal"
-  magic: str = Field(default_factory=lambda: str(uuid.uuid4()))
+  tp1: Optional[float] = None
+  tp2: Optional[float] = None
+  is_running: Optional[bool] = None
+  risk_percent: float
 
 
 class BrokerStatus(BaseModel):
