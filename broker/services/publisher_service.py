@@ -23,9 +23,11 @@ import threading
 
 import zmq
 import zmq.auth
+import zmq.utils.monitor
 from zmq.auth.thread import ThreadAuthenticator
 
 from broker.schemas.publisher_schema import PublishTopicEnum, TradingSignal
+from broker.services.notification_service import TelegramNotification
 from broker.settings import settings
 from broker.logger import get_logger
 
@@ -54,6 +56,7 @@ class SignalPublisher:
     self._lock = threading.Lock()
     self._context = zmq.Context()
     self._auth: ThreadAuthenticator | None = None
+    self._monitor_stop = threading.Event()
 
     self._socket = self._context.socket(zmq.PUB)
 
@@ -68,7 +71,55 @@ class SignalPublisher:
       settings.ZMQ_CURVE_ENABLED,
     )
 
+    # Start background thread to detect new subscriber connections
+    self._start_monitor()
+
   # ── Private helpers ───────────────────────────────────────────────
+
+  def _start_monitor(self) -> None:
+    """Spin up a daemon thread that watches for new worker connections."""
+    self._socket.monitor(
+      "inproc://publisher-monitor",
+      zmq.EVENT_ACCEPTED | zmq.EVENT_HANDSHAKE_SUCCEEDED | zmq.EVENT_HANDSHAKE_FAILED_NO_DETAIL,
+    )
+    monitor_sock = self._context.socket(zmq.PAIR)
+    monitor_sock.connect("inproc://publisher-monitor")
+
+    def _watch() -> None:
+      notification = TelegramNotification()
+      while not self._monitor_stop.is_set():
+        if monitor_sock.poll(timeout=500):  # 500 ms tick
+          try:
+            event_data = zmq.utils.monitor.recv_monitor_message(monitor_sock)
+            event = event_data["event"]
+            endpoint = event_data.get("endpoint", b"").decode(errors="replace")
+
+            if event == zmq.EVENT_ACCEPTED:
+              log.info("ZMQ worker connected: %s", endpoint)
+              # Only notify on accept if CURVE is disabled (to avoid double notification)
+              if not settings.ZMQ_CURVE_ENABLED:
+                notification.send_message(
+                  f"🔌 <b>ZMQ Worker Connected</b>\nEndpoint: <code>{endpoint}</code>"
+                )
+
+            elif event == zmq.EVENT_HANDSHAKE_SUCCEEDED:
+              log.info("ZMQ worker CURVE handshake succeeded: %s", endpoint)
+              notification.send_message(
+                f"🔐 <b>ZMQ Worker Authenticated (CURVE)</b>\nEndpoint: <code>{endpoint}</code>"
+              )
+
+            elif event == zmq.EVENT_HANDSHAKE_FAILED_NO_DETAIL:
+              log.warning("ZMQ worker CURVE handshake failed: %s", endpoint)
+              notification.send_message(
+                f"⚠️ <b>ZMQ Worker Auth Failed (CURVE)</b>\nEndpoint: <code>{endpoint}</code>"
+              )
+          except Exception as exc:
+            log.warning("ZMQ monitor error: %s", exc)
+      monitor_sock.close()
+
+    t = threading.Thread(target=_watch, name="zmq-monitor", daemon=True)
+    t.start()
+    self._monitor_thread = t
 
   def _setup_curve(self) -> None:
     """Configure CURVE server-side encryption & authentication."""
@@ -119,6 +170,11 @@ class SignalPublisher:
 
   def close(self) -> None:
     """Gracefully close socket, authenticator, and context."""
+    # Signal the monitor thread to stop and wait briefly for it
+    self._monitor_stop.set()
+    if hasattr(self, "_monitor_thread"):
+      self._monitor_thread.join(timeout=2)
+    self._socket.disable_monitor()
     self._socket.close()
     if self._auth is not None:
       self._auth.stop()

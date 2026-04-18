@@ -1,10 +1,12 @@
 import json
+import os
 import time
 import zmq
 from datetime import datetime, timezone
 
-# Simulation settings
-ZMQ_ADDR = "tcp://127.0.0.1:5555"
+# Simulation settings — reads ZMQ_PUB_PORT from env to stay in sync with broker/settings.py
+_port = os.environ.get("ZMQ_PUB_PORT", "5555")
+ZMQ_ADDR = f"tcp://127.0.0.1:{_port}"
 TOPIC = "SIGNAL"
 
 def send_signal(socket, action, symbol="XAUUSD", price=2350.0, quantity=0.1, sl=None, tp1=None, tp2=None, is_running=False):
