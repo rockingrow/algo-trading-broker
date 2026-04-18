@@ -33,8 +33,9 @@ CREATE TABLE IF NOT EXISTS trades (
     tp1 DOUBLE PRECISION,
     tp2 DOUBLE PRECISION,
     is_running BOOLEAN NOT NULL DEFAULT FALSE,
-    status tradestatusenum NOT NULL,
     risk_percent DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    status tradestatusenum NOT NULL,
+    reject_reason VARCHAR(255)
 );
 
 -- 3. Create indices for trades

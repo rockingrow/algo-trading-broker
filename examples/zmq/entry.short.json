@@ -1,0 +1,12 @@
+{
+  "signal_id": "sig_123456789_short",
+  "timestamp": "2026-04-18T21:55:00Z",
+  "action": "SHORT",
+  "symbol": "XAUUSD",
+  "price": 2350.5,
+  "quantity": 0.1,
+  "sl": 2360.0,
+  "tp1": 2330.0,
+  "tp2": 2310.0,
+  "risk_percent": 1.0
+}

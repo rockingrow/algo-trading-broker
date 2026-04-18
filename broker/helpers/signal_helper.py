@@ -4,8 +4,10 @@ broker/helpers/signal_helper.py — Converts raw WebhookPayload into a validated
 
 from __future__ import annotations
 
-from broker.schemas.webhook_schema import TradingSignal, WebhookPayload
+from broker.schemas.webhook_schema import WebhookPayload
+from broker.schemas.publisher_schema import TradingSignal
 from broker.logger import get_logger
+from broker.schemas.core import SignalActionEnum
 
 log = get_logger(__name__)
 
@@ -40,3 +42,22 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
 
   log.debug("Parsed signal: %s", signal.model_dump_json())
   return signal
+
+def action_to_emoji(action: SignalActionEnum) -> str:
+  """
+  Convert a SignalActionEnum to a Telegram emoji.
+  """
+  if action == SignalActionEnum.LONG:
+    return "🟢"
+  elif action == SignalActionEnum.SHORT:
+    return "🔴"
+  elif action == SignalActionEnum.TP1:
+    return "🎯"
+  elif action == SignalActionEnum.TP2:
+    return "🚀"
+  elif action == SignalActionEnum.R_SL:
+    return "🛡️"
+  elif action == SignalActionEnum.SL:
+    return "❌"
+  else:
+    return "📡"

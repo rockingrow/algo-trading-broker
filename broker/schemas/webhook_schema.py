@@ -4,21 +4,12 @@ broker/schemas/webhook_schema.py — Pydantic models for validated TradingView w
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-
-class SignalActionEnum(str, Enum):
-  LONG = "LONG"
-  SHORT = "SHORT"
-  TP1 = "TP1"
-  TP2 = "TP2"
-  R_SL = "R_SL"
-  SL = "SL"
+from broker.schemas.core import SignalActionEnum
 
 
 class PositionSchema(BaseModel):
@@ -86,31 +77,3 @@ class WebhookPayload(BaseModel):
   position: PositionSchema
   indicators: IndicatorsSchema
   inputs: InputsSchema
-
-
-class TradingSignal(BaseModel):
-  """Normalised signal produced from a TradingView webhook payload."""
-
-  model_config = ConfigDict(use_enum_values=True)
-
-  signal_id: str
-  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-  action: SignalActionEnum
-  symbol: str = Field(..., description="Instrument symbol, e.g. XAUUSD")
-  price: float
-  quantity: float
-  sl: Optional[float] = None
-  tp1: Optional[float] = None
-  tp2: Optional[float] = None
-  is_running: Optional[bool] = None
-  risk_percent: float
-
-
-class BrokerStatus(BaseModel):
-  """Response from /status endpoint."""
-
-  uptime_seconds: float
-  signals_received: int
-  signals_published: int
-  last_signal: Optional[TradingSignal] = None

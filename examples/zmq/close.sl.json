@@ -1,0 +1,8 @@
+{
+  "signal_id": "sig_123456789_sl",
+  "timestamp": "2026-04-18T21:55:00Z",
+  "action": "SL",
+  "symbol": "XAUUSD",
+  "price": 2340.0,
+  "quantity": 0.1
+}

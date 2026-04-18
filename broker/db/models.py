@@ -13,7 +13,7 @@ import uuid
 
 from sqlalchemy import Boolean, DateTime, Enum, Float, String, func, Integer
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from broker.schemas.webhook_schema import SignalActionEnum
+from broker.schemas.core import SignalActionEnum
 from broker.schemas.trade_schema import TradeStatusEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -109,6 +109,7 @@ class Trade(Base):
 
   # Status
   status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)
+  reject_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
   def __repr__(self) -> str:
     return (

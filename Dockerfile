@@ -25,10 +25,15 @@ RUN uv sync --no-dev --no-install-project
 # Copy application source
 COPY README.md ./
 COPY broker/ broker/
+COPY scripts/ scripts/
+
+# Make entrypoint executable
+RUN chmod +x /app/scripts/docker-entrypoint.sh
 
 # Install the project itself
 RUN uv sync --no-dev
 
 EXPOSE 8080 5555 5556
 
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["uv", "run", "python", "-m", "broker.main"]

@@ -57,6 +57,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-algo_trading}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algotrading_broker_db_password}
     volumes:
+      - .env:/app/.env
       - ./logs:/app/logs
     networks:
       - trading_net

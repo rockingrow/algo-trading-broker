@@ -1,0 +1,8 @@
+{
+  "signal_id": "sig_123456789_tp2",
+  "timestamp": "2026-04-18T21:55:00Z",
+  "action": "TP2",
+  "symbol": "XAUUSD",
+  "price": 2390.0,
+  "quantity": 0.05
+}

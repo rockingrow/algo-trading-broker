@@ -3,3 +3,5 @@ color: "#C77A0F"
 variables:
   - name: url
     value: http://localhost:8080
+  - secret: true
+    name: webhook_token

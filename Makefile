@@ -1,4 +1,4 @@
-.PHONY: help install install-dev update lock fix format lint check run
+.PHONY: help install install-dev update lock fix format lint check run gen-zmq-keys
 
 help:
 	@echo "Available commands:"
@@ -12,6 +12,8 @@ help:
 	@echo "  make check       - Alias for lint"
 	@echo "  make run         - Run the broker locally"
 	@echo "  make dev         - Run docker compose locally with hot module reload on code change"
+	@echo "  make simulate-zmq - Run ZMQ signal simulator (E2E)"
+	@echo "  make gen-zmq-keys - Generate ZMQ CURVE keypair using Docker"
 
 install:
 	uv sync --no-dev
@@ -50,3 +52,18 @@ start:
 
 stop:
 	docker compose down
+
+logs:
+	docker logs algo_trading_broker --tail 500
+
+logs-follow:
+	docker logs algo_trading_broker --follow
+
+simulate-zmq:
+	uv run python e2e/simulate_signals.py
+
+simulate-security:
+	uv run python e2e/simulate_security.py
+
+gen-zmq-keys:
+	docker compose run --rm -v ./scripts:/app/scripts broker uv run python scripts/generate_curve_keypair.py

@@ -23,7 +23,13 @@ class Settings(BaseSettings):
   # ── ZeroMQ Publisher (broker → workers) ──────────────────────
   ZMQ_BROKER_HOST: str = "*"  # bind to all interfaces
   ZMQ_PUB_PORT: int = 5555
-  ZMQ_TOPIC: str = "SIGNAL"
+
+  # ── ZeroMQ CURVE Authentication ──────────────────────────────
+  # Generate a keypair with: python scripts/generate_curve_keypair.py
+  ZMQ_CURVE_ENABLED: bool = False
+  # Z85-encoded 40-character strings (output of zmq.curve_keypair())
+  ZMQ_CURVE_SERVER_PUBLIC_KEY: str = ""  # share with every subscriber
+  ZMQ_CURVE_SERVER_SECRET_KEY: str = ""  # keep on broker ONLY
 
   # ── PostgreSQL ───────────────────────────────────────────────────
   POSTGRES_HOST: str = "localhost"

@@ -9,10 +9,20 @@ from broker.router import get_core_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+  from broker.services.notification_service import TelegramNotification
+
   await init_db()
   publisher = SignalPublisher()
   app.state.publisher = publisher
+
+  # Notification: Startup
+  TelegramNotification().send_message("🟢 Broker Node Started")
+
   yield
+
+  # Notification: Shutdown
+  TelegramNotification().send_message("🛑 Broker Node Stopped")
+
   publisher.close()
   await close_db()
 
