@@ -1,0 +1,39 @@
+info:
+  name: Create Trade
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{url}}/trades"
+  body:
+    type: json
+    data: |-
+      {
+        "signal_id": "550e8400-e29b-41d4-a716-446655440000",
+        "account_id": "12345678",
+        "account_leverage": 100,
+        "account_balance_init": 10000.00,
+        "account_balance": 10000.00,
+        "ticket": 123456789,
+        "comment": "EA_v1 LONG XAUUSD",
+        "magic": "20240101",
+        "symbol": "OANDA:XAUUSD",
+        "action": "LONG",
+        "price": 2334.50,
+        "quantity": 0.10,
+        "sl": 2329.50,
+        "tp1": 2340.00,
+        "tp2": 2345.00,
+        "is_running": true,
+        "risk_percent": 3.0,
+        "status": "OPENED",
+        "reject_reason": null
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

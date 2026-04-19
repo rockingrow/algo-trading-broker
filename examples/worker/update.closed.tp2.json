@@ -1,0 +1,7 @@
+{
+  "account_balance": 10300.00,
+  "price": 2345.00,
+  "quantity": 0.00,
+  "is_running": false,
+  "status": "CLOSED"
+}

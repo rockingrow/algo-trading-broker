@@ -6,7 +6,7 @@ A high-performance, decentralized **trading signal broker** built with FastAPI a
 
 - **Webhook Hub**: Receives and validates TradingView JSON alerts.
 - **Persistence**: Logs every signal to **PostgreSQL** for auditing and analytics.
-- **Distribution**: Fans out signals via **ZeroMQ PUB** to multiple subscriber nodes.
+- **Distribution**: Securely fan out signals via **ZeroMQ PUB** with **CURVE** (Elliptic-Curve) encryption and authentication.
 - **Developer Friendly**: Includes Makefile, Bruno API collections, and Ruff for linting.
 
 ---
@@ -19,13 +19,13 @@ graph TD
     subgraph "Broker Node (This Repo)"
         Broker[FastAPI Webhook Server]
         DB[(PostgreSQL)]
-        ZMQ[ZeroMQ PUB :5555]
+        ZMQ["ZeroMQ PUB :5555 (CURVE)"]
         Broker -- "Log Signal" --> DB
         Broker -- "Publish" --> ZMQ
     end
-    ZMQ -- "TCP Broadcast" --> VPS1[VPS Node #1]
-    ZMQ -- "TCP Broadcast" --> VPS2[VPS Node #2]
-    ZMQ -- "TCP Broadcast" --> VPSN[VPS Node #N]
+    ZMQ -- "🔐 Encrypted Stream" --> VPS1[VPS Node #1]
+    ZMQ -- "🔐 Encrypted Stream" --> VPS2[VPS Node #2]
+    ZMQ -- "🔐 Encrypted Stream" --> VPSN[VPS Node #N]
 ```
 
 ---
@@ -35,28 +35,9 @@ graph TD
 ```text
 algo-trading-broker/
 ├── broker/
-│   ├── main.py              # Application entry point
-│   ├── app.py               # FastAPI application factory
-│   ├── settings.py          # Configuration (Pydantic Settings)
-│   ├── logger.py            # Structured logging setup
-│   ├── router.py        # Core router aggregation
-│   ├── apis/            # Web API & routing
-│   │   ├── api.py       # Health & system routes
-│   │   └── webhook.py   # TradingView webhook routes
-│   ├── helpers/             # Utility & mapping helpers
-│   │   └── signal_helper.py # Webhook to Signal mapping logic
-│   ├── services/            # Business & infrastructure services
-│   │   ├── notification_service.py  # Telegram notification service
-│   │   └── publisher_service.py     # ZeroMQ PUB implementation
-│   ├── db/
-│   │   ├── engine.py        # SQLAlchemy connection pool
-│   │   ├── models.py        # SQLAlchemy ORM models
-│   │   └── repository.py    # Database CRUD operations
-│   └── schemas/
-│       ├── trade_schema.py   # Trade status enums
-│       └── webhook_schema.py # Pydantic validation models
 ├── bruno/                   # Bruno API client collections
 ├── examples/                # Example scripts and payloads
+├── scripts/                 # Utility scripts (Key generation, etc.)
 ├── Makefile                 # Automation shortcuts (uv, Linters)
 ├── Dockerfile               # Production container definition
 ├── docker-compose.yml       # Infrastructure (PostgreSQL)
@@ -65,14 +46,49 @@ algo-trading-broker/
 
 ---
 
+## 🔐 ZMQ CURVE Security
+
+By default, the ZeroMQ publisher is hardened with **CURVE** (Elliptic-Curve Diffie-Hellman) encryption. This ensures:
+
+- **Encryption**: All traffic between the broker and subscriber nodes is encrypted end-to-end.
+- **Authentication**: Only clients that possess the server's public key can subscribe.
+
+### Generating Keys
+
+If you are setting up the broker for the first time, you must generate a CURVE keypair:
+
+```bash
+# Generate a new Z85-encoded keypair
+make gen-zmq-keys
+```
+
+The script will output a **Public Key** and a **Secret Key**.
+
+- The **Secret Key** must be kept private on the broker node (stored in `.env`).
+- The **Public Key** is shared with all subscriber nodes so they can connect and authenticate.
+
+### Configuration
+
+Update your `.env` with the generated keys:
+
+```env
+ZMQ_CURVE_ENABLED=true
+ZMQ_CURVE_SERVER_PUBLIC_KEY="your-server-public-key"
+ZMQ_CURVE_SERVER_SECRET_KEY="your-server-secret-key"
+```
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
+
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/)
 - Docker & Docker Compose
 
 ### 2. Installation
+
 ```bash
 # Clone the repository
 git clone <repository-url>
@@ -86,12 +102,14 @@ make install-dev
 ```
 
 ### 3. Start Infrastructure
+
 ```bash
 # Start PostgreSQL via Docker
 docker compose up -d
 ```
 
 ### 4. Run the Broker
+
 ```bash
 # Run locally
 make run
@@ -106,14 +124,14 @@ docker compose up --build -d
 
 We use `make` to simplify common tasks:
 
-| Command | Description |
-|---------|-------------|
-| `make install` | Install production dependencies |
+| Command            | Description                                  |
+| ------------------ | -------------------------------------------- |
+| `make install`     | Install production dependencies              |
 | `make install-dev` | Install all dependencies including dev tools |
-| `make run` | Run the broker locally |
-| `make format` | Format code with Ruff |
-| `make lint` | Run Ruff check |
-| `make fix` | Automatically fix linting issues |
+| `make run`         | Run the broker locally                       |
+| `make format`      | Format code with Ruff                        |
+| `make lint`        | Run Ruff check                               |
+| `make fix`         | Automatically fix linting issues             |
 
 ---
 
@@ -124,6 +142,7 @@ We use `make` to simplify common tasks:
 Receives signals from TradingView. Requires a valid `token` in the payload (if configured).
 
 **Example Payload:**
+
 ```json
 {
   "token": "your_secure_token",
@@ -132,11 +151,11 @@ Receives signals from TradingView. Requires a valid `token` in the payload (if c
   "timestamp": "2024-03-20T10:00:00Z",
   "position": {
     "action": "LONG",
-    "price": 1900.50,
+    "price": 1900.5,
     "quantity": 0.1,
-    "sl": 1890.00,
-    "tp1": 1920.00,
-    "tp2": 1950.00,
+    "sl": 1890.0,
+    "tp1": 1920.0,
+    "tp2": 1950.0,
     "is_running": true
   },
   "indicators": {
@@ -157,20 +176,20 @@ Receives signals from TradingView. Requires a valid `token` in the payload (if c
 
 ## 🗄️ PostgreSQL Schema (`signal_s`)
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | UUID (PK) | Unique record identifier |
-| `symbol` | String(50) | Trading symbol (e.g., XAUUSD) |
-| `timeframe` | String(20) | Chart timeframe (e.g., M15) |
-| `timestamp` | DateTime | Signal generation time from TV |
-| `action` | Enum | LONG, SHORT, TP1, TP2, R_SL, SL |
-| `price` | Float | Entry/Trigger price |
-| `quantity` | Float | Lot size / Volume |
-| `sl`, `tp1`, `tp2` | Float | Exit prices |
-| `is_running`| Boolean | Strategy state |
-| `indicators` | JSONB | Full technical indicator state |
-| `inputs` | JSONB | Strategy inputs / settings |
-| `createdAt` | DateTime | Broker log insertion time |
+| Column             | Type       | Description                     |
+| ------------------ | ---------- | ------------------------------- |
+| `id`               | UUID (PK)  | Unique record identifier        |
+| `symbol`           | String(50) | Trading symbol (e.g., XAUUSD)   |
+| `timeframe`        | String(20) | Chart timeframe (e.g., M15)     |
+| `timestamp`        | DateTime   | Signal generation time from TV  |
+| `action`           | Enum       | LONG, SHORT, TP1, TP2, R_SL, SL |
+| `price`            | Float      | Entry/Trigger price             |
+| `quantity`         | Float      | Lot size / Volume               |
+| `sl`, `tp1`, `tp2` | Float      | Exit prices                     |
+| `is_running`       | Boolean    | Strategy state                  |
+| `indicators`       | JSONB      | Full technical indicator state  |
+| `inputs`           | JSONB      | Strategy inputs / settings      |
+| `createdAt`        | DateTime   | Broker log insertion time       |
 
 ---
 
