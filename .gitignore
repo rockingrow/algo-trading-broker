@@ -47,3 +47,5 @@ dist/
 
 # ====== Dependency Management ======
 poetry.toml
+
+.claude/

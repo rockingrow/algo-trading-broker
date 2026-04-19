@@ -24,12 +24,28 @@ services:
       - trading_net
 
   # ─────────────────────────────────────────────────────────────────
-  # BROKER — webhook server + ZMQ PUB + DB logging
+  # NATS — message broker (broker → workers)
+  # ─────────────────────────────────────────────────────────────────
+  nats:
+    image: nats:2.10-alpine
+    container_name: algo_trading_nats
+    restart: always
+    ports:
+      - "${NATS_PORT:-4222}:${NATS_PORT:-4222}"                       # client connections (workers connect from outside)
+      - "${NATS_MONITOR_PORT:-8222}:${NATS_MONITOR_PORT:-8222}"       # HTTP monitoring dashboard
+    command: ["--port", "${NATS_PORT:-4222}", "--auth", "${NATS_TOKEN:-changeme}", "--http_port", "${NATS_MONITOR_PORT:-8222}"]
+    networks:
+      - trading_net
+
+  # ─────────────────────────────────────────────────────────────────
+  # BROKER — webhook server + NATS publisher + DB logging
   # ─────────────────────────────────────────────────────────────────
   broker:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        WEBHOOK_PORT: "${WEBHOOK_PORT:-8080}"
     develop:
       watch:
         - action: sync+restart
@@ -45,13 +61,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      nats:
+        condition: service_started
     ports:
-      - "${WEBHOOK_PORT:-8080}:8080"      # TradingView webhook
-      - "${ZMQ_PUB_PORT:-5555}:5555"      # ZMQ PUB  (broker → subscribers)
+      - "${WEBHOOK_PORT:-8080}:${WEBHOOK_PORT:-8080}"      # TradingView webhook
     env_file:
       - .env
     environment:
-      ZMQ_BROKER_HOST: "*"                # bind to all interfaces inside container
+      WEBHOOK_HOST: "0.0.0.0"
+      WEBHOOK_PORT: "${WEBHOOK_PORT:-8080}"                # use unprivileged port for Windows compatibility
+      NATS_HOST: "nats"   # Docker service name, overrides NATS_HOST=localhost from .env
       POSTGRES_HOST: postgres             # service name resolves via docker network
       POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
       POSTGRES_USER: ${POSTGRES_USER:-algo_trading}

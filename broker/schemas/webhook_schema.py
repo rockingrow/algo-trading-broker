@@ -14,8 +14,8 @@ from broker.schemas.core import SignalActionEnum
 
 class PositionSchema(BaseModel):
   action: SignalActionEnum
-  price: float
-  quantity: float
+  price: Optional[float] = None
+  quantity: Optional[float] = None
   sl: Optional[float] = None
   tp1: Optional[float] = None
   tp2: Optional[float] = None
@@ -70,10 +70,11 @@ class InputsSchema(BaseModel):
 class WebhookPayload(BaseModel):
   """Raw TradingView alert JSON payload."""
 
-  token: str
+  strategy: str
   symbol: str
   timeframe: str
   timestamp: datetime
   position: PositionSchema
-  indicators: IndicatorsSchema
-  inputs: InputsSchema
+  indicators: Optional[IndicatorsSchema] = None
+  inputs: Optional[InputsSchema] = None
+  token: str

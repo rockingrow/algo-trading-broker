@@ -4,7 +4,7 @@ broker/settings.py — Centralised settings loaded from .env / environment varia
 
 from __future__ import annotations
 
-from typing import Dict
+from urllib.parse import quote
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,19 +17,20 @@ class Settings(BaseSettings):
 
   # ── Webhook ──────────────────────────────────────────────────────
   WEBHOOK_HOST: str = "0.0.0.0"
-  WEBHOOK_PORT: int = 8080
+  WEBHOOK_PORT: int = 80
   WEBHOOK_SECRET: str = ""  # empty = no HMAC validation
 
-  # ── ZeroMQ Publisher (broker → workers) ──────────────────────
-  ZMQ_BROKER_HOST: str = "*"  # bind to all interfaces
-  ZMQ_PUB_PORT: int = 5555
+  # ── Broker API ───────────────────────────────────────────────────
+  BROKER_API_KEY: str
 
-  # ── ZeroMQ CURVE Authentication ──────────────────────────────
-  # Generate a keypair with: python scripts/generate_curve_keypair.py
-  ZMQ_CURVE_ENABLED: bool = True
-  # Z85-encoded 40-character strings (output of zmq.curve_keypair())
-  ZMQ_CURVE_SERVER_PUBLIC_KEY: str = ""  # share with every subscriber
-  ZMQ_CURVE_SERVER_SECRET_KEY: str = ""  # keep on broker ONLY
+  # ── NATS Publisher (broker → workers) ────────────────────────
+  NATS_HOST: str = "localhost"   # overridden to "nats" inside Docker
+  NATS_PORT: int = 4222
+  NATS_TOKEN: str = ""           # token auth; leave blank = no auth
+
+  @property
+  def nats_url(self) -> str:
+    return f"nats://{self.NATS_HOST}:{self.NATS_PORT}"
 
   # ── PostgreSQL ───────────────────────────────────────────────────
   POSTGRES_HOST: str = "localhost"
@@ -38,34 +39,21 @@ class Settings(BaseSettings):
   POSTGRES_USER: str = "algo_trading"
   POSTGRES_PASSWORD: str = "algotrading_broker_db_password"
 
-  # Instrument map "UNIVERSAL=BROKER,..." → parsed to dict
-  INSTRUMENT_MAP: str = "EURUSD=EURUSD,XAUUSD=XAUUSD,BTCUSD=BTCUSD"
-
   # ── Logging ──────────────────────────────────────────────────────
   LOG_LEVEL: str = "INFO"
 
   # ── Telegram ─────────────────────────────────────────────────────
   TELEGRAM_ENABLED: bool = False
   TELEGRAM_BOT_TOKEN: str = ""
-  TELEGRAM_CHAT_ID: str = ""
+  TELEGRAM_CHAT_ID: str = ""          # management: NATS events, service start/stop
+  TELEGRAM_CHAT_CHANNEL_ID: str = ""  # signals: NATS published trades
 
   @property
   def postgres_dsn(self) -> str:
     return (
-      f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+      f"postgresql+asyncpg://{quote(self.POSTGRES_USER, safe='')}:{quote(self.POSTGRES_PASSWORD, safe='')}"
       f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
     )
-
-  @property
-  def instrument_map_dict(self) -> Dict[str, str]:
-    """Parse INSTRUMENT_MAP env string into {universal: broker} dict."""
-    result: Dict[str, str] = {}
-    for pair in self.INSTRUMENT_MAP.split(","):
-      pair = pair.strip()
-      if "=" in pair:
-        k, v = pair.split("=", 1)
-        result[k.strip().upper()] = v.strip()
-    return result
 
 
 settings = Settings()

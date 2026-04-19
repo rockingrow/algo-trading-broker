@@ -1,0 +1,32 @@
+info:
+  name: Worker - Update Closed SL
+  type: http
+  seq: 4
+
+http:
+  method: PATCH
+  url: "{{url}}/trades/12345678/123456789"
+  body:
+    type: json
+    data: |-
+      {
+        "account_id": "12345678",
+        "account_leverage": 100,
+        "account_balance_init": 10000.00,
+        "account_balance": 10000.00,
+        "strategy": "MT5_GOLD_M5_V1",
+        "symbol": "XAUUSD",
+        "price": 2329.50,
+        "quantity": 0.00,
+        "sl": null,
+        "is_running": false,
+        "status": "CLOSED",
+        "reject_reason": null
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

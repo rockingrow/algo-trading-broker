@@ -20,6 +20,7 @@ class TradingSignal(BaseModel):
   signal_id: str
   timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+  strategy: str
   action: SignalActionEnum
   symbol: str = Field(..., description="Instrument symbol, e.g. XAUUSD")
   price: float

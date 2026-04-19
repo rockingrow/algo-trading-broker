@@ -5,16 +5,14 @@ FastAPI router that exposes Trade management endpoints consumed by worker nodes.
 
 Endpoints
 ---------
-POST  /trades          — Create a new Trade record
-PATCH /trades/{id}     — Partially update an existing Trade record
+POST  /trades                          — Create a new Trade record
+PATCH /trades/{account_id}/{ticket}    — Partially update an existing Trade record
 """
 
 from __future__ import annotations
 
-import uuid
-from typing import Any, Dict
-
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 
 from broker.db.repository import create_trade, update_trade
 from broker.schemas.trade_schema import (
@@ -23,12 +21,28 @@ from broker.schemas.trade_schema import (
   TradeUpdateRequest,
 )
 from broker.logger import get_logger
+from broker.settings import settings
 
 log = get_logger(__name__)
 
+api_key_header = APIKeyHeader(name="X-API-KEY")
+
+
+def verify_api_key(api_key: str = Security(api_key_header)) -> str:
+  if api_key != settings.BROKER_API_KEY:
+    raise HTTPException(
+      status_code=status.HTTP_401_UNAUTHORIZED,
+      detail="Invalid API key",
+    )
+  return api_key
+
 
 def get_trade_router() -> APIRouter:
-  router = APIRouter(prefix="/trades", tags=["trades"])
+  router = APIRouter(
+    prefix="/trades",
+    tags=["trades"],
+    dependencies=[Depends(verify_api_key)],
+  )
 
   # ──────────────────────────────────────────────
   # POST /trades — create a new trade record
@@ -47,13 +61,12 @@ def get_trade_router() -> APIRouter:
     """
     Create a new Trade row.
 
-    - **signal_id**: UUID of the originating signal (FK to signals table)
     - **status**: Initial status — OPENED or REJECTED
     - Returns the full Trade record including generated `id` and timestamps.
     """
     log.info(
-      "Creating trade: signal_id=%s symbol=%s action=%s status=%s",
-      payload.signal_id,
+      "Creating trade: account_id=%s symbol=%s action=%s status=%s",
+      payload.account_id,
       payload.symbol,
       payload.action,
       payload.status,
@@ -69,38 +82,39 @@ def get_trade_router() -> APIRouter:
     log.info("Trade created id=%s", str(trade.id))
     return trade
 
-  # ──────────────────────────────────────────────
-  # PATCH /trades/{signal_id} — update a trade record
-  # ──────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────
+  # PATCH /trades/{account_id}/{ticket} — update a trade record
+  # ──────────────────────────────────────────────────────────
   @router.patch(
-    "/{signal_id}",
+    "/{account_id}/{ticket}",
     status_code=status.HTTP_200_OK,
     response_model=TradeResponse,
     summary="Update a Trade",
     description=(
-      "Partially update an existing Trade record using its signal_id. "
+      "Partially update an existing Trade record identified by account_id + ticket. "
       "Only the fields present in the request body are modified. "
       "Typically called when the worker closes or partially closes a position."
     ),
   )
   async def patch(
-    signal_id: uuid.UUID,
+    account_id: str,
+    ticket: int,
     payload: TradeUpdateRequest,
   ) -> TradeResponse:
     """
-    Partially update a Trade row identified by *signal_id*.
+    Partially update a Trade row identified by *account_id* + *ticket*.
 
     - Supply only the fields that have changed.
     - **status** transitions: OPENED → PARTIALLY_CLOSED → CLOSED (or REJECTED).
     - Returns the full updated Trade record.
     """
-    log.info("Updating trade for signal_id=%s", str(signal_id))
+    log.info("Updating trade for account_id=%s ticket=%s", account_id, ticket)
 
-    trade = await update_trade(signal_id=signal_id, payload=payload)
+    trade = await update_trade(account_id=account_id, ticket=ticket, payload=payload)
     if trade is None:
       raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Trade with signal_id {signal_id} not found",
+        detail=f"Trade with account_id={account_id} ticket={ticket} not found",
       )
 
     log.info("Trade updated id=%s status=%s", str(trade.id), trade.status)

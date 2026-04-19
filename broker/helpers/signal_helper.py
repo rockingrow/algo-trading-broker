@@ -27,21 +27,23 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   # Action is already validated by Pydantic
   signal = TradingSignal(
     signal_id=signal_id,
+    strategy=payload.strategy,
     action=action,
     symbol=symbol,
-    price=position.price,
-    quantity=position.quantity,
+    price=position.price or 0.0,
+    quantity=position.quantity or 0.0,
     sl=position.sl,
     tp1=position.tp1,
     tp2=position.tp2,
     is_running=position.is_running if position.is_running is not None else False,
     risk_percent=payload.inputs.risk_percent
-    if payload.inputs.risk_percent is not None
+    if payload.inputs is not None and payload.inputs.risk_percent is not None
     else 0.0,
   )
 
   log.debug("Parsed signal: %s", signal.model_dump_json())
   return signal
+
 
 def action_to_emoji(action: SignalActionEnum) -> str:
   """
@@ -59,5 +61,7 @@ def action_to_emoji(action: SignalActionEnum) -> str:
     return "🛡️"
   elif action == SignalActionEnum.SL:
     return "❌"
+  elif action == SignalActionEnum.FLAT:
+    return "🏳️"
   else:
     return "📡"

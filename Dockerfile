@@ -2,10 +2,9 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# System deps for pyzmq + asyncpg
+# System deps for asyncpg
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    libzmq3-dev \
     libpq-dev \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -33,7 +32,8 @@ RUN chmod +x /app/scripts/docker-entrypoint.sh
 # Install the project itself
 RUN uv sync --no-dev
 
-EXPOSE 8080 5555
+ARG WEBHOOK_PORT=8080
+EXPOSE ${WEBHOOK_PORT}
 
 ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
-CMD ["uv", "run", "python", "-m", "broker.main"]
+CMD ["uv", "run", "--no-dev", "python", "-m", "broker.main"]

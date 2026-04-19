@@ -1,55 +1,68 @@
 #!/usr/bin/env python
-import os
-import sys
+import re
 from pathlib import Path
+
 import zmq
+from dotenv import dotenv_values
+
+
+def is_valid_z85(k: str) -> bool:
+  return bool(k) and len(k) == 40 and "<" not in k
+
+
+def _write_key(env_path: Path, key: str, value: str) -> None:
+  """Replace all occurrences of `key` in the file, or append if absent.
+
+  Uses a direct write instead of os.replace() so it works on Docker bind mounts.
+  Values are wrapped in SINGLE quotes — the Z85 alphabet contains '#' and '$',
+  which double-quoted dotenv/bash parsers would treat as comments or variable
+  expansion respectively. Single quotes are literal in every parser we touch
+  (python-dotenv, godotenv via docker-compose env_file, bash `source`), and
+  Z85 itself contains no single quote, so the value never needs escaping.
+  """
+  content = env_path.read_text()
+  pattern = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
+  replacement = f"{key}='{value}'"
+  if pattern.search(content):
+    content = pattern.sub(replacement, content)
+  else:
+    content = content.rstrip("\n") + f"\n{replacement}\n"
+  env_path.write_text(content)
+
 
 def ensure_keys():
-    env_file = Path(".env")
-    
-    # If .env doesn't exist, we can't really do much unless we want to create it
-    # But usually it should exist (even if empty) if mounted.
-    if not env_file.exists():
-        print(f"Creating missing {env_file}")
-        env_file.touch()
+  env_file = Path(".env")
 
-    content = env_file.read_text()
-    
-    # Check if keys are already set and not placeholders
-    has_pub = "ZMQ_CURVE_SERVER_PUBLIC_KEY" in content and '<40-char' not in content
-    has_sec = "ZMQ_CURVE_SERVER_SECRET_KEY" in content and '<40-char' not in content
-    
-    # Also check if they are empty strings
-    is_empty_pub = 'ZMQ_CURVE_SERVER_PUBLIC_KEY=""' in content or "ZMQ_CURVE_SERVER_PUBLIC_KEY=''" in content
-    is_empty_sec = 'ZMQ_CURVE_SERVER_SECRET_KEY=""' in content or "ZMQ_CURVE_SERVER_SECRET_KEY=''" in content
+  if not env_file.exists():
+    print(f"Creating missing {env_file}")
+    env_file.touch()
 
-    if has_pub and has_sec and not is_empty_pub and not is_empty_sec:
-        print("ZMQ keys already configured in .env. Skipping generation.")
-        return
+  # Parse effective values (last occurrence wins, same as pydantic-settings)
+  vals = dotenv_values(env_file)
+  pub = (vals.get("ZMQ_CURVE_SERVER_PUBLIC_KEY") or "").strip().strip('"').strip("'")
+  sec = (vals.get("ZMQ_CURVE_SERVER_SECRET_KEY") or "").strip().strip('"').strip("'")
 
-    print("ZMQ keys missing or placeholder found. Generating new keypair...")
-    public_key, secret_key = zmq.curve_keypair()
-    pub_z85 = public_key.decode("ascii")
-    sec_z85 = secret_key.decode("ascii")
+  if is_valid_z85(pub) and is_valid_z85(sec):
+    # Keys are valid — deduplicate any repeated entries left by previous runs
+    _write_key(env_file, "ZMQ_CURVE_ENABLED", "true")
+    _write_key(env_file, "ZMQ_CURVE_SERVER_PUBLIC_KEY", pub)
+    _write_key(env_file, "ZMQ_CURVE_SERVER_SECRET_KEY", sec)
+    print("ZMQ keys already configured in .env. Skipping generation.")
+    return
 
-    # If keys exist as placeholders or empty, we should replace them. 
-    # For simplicity, we'll just append them at the end if they are missing, 
-    # but a better way is to check if we need to replace.
-    
-    # Let's just append for now as it's the most common request
-    new_lines = [
-        "",
-        "# -- Automatically generated ZeroMQ CURVE keypair --",
-        "ZMQ_CURVE_ENABLED=true",
-        f'ZMQ_CURVE_SERVER_PUBLIC_KEY="{pub_z85}"',
-        f'ZMQ_CURVE_SERVER_SECRET_KEY="{sec_z85}"',
-        ""
-    ]
-    
-    with open(env_file, "a") as f:
-        f.write("\n".join(new_lines))
-    
-    print("New ZMQ keys appended to .env")
+  print("ZMQ keys missing or invalid. Generating new keypair...")
+  public_key, secret_key = zmq.curve_keypair()
+  pub_z85 = public_key.decode("ascii")
+  sec_z85 = secret_key.decode("ascii")
+
+  # Write in-place — avoids os.replace() which fails on Docker bind mounts
+  _write_key(env_file, "ZMQ_CURVE_ENABLED", "true")
+  _write_key(env_file, "ZMQ_CURVE_SERVER_PUBLIC_KEY", pub_z85)
+  _write_key(env_file, "ZMQ_CURVE_SERVER_SECRET_KEY", sec_z85)
+
+  print("New ZMQ CURVE keypair written to .env")
+  print(f">>> Copy this public key to every Worker's ZMQ_CURVE_SERVER_PUBLIC_KEY: {pub_z85}")
+
 
 if __name__ == "__main__":
-    ensure_keys()
+  ensure_keys()

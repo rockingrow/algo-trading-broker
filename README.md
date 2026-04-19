@@ -1,17 +1,18 @@
-# 🚀 Algo Trading Broker
+# Algo Trading Broker
 
-A high-performance, decentralized **trading signal broker** built with FastAPI and ZeroMQ. It acts as a central hub between TradingView alerts and distributed execution nodes (VPS).
+A high-performance, decentralized **trading signal broker** built with FastAPI and NATS. It acts as a central hub between TradingView alerts and distributed execution nodes (VPS workers).
 
-## ⚡ Features
+## Features
 
-- **Webhook Hub**: Receives and validates TradingView JSON alerts.
-- **Persistence**: Logs every signal to **PostgreSQL** for auditing and analytics.
-- **Distribution**: Securely fan out signals via **ZeroMQ PUB** with **CURVE** (Elliptic-Curve) encryption and authentication.
+- **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification).
+- **Persistence**: Logs every signal and trade to **PostgreSQL** for auditing and analytics.
+- **Distribution**: Fan-out signals via **NATS** with token-based authentication.
+- **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals.
 - **Developer Friendly**: Includes Makefile, Bruno API collections, and Ruff for linting.
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```mermaid
 graph TD
@@ -19,67 +20,65 @@ graph TD
     subgraph "Broker Node (This Repo)"
         Broker[FastAPI Webhook Server]
         DB[(PostgreSQL)]
-        ZMQ["ZeroMQ PUB :5555 (CURVE)"]
+        NATS["NATS Server :4222 (Token Auth)"]
         Broker -- "Log Signal" --> DB
-        Broker -- "Publish" --> ZMQ
+        Broker -- "Publish signals.*" --> NATS
     end
-    ZMQ -- "🔐 Encrypted Stream" --> VPS1[VPS Node #1]
-    ZMQ -- "🔐 Encrypted Stream" --> VPS2[VPS Node #2]
-    ZMQ -- "🔐 Encrypted Stream" --> VPSN[VPS Node #N]
+    NATS -- "signals.SIGNAL" --> W1
+    NATS -- "signals.SIGNAL" --> W2
+    NATS -- "signals.SIGNAL" --> WN
+    subgraph W1["Worker — Forex (MT5)"]
+        W1A[Signal Handler] --> W1B[(SQLite)]
+    end
+    subgraph W2["Worker — Forex (MT5)"]
+        W2A[Signal Handler] --> W2B[(SQLite)]
+    end
+    subgraph WN["Worker — Crypto (TBD)"]
+        WNA[Signal Handler] --> WNB[(SQLite)]
+    end
+    W1 -. "POST/PATCH :8080/trades (Log Trade)" .-> Broker
+    W2 -. "POST/PATCH :8080/trades (Log Trade)" .-> Broker
 ```
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
 algo-trading-broker/
 ├── broker/
-├── bruno/                   # Bruno API client collections
-├── examples/                # Example scripts and payloads
-├── scripts/                 # Utility scripts (Key generation, etc.)
-├── Makefile                 # Automation shortcuts (uv, Linters)
-├── Dockerfile               # Production container definition
-├── docker-compose.yml       # Infrastructure (PostgreSQL)
-└── pyproject.toml           # uv dependencies & tool config
+│   ├── apis/            # Webhook and trade API routes
+│   ├── db/              # SQLAlchemy models, engine, repository, migrations
+│   ├── helpers/         # Signal and timeframe utilities
+│   ├── schemas/         # Pydantic schemas (webhook, publisher, trade, core)
+│   └── services/        # NatsPublisher, TelegramNotification
+├── bruno/               # Bruno API client collections
+├── examples/            # Example JSON payloads
+├── scripts/             # Utility scripts (docker-entrypoint, etc.)
+├── Makefile             # Automation shortcuts (uv, Docker, linters)
+├── Dockerfile           # Production container definition
+├── docker-compose.yml   # Infrastructure (PostgreSQL + NATS + Broker)
+└── pyproject.toml       # uv dependencies & tool config
 ```
 
 ---
 
-## 🔐 ZMQ CURVE Security
+## NATS Security
 
-By default, the ZeroMQ publisher is hardened with **CURVE** (Elliptic-Curve Diffie-Hellman) encryption. This ensures:
+The broker authenticates with the NATS server via **token auth**. Workers must supply the same token when subscribing.
 
-- **Encryption**: All traffic between the broker and subscriber nodes is encrypted end-to-end.
-- **Authentication**: Only clients that possess the server's public key can subscribe.
+Signals are published to NATS subjects:
 
-### Generating Keys
+| Subject | Purpose |
+| --------------- | ----------------------------------- |
+| `signals.SIGNAL` | Normal trading signals to workers |
+| `signals.ADMIN` | Administrative / broadcast messages |
 
-If you are setting up the broker for the first time, you must generate a CURVE keypair:
-
-```bash
-# Generate a new Z85-encoded keypair
-make gen-zmq-keys
-```
-
-The script will output a **Public Key** and a **Secret Key**.
-
-- The **Secret Key** must be kept private on the broker node (stored in `.env`).
-- The **Public Key** is shared with all subscriber nodes so they can connect and authenticate.
-
-### Configuration
-
-Update your `.env` with the generated keys:
-
-```env
-ZMQ_CURVE_ENABLED=true
-ZMQ_CURVE_SERVER_PUBLIC_KEY="your-server-public-key"
-ZMQ_CURVE_SERVER_SECRET_KEY="your-server-secret-key"
-```
+For end-to-end encryption, enable TLS on the NATS server and configure it separately (outside this repo).
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Prerequisites
 
@@ -90,62 +89,103 @@ ZMQ_CURVE_SERVER_SECRET_KEY="your-server-secret-key"
 ### 2. Installation
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd algo-trading-broker
 
-# Setup environment variables
-cp .env.example .env  # Update values in .env
-
-# Install dependencies
+cp .env.example .env   # fill in values
 make install-dev
 ```
 
 ### 3. Start Infrastructure
 
 ```bash
-# Start PostgreSQL via Docker
-docker compose up -d
+# Start PostgreSQL + NATS via Docker
+docker compose up -d postgres nats
 ```
 
 ### 4. Run the Broker
 
 ```bash
-# Run locally
+# Run locally (requires postgres and nats to be reachable)
 make run
 
-# Or via Docker
-docker compose up --build -d
+# Or run the full stack via Docker with hot-reload
+make dev
 ```
 
 ---
 
-## 🛠️ Development
+## Configuration (`.env`)
 
-We use `make` to simplify common tasks:
+```env
+# ── Webhook ──────────────────────────────────────────
+WEBHOOK_HOST=0.0.0.0
+WEBHOOK_PORT=8080
 
-| Command            | Description                                  |
-| ------------------ | -------------------------------------------- |
-| `make install`     | Install production dependencies              |
-| `make install-dev` | Install all dependencies including dev tools |
-| `make run`         | Run the broker locally                       |
-| `make format`      | Format code with Ruff                        |
-| `make lint`        | Run Ruff check                               |
-| `make fix`         | Automatically fix linting issues             |
+# Optional HMAC secret — set the same value in TradingView alert header
+# X-Signature: <sha256-hex-of-body>
+# Leave blank to disable validation.
+WEBHOOK_SECRET=
+
+# Callback API key for worker → broker trade reporting
+BROKER_API_KEY=api_key
+
+# ── NATS ─────────────────────────────────────────────
+NATS_HOST=localhost        # overridden to "nats" inside Docker
+NATS_PORT=4222
+NATS_MONITOR_PORT=8222    # HTTP monitoring dashboard
+NATS_TOKEN=changeme       # shared secret; leave blank = no auth
+
+# ── PostgreSQL ────────────────────────────────────────
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=algo_trading_broker
+POSTGRES_USER=algo_trading
+POSTGRES_PASSWORD=algotrading_broker_db_password
+
+# ── Logging ──────────────────────────────────────────
+LOG_LEVEL=INFO
+
+# ── Telegram (optional) ──────────────────────────────
+TELEGRAM_ENABLED=false
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
+TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
+```
 
 ---
 
-## 📡 Webhook API
+## Development
+
+| Command | Description |
+| ----------------------- | ----------------------------------------------- |
+| `make install` | Install production dependencies |
+| `make install-dev` | Install all dependencies including dev tools |
+| `make run` | Run the broker locally |
+| `make dev` | Start Docker stack with hot-reload (`compose watch`) |
+| `make start` | Start Docker stack detached |
+| `make stop` | Stop Docker stack |
+| `make logs` | Tail broker container logs (last 500 lines) |
+| `make logging` | Follow broker container logs live |
+| `make format` | Format code with Ruff |
+| `make lint` | Run Ruff check |
+| `make fix` | Auto-fix linting issues |
+| `make simulate-nats` | Run NATS signal simulator (E2E test) |
+
+---
+
+## Webhook API
 
 ### POST `/webhook`
 
-Receives signals from TradingView. Requires a valid `token` in the payload (if configured).
+Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set.
 
 **Example Payload:**
 
 ```json
 {
   "token": "your_secure_token",
+  "strategy": "wt_cross_v1",
   "symbol": "XAUUSD",
   "timeframe": "M5",
   "timestamp": "2024-03-20T10:00:00Z",
@@ -170,29 +210,64 @@ Receives signals from TradingView. Requires a valid `token` in the payload (if c
 }
 ```
 
-**Supported Actions:** `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`, `SL`.
+**Supported Actions:** `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`, `SL`, `FLAT`.
 
 ---
 
-## 🗄️ PostgreSQL Schema (`signal_s`)
+## PostgreSQL Schema
 
-| Column             | Type       | Description                     |
-| ------------------ | ---------- | ------------------------------- |
-| `id`               | UUID (PK)  | Unique record identifier        |
-| `symbol`           | String(50) | Trading symbol (e.g., XAUUSD)   |
-| `timeframe`        | String(20) | Chart timeframe (e.g., M15)     |
-| `timestamp`        | DateTime   | Signal generation time from TV  |
-| `action`           | Enum       | LONG, SHORT, TP1, TP2, R_SL, SL |
-| `price`            | Float      | Entry/Trigger price             |
-| `quantity`         | Float      | Lot size / Volume               |
-| `sl`, `tp1`, `tp2` | Float      | Exit prices                     |
-| `is_running`       | Boolean    | Strategy state                  |
-| `indicators`       | JSONB      | Full technical indicator state  |
-| `inputs`           | JSONB      | Strategy inputs / settings      |
-| `createdAt`        | DateTime   | Broker log insertion time       |
+### `signals` table
+
+| Column | Type | Description |
+| ------------------ | ---------------- | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `strategy` | String(50) | Strategy name that generated the signal |
+| `symbol` | String(50) | Trading symbol (e.g., XAUUSD) |
+| `timeframe` | String(20) | Chart timeframe (e.g., M15) |
+| `timestamp` | DateTime | Signal generation time from TradingView |
+| `action` | Enum | LONG, SHORT, TP1, TP2, R_SL, SL, FLAT |
+| `price` | Float | Entry/trigger price |
+| `quantity` | Float | Lot size / volume |
+| `sl`, `tp1`, `tp2` | Float | Exit prices |
+| `is_running` | Boolean | Strategy active state |
+| `risk_percent` | Float | Risk percentage for position sizing |
+| `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
+| `inputs` | JSONB (Nullable) | Strategy input parameters |
+| `raw` | JSONB (Nullable) | Raw webhook payload |
+| `createdAt` | DateTime | Broker log insertion time |
+
+### `trades` table
+
+| Column | Type | Description |
+| ----------------------- | ------------ | ------------------------------------------ |
+| `id` | UUID (PK) | Unique record identifier |
+| `account_id` | String(50) | Worker's broker account ID |
+| `account_leverage` | Integer | Account leverage at time of trade |
+| `account_balance_init` | Float | Account balance before trade |
+| `account_balance` | Float | Account balance after trade |
+| `ticket` | Float | Broker-assigned order ticket number |
+| `magic` | String(255) | EA magic number for order identification |
+| `comment` | String(255) | Trade comment |
+| `strategy` | String(50) | Strategy that originated the signal |
+| `symbol` | String(50) | Trading symbol |
+| `action` | Enum | LONG, SHORT, TP1, TP2, R_SL, SL, FLAT |
+| `price` | Float | Execution price |
+| `quantity` | Float | Lot size |
+| `sl`, `tp1`, `tp2` | Float | Exit prices |
+| `is_running` | Boolean | Strategy active state |
+| `risk_percent` | Float | Risk percentage used |
+| `status` | Enum | Trade status (e.g., OPEN, CLOSED, REJECTED) |
+| `reject_reason` | String(255) | Reason if trade was rejected |
+| `createdAt` | DateTime | Record insertion time |
 
 ---
 
-## 🧪 Testing
+## Testing
 
-Open the `/bruno` directory with the [Bruno API Client](https://www.usebruno.com/) to find pre-configured requests for testing the webhook and health endpoints.
+Open the `/bruno` directory with the [Bruno API Client](https://www.usebruno.com/) to find pre-configured requests for testing the webhook, health, and trade endpoints.
+
+For end-to-end NATS signal flow testing:
+
+```bash
+make simulate-nats
+```

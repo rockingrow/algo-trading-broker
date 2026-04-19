@@ -14,17 +14,17 @@ CREATE TABLE IF NOT EXISTS trades (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    
-    signal_id UUID NOT NULL,
+
     account_id VARCHAR(50) NOT NULL,
     account_leverage INTEGER NOT NULL,
     account_balance_init DOUBLE PRECISION,
     account_balance DOUBLE PRECISION,
-    
+
     ticket DOUBLE PRECISION,
     comment VARCHAR(255),
-    magic VARCHAR(50) NOT NULL,
-    
+    magic VARCHAR(255) NOT NULL,
+
+    strategy VARCHAR(50) NOT NULL DEFAULT 'gold',
     symbol VARCHAR(50) NOT NULL,
     action signalactionenum NOT NULL,
     price DOUBLE PRECISION NOT NULL,
@@ -33,15 +33,16 @@ CREATE TABLE IF NOT EXISTS trades (
     tp1 DOUBLE PRECISION,
     tp2 DOUBLE PRECISION,
     is_running BOOLEAN NOT NULL DEFAULT FALSE,
-    risk_percent DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    risk_percent DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     status tradestatusenum NOT NULL,
     reject_reason VARCHAR(255)
 );
 
 -- 3. Create indices for trades
-CREATE INDEX IF NOT EXISTS idx_trades_signal_id ON trades (signal_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_account_ticket ON trades (account_id, ticket);
 CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades (account_id);
 CREATE INDEX IF NOT EXISTS idx_trades_magic ON trades (magic);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
 
 -- 4. Set up auto-update for updatedAt column on trades
 DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;

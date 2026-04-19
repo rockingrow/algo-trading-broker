@@ -1,10 +1,15 @@
 from contextlib import asynccontextmanager
+import traceback
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from broker.db.engine import close_db, init_db
-from broker.services.publisher_service import SignalPublisher
+from broker.services.publisher_service import NatsPublisher
 from broker.router import get_core_router
+from broker.logger import get_logger
+
+log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -12,7 +17,8 @@ async def lifespan(app: FastAPI):
   from broker.services.notification_service import TelegramNotification
 
   await init_db()
-  publisher = SignalPublisher()
+  publisher = NatsPublisher()
+  await publisher.connect()
   app.state.publisher = publisher
 
   # Notification: Startup
@@ -23,7 +29,7 @@ async def lifespan(app: FastAPI):
   # Notification: Shutdown
   TelegramNotification().send_message("🛑 Broker Node Stopped")
 
-  publisher.close()
+  await publisher.close()
   await close_db()
 
 
@@ -33,11 +39,17 @@ def create_app() -> FastAPI:
     title="Algo Trading Broker",
     description=(
       "Receives TradingView JSON webhook alerts, logs them to PostgreSQL, "
-      "and fans them out via ZeroMQ PUB to subscriber VPS nodes."
+      "and fans them out via NATS to subscriber VPS nodes."
     ),
     version="2.0.0",
     lifespan=lifespan,
   )
+
+  @app.exception_handler(Exception)
+  async def global_exception_handler(request: Request, exc: Exception):
+    log.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
+    log.error(traceback.format_exc())
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
   # Include Core Router
   app.include_router(get_core_router())

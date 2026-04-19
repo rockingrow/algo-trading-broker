@@ -6,7 +6,7 @@
 DO $$ 
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'signalactionenum') THEN
-        CREATE TYPE signalactionenum AS ENUM ('LONG', 'SHORT', 'TP1', 'TP2', 'R_SL', 'SL');
+        CREATE TYPE signalactionenum AS ENUM ('LONG', 'SHORT', 'TP1', 'TP2', 'R_SL', 'SL', 'FLAT');
     END IF;
 END $$;
 
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS signals (
     "timestamp" TIMESTAMP WITH TIME ZONE NOT NULL,
     
     -- PositionSchema columns
+    strategy VARCHAR(50) NOT NULL DEFAULT 'gold',
     action signalactionenum NOT NULL,
     price DOUBLE PRECISION NOT NULL,
     quantity DOUBLE PRECISION NOT NULL,
@@ -32,8 +33,9 @@ CREATE TABLE IF NOT EXISTS signals (
     risk_percent DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     
     -- Complex objects stored as JSONB
-    indicators JSONB NOT NULL,
-    inputs JSONB NOT NULL
+    indicators JSONB,
+    inputs JSONB,
+    raw JSONB
 );
 
 -- 3. Create indices for performance

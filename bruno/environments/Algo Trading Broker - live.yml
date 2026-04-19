@@ -1,0 +1,6 @@
+name: Algo Trading Broker - live
+variables:
+  - secret: true
+    name: url
+  - secret: true
+    name: webhook_token

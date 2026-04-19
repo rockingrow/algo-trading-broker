@@ -8,3 +8,4 @@ class SignalActionEnum(str, Enum):
   TP2 = "TP2"
   R_SL = "R_SL"
   SL = "SL"
+  FLAT = "FLAT"

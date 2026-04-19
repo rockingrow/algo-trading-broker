@@ -5,10 +5,5 @@
   "account_balance": 10000.00,
   "strategy": "MT5_GOLD_M5_V1",
   "symbol": "XAUUSD",
-  "price": 2329.50,
-  "quantity": 0.00,
-  "sl": null,
-  "is_running": false,
-  "status": "CLOSED",
-  "reject_reason": null
+  "status": "FLAT"
 }

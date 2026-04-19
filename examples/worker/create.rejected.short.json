@@ -1,14 +1,14 @@
 {
-  "signal_id": "550e8400-e29b-41d4-a716-446655440000",
   "account_id": "12345678",
   "account_leverage": 100,
   "account_balance_init": 10000.00,
   "account_balance": 10000.00,
+  "strategy": "MT5_GOLD_M5_V1",
+  "symbol": "XAUUSD",
   "ticket": null,
-  "comment": "EA_v1 SHORT XAUUSD — rejected: spread too wide",
-  "magic": "20260409",
-  "symbol": "OANDA:XAUUSD",
-  "action": "SHORT",
+  "comment": "LONG XAUUSD — rejected: AutoTrading disabled by client",
+  "magic": "LONG|4b70fd03-946a-4716-b35d-b1229c90f1e2",
+  "action": "LONG",
   "price": 2334.50,
   "quantity": 0.10,
   "sl": 2339.50,
@@ -17,5 +17,5 @@
   "is_running": false,
   "risk_percent": 3.0,
   "status": "REJECTED",
-  "reject_reason": "Spread too wide at signal time (4.5 pips > max 3.0 pips)"
+  "reject_reason": "AutoTrading disabled by client"
 }

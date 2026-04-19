@@ -1,7 +1,7 @@
 info:
-  name: Webhook
+  name: Webhook - TP1
   type: http
-  seq: 2
+  seq: 3
 
 http:
   method: POST
@@ -10,52 +10,51 @@ http:
     type: json
     data: |-
       {
+        "strategy": "MT5_GOLD_M5_V1",
         "token": "{{webhook_token}}",
         "symbol": "OANDA:XAUUSD",
         "timeframe": "5",
-        "timestamp": "2026-04-10 22:55:00",
+        "timestamp": "2026-04-22 03:50:00",
         "position": {
-          "action": "LONG",
-          "price": 4740.50,
-          "quantity": 6.0000,
-          "sl": 4730.50,
-          "tp1": 4750.00,
-          "tp2": 4751.00
+          "action": "TP1",
+          "price": 4564.50,
+          "quantity": 0.6,
+          "is_running": true
         },
         "indicators": {
-          "wt1": -65.50,
-          "wt2": -60.20,
-          "close": 2334.50,
-          "upper": 2345.00,
-          "lower": 2335.00,
-          "basis": 2340.00,
-          "ema200_visual": 2320.00,
-          "ema200_filter": 2320.00,
-          "atr_val": 2.50,
+          "wt1": 42.44,
+          "wt2": 48.87,
+          "close": 4757.82,
+          "upper": 4762.94,
+          "lower": 4751.38,
+          "basis": 4757.16,
+          "ema200_visual": 4772.59,
+          "ema200_filter": 4783.94,
+          "atr_val": 3.65,
           "in_session": true,
           "vol_spike": false,
           "in_cooldown": false,
           "sl_too_wide": false
         },
         "inputs": {
-          "watching_candles": 2,
-          "over_wt_value": 60,
-          "safe_wt_value": 60,
+          "watching_candles": 1,
+          "over_wt_value": 30,
+          "safe_wt_value": 30,
           "use_session": true,
           "skip_windows": "10:00-11:00,23:00-00:00",
           "bb_len": 20,
-          "bb_mult": 2.0,
+          "bb_mult": 2,
           "show_imb": true,
           "atr_len": 14,
-          "atr_sl_mult": 2.0,
+          "atr_sl_mult": 2,
           "min_rr_ratio": 0.75,
-          "risk_percent": 3.0,
+          "risk_percent": 3,
           "use_basis_exit": false,
           "basis_exit_buffer": 1.5,
-          "tp1_qty_pc": 30.0,
+          "tp1_qty_pc": 30,
           "use_max_sl_dist": true,
           "max_sl_distance": 30,
-          "vol_spike_mult": 2.0,
+          "vol_spike_mult": 2,
           "vol_spike_lookback": 50,
           "use_vol_filter": true,
           "ema_visual_tf": "15",

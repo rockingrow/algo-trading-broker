@@ -1,0 +1,39 @@
+info:
+  name: Worker - Create Rejected Short
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{url}}/trades"
+  body:
+    type: json
+    data: |-
+      {
+        "account_id": "12345678",
+        "account_leverage": 100,
+        "account_balance_init": 10000.00,
+        "account_balance": 10000.00,
+        "ticket": null,
+        "comment": "LONG XAUUSD — rejected: AutoTrading disabled by client",
+        "magic": "LONG|4b70fd03-946a-4716-b35d-b1229c90f1e2",
+        "strategy": "MT5_GOLD_M5_V1",
+        "symbol": "XAUUSD",
+        "action": "LONG",
+        "price": 2334.50,
+        "quantity": 0.10,
+        "sl": 2339.50,
+        "tp1": 2329.00,
+        "tp2": 2324.00,
+        "is_running": false,
+        "risk_percent": 3.0,
+        "status": "REJECTED",
+        "reject_reason": "AutoTrading disabled by client"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

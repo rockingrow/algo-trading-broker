@@ -21,6 +21,7 @@ class TradeStatusEnum(str, Enum):
   REJECTED = "REJECTED"
   PARTIALLY_CLOSED = "PARTIALLY_CLOSED"
   CLOSED = "CLOSED"
+  FLAT = "FLAT"
 
 
 # ---------------------------------------------------------------------------
@@ -31,20 +32,27 @@ class TradeStatusEnum(str, Enum):
 class TradeCreateRequest(BaseModel):
   """Payload sent by the worker node to create a Trade record."""
 
-  signal_id: uuid.UUID = Field(..., description="Reference to the originating signal")
-
   # Account info
   account_id: str = Field(..., max_length=50, description="Broker account identifier")
   account_leverage: int = Field(..., description="Account leverage (e.g. 100)")
-  account_balance_init: Optional[float] = Field(None, description="Account balance before trade")
-  account_balance: Optional[float] = Field(None, description="Account balance after trade open")
+  account_balance_init: Optional[float] = Field(
+    None, description="Account balance before trade"
+  )
+  account_balance: Optional[float] = Field(
+    None, description="Account balance after trade open"
+  )
 
   # Broker-specific
   ticket: Optional[float] = Field(None, description="Broker order ticket / deal ID")
-  comment: Optional[str] = Field(None, max_length=255, description="Broker comment string")
-  magic: str = Field(..., max_length=50, description="EA magic number / strategy identifier")
+  comment: Optional[str] = Field(
+    None, max_length=255, description="Broker comment string"
+  )
+  magic: str = Field(
+    ..., max_length=50, description="EA magic number / strategy identifier"
+  )
 
   # Trade details
+  strategy: str = Field(..., max_length=50, description="Strategy name, e.g. MT5_GOLD_M5")
   symbol: str = Field(..., max_length=50, description="Trading instrument symbol")
   action: SignalActionEnum = Field(..., description="Trade direction")
   price: float = Field(..., description="Execution price")
@@ -57,18 +65,32 @@ class TradeCreateRequest(BaseModel):
 
   # Status
   status: TradeStatusEnum = Field(..., description="Initial trade status")
-  reject_reason: Optional[str] = Field(None, max_length=255, description="Reason for rejection if status=REJECTED")
+  reject_reason: Optional[str] = Field(
+    None, max_length=255, description="Reason for rejection if status=REJECTED"
+  )
 
 
 class TradeUpdateRequest(BaseModel):
   """Payload sent by the worker node to update an existing Trade record."""
 
   # Account info (may change after partial close etc.)
+  account_leverage: Optional[int] = Field(None, description="Account leverage")
+  account_balance_init: Optional[float] = Field(
+    None, description="Account balance snapshot at time of update"
+  )
   account_balance: Optional[float] = Field(None, description="Updated account balance")
 
   # Broker-specific
-  ticket: Optional[float] = Field(None, description="Broker order ticket (if assigned after open)")
-  comment: Optional[str] = Field(None, max_length=255, description="Updated broker comment")
+  ticket: Optional[float] = Field(
+    None, description="Broker order ticket (if assigned after open)"
+  )
+  comment: Optional[str] = Field(
+    None, max_length=255, description="Updated broker comment"
+  )
+
+  # Trade identity (informational — confirms which trade is being updated)
+  strategy: Optional[str] = Field(None, max_length=50, description="Strategy name")
+  symbol: Optional[str] = Field(None, max_length=50, description="Trading instrument symbol")
 
   # Trade details
   price: Optional[float] = Field(None, description="Updated execution/close price")
@@ -76,11 +98,15 @@ class TradeUpdateRequest(BaseModel):
   sl: Optional[float] = Field(None, description="Updated stop-loss price")
   tp1: Optional[float] = Field(None, description="Updated take-profit 1 price")
   tp2: Optional[float] = Field(None, description="Updated take-profit 2 price")
-  is_running: Optional[bool] = Field(None, description="Whether the trade is still active")
+  is_running: Optional[bool] = Field(
+    None, description="Whether the trade is still active"
+  )
 
   # Status
   status: Optional[TradeStatusEnum] = Field(None, description="Updated trade status")
-  reject_reason: Optional[str] = Field(None, max_length=255, description="Updated rejection reason")
+  reject_reason: Optional[str] = Field(
+    None, max_length=255, description="Updated rejection reason"
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +118,6 @@ class TradeResponse(BaseModel):
   """Serialised Trade row returned by the API."""
 
   id: uuid.UUID
-  signal_id: uuid.UUID
 
   # Account info
   account_id: str
@@ -106,6 +131,7 @@ class TradeResponse(BaseModel):
   magic: str
 
   # Trade details
+  strategy: str
   symbol: str
   action: SignalActionEnum
   price: float

@@ -1,4 +1,4 @@
-.PHONY: help install install-dev update lock fix format lint check run gen-zmq-keys
+.PHONY: help install install-dev update lock fix format lint check run simulate-nats
 
 help:
 	@echo "Available commands:"
@@ -12,8 +12,7 @@ help:
 	@echo "  make check       - Alias for lint"
 	@echo "  make run         - Run the broker locally"
 	@echo "  make dev         - Run docker compose locally with hot module reload on code change"
-	@echo "  make simulate-zmq - Run ZMQ signal simulator (E2E)"
-	@echo "  make gen-zmq-keys - Generate ZMQ CURVE keypair using Docker"
+	@echo "  make simulate-nats - Run NATS signal simulator (E2E)"
 
 install:
 	uv sync --no-dev
@@ -43,6 +42,9 @@ check: lint
 run:
 	uv run python -m broker.main
 
+build:
+	docker compose build --no-cache
+
 dev:
 	docker compose up --build -d
 	docker compose watch
@@ -56,14 +58,8 @@ stop:
 logs:
 	docker logs algo_trading_broker --tail 500
 
-logs-follow:
+logging:
 	docker logs algo_trading_broker --follow
 
-simulate-zmq:
+simulate-nats:
 	uv run python e2e/simulate_signals.py
-
-simulate-security:
-	uv run python e2e/simulate_security.py
-
-gen-zmq-keys:
-	docker compose run --rm -v ./scripts:/app/scripts broker uv run python scripts/generate_curve_keypair.py

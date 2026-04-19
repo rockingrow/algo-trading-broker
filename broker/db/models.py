@@ -11,7 +11,16 @@ from __future__ import annotations
 from datetime import datetime
 import uuid
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, String, func, Integer
+from sqlalchemy import (
+  Boolean,
+  DateTime,
+  Enum,
+  Float,
+  String,
+  func,
+  Integer,
+  UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.trade_schema import TradeStatusEnum
@@ -44,6 +53,7 @@ class Signal(Base):
   __tablename__ = "signals"
 
   # WebhookPayload columns
+  strategy: Mapped[str] = mapped_column(String(50), nullable=False)
   symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
   timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -61,8 +71,9 @@ class Signal(Base):
   risk_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
   # Complex objects stored as JSONB
-  indicators: Mapped[dict] = mapped_column(JSONB, nullable=False)
-  inputs: Mapped[dict] = mapped_column(JSONB, nullable=False)
+  indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)
+  inputs: Mapped[dict] = mapped_column(JSONB, nullable=True)
+  raw: Mapped[dict] = mapped_column(JSONB, nullable=True)
 
   def __repr__(self) -> str:
     return (
@@ -77,10 +88,8 @@ class Trade(Base):
   """
 
   __tablename__ = "trades"
-
-  # Reference to signals
-  signal_id: Mapped[uuid.UUID] = mapped_column(
-    UUID(as_uuid=True), nullable=False, index=True
+  __table_args__ = (
+    UniqueConstraint("account_id", "ticket", name="uq_trades_account_ticket"),
   )
 
   # Trading Account info
@@ -90,11 +99,12 @@ class Trade(Base):
   account_balance: Mapped[float] = mapped_column(Float, nullable=True)
 
   # Broker-specific fields
-  ticket: Mapped[int | None] = mapped_column(Float, nullable=True)
+  ticket: Mapped[int | None] = mapped_column(Float, nullable=True, index=True)
   comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
-  magic: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+  magic: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
   # Trade details
+  strategy: Mapped[str] = mapped_column(String(50), nullable=False)
   symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   action: Mapped[SignalActionEnum] = mapped_column(
     Enum(SignalActionEnum), nullable=False
@@ -113,6 +123,6 @@ class Trade(Base):
 
   def __repr__(self) -> str:
     return (
-      f"<Trade id={self.id} signal_id={self.signal_id} "
+      f"<Trade id={self.id} account_id={self.account_id} ticket={self.ticket} "
       f"action={self.action} symbol={self.symbol}>"
     )

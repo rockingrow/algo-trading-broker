@@ -1,7 +1,7 @@
 info:
-  name: Webhook
+  name: Webhook - LONG
   type: http
-  seq: 2
+  seq: 1
 
 http:
   method: POST
@@ -10,17 +10,18 @@ http:
     type: json
     data: |-
       {
+        "strategy": "MT5_GOLD_M5_V1",
         "token": "{{webhook_token}}",
         "symbol": "OANDA:XAUUSD",
         "timeframe": "5",
         "timestamp": "2026-04-10 22:55:00",
         "position": {
           "action": "LONG",
-          "price": 4740.50,
+          "price": 4564.50,
           "quantity": 6.0000,
-          "sl": 4730.50,
-          "tp1": 4750.00,
-          "tp2": 4751.00
+          "sl": 4580.50,
+          "tp1": 4560.00,
+          "tp2": 4550.00
         },
         "indicators": {
           "wt1": -65.50,

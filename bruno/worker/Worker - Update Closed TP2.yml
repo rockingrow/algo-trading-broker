@@ -1,0 +1,30 @@
+info:
+  name: Worker - Update Closed TP2
+  type: http
+  seq: 5
+
+http:
+  method: PATCH
+  url: "{{url}}/trades/12345678/123456789"
+  body:
+    type: json
+    data: |-
+      {
+        "account_id": "12345678",
+        "account_leverage": 100,
+        "account_balance_init": 10000.00,
+        "account_balance": 10000.00,
+        "strategy": "MT5_GOLD_M5_V1",
+        "symbol": "XAUUSD",
+        "price": 2345.00,
+        "quantity": 0.00,
+        "is_running": false,
+        "status": "CLOSED"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

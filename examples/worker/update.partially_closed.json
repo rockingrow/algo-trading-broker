@@ -1,5 +1,10 @@
 {
-  "account_balance": 9850.00,
+  "account_id": "12345678",
+  "account_leverage": 100,
+  "account_balance_init": 10000.00,
+  "account_balance": 10000.00,
+  "strategy": "MT5_GOLD_M5_V1",
+  "symbol": "XAUUSD",
   "price": 2340.00,
   "quantity": 0.07,
   "is_running": true,

@@ -1,5 +1,5 @@
 {
-  "token": "secret_token_tu_tradingview",
+  "strategy": "MT5_GOLD_M5_V1",
   "symbol": "OANDA:XAUUSD",
   "timeframe": "5",
   "timestamp": "2026-04-11 10:10:00",
@@ -49,5 +49,6 @@
     "ema_filter_tf": "240",
     "use_cooldown": false,
     "cooldown_bars": 6
-  }
+  },
+  "token": "secret_token_tu_tradingview"
 }

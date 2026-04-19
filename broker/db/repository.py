@@ -8,6 +8,7 @@ callers (webhook.py, trade_listener.py) stay clean.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Optional
 
@@ -35,21 +36,23 @@ async def log_signal(payload: WebhookPayload) -> str | None:
   new_id = uuid.uuid4()
   row = Signal(
     id=new_id,
+    strategy=payload.strategy,
     symbol=payload.symbol,
     timeframe=payload.timeframe,
     timestamp=payload.timestamp,
     action=pos.action,
-    price=pos.price,
-    quantity=pos.quantity,
+    price=pos.price or 0.0,
+    quantity=pos.quantity or 0.0,
     sl=pos.sl,
     tp1=pos.tp1,
     tp2=pos.tp2,
     is_running=pos.is_running if pos.is_running is not None else False,
     risk_percent=payload.inputs.risk_percent
-    if payload.inputs.risk_percent is not None
+    if payload.inputs is not None and payload.inputs.risk_percent is not None
     else 0.0,
-    indicators=payload.indicators.model_dump(),
-    inputs=payload.inputs.model_dump(),
+    indicators=json.loads(payload.indicators.model_dump_json()) if payload.indicators is not None else {},
+    inputs=json.loads(payload.inputs.model_dump_json()) if payload.inputs is not None else {},
+    raw=json.loads(payload.model_dump_json()),
   )
   try:
     async with get_session() as session:
@@ -57,7 +60,7 @@ async def log_signal(payload: WebhookPayload) -> str | None:
     log.debug("signals written for symbol=%s id=%s", payload.symbol, str(new_id))
     return str(new_id)
   except Exception as exc:
-    log.error("Failed to write signals: %s", exc)
+    log.exception("Failed to write signals: %s", exc)
     return None
 
 
@@ -73,7 +76,6 @@ async def create_trade(payload: TradeCreateRequest) -> Trade | None:
   new_id = uuid.uuid4()
   row = Trade(
     id=new_id,
-    signal_id=payload.signal_id,
     account_id=payload.account_id,
     account_leverage=payload.account_leverage,
     account_balance_init=payload.account_balance_init,
@@ -81,6 +83,7 @@ async def create_trade(payload: TradeCreateRequest) -> Trade | None:
     ticket=payload.ticket,
     comment=payload.comment,
     magic=payload.magic,
+    strategy=payload.strategy,
     symbol=payload.symbol,
     action=payload.action,
     price=payload.price,
@@ -103,13 +106,15 @@ async def create_trade(payload: TradeCreateRequest) -> Trade | None:
     log.debug("trade written id=%s symbol=%s", str(new_id), row.symbol)
     return row
   except Exception as exc:
-    log.error("Failed to write trade: %s", exc)
+    log.exception("Failed to write trade: %s", exc)
     return None
 
 
-async def update_trade(signal_id: uuid.UUID, payload: TradeUpdateRequest) -> Trade | None:
+async def update_trade(
+  account_id: str, ticket: int, payload: TradeUpdateRequest
+) -> Trade | None:
   """
-  Apply a partial update to an existing Trade row, identified by its signal_id.
+  Apply a partial update to an existing Trade row, identified by account_id + ticket.
 
   Only non-None fields in *payload* are written to the database.
 
@@ -120,14 +125,19 @@ async def update_trade(signal_id: uuid.UUID, payload: TradeUpdateRequest) -> Tra
   """
   try:
     async with get_session() as session:
-      result = await session.execute(select(Trade).where(Trade.signal_id == signal_id))
+      result = await session.execute(
+        select(Trade).where(Trade.account_id == account_id, Trade.ticket == ticket)
+      )
       row: Optional[Trade] = result.scalars().first()
 
       if row is None:
-        log.warning("update_trade: trade for signal_id=%s not found", str(signal_id))
+        log.warning(
+          "update_trade: trade for account_id=%s ticket=%s not found",
+          account_id,
+          ticket,
+        )
         return None
 
-      # Apply only the fields explicitly provided (non-None)
       update_data = payload.model_dump(exclude_none=True)
       for field, value in update_data.items():
         setattr(row, field, value)
@@ -135,8 +145,12 @@ async def update_trade(signal_id: uuid.UUID, payload: TradeUpdateRequest) -> Tra
       await session.flush()
       await session.refresh(row)
 
-    log.debug("trade updated id=%s based on signal_id=%s", str(row.id), str(signal_id))
+    log.debug(
+      "trade updated id=%s account_id=%s ticket=%s", str(row.id), account_id, ticket
+    )
     return row
   except Exception as exc:
-    log.error("Failed to update trade for signal_id=%s: %s", str(signal_id), exc)
+    log.exception(
+      "Failed to update trade for account_id=%s ticket=%s: %s", account_id, ticket, exc
+    )
     return None

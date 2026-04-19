@@ -6,16 +6,20 @@ from broker.settings import settings
 logger = get_logger("broker.services.notification_service")
 
 
+def _box(text: str) -> str:
+  return f"<pre>{text.strip()}</pre>"
+
+
 class Notification:
   def send_message(self, message_text: str):
     raise NotImplementedError("This method must be implemented by a subclass")
 
 
 class TelegramNotification(Notification):
-  def __init__(self):
+  def __init__(self, chat_id: str | None = None):
     self.enabled = settings.TELEGRAM_ENABLED
     self.bot_token = settings.TELEGRAM_BOT_TOKEN
-    self.chat_id = settings.TELEGRAM_CHAT_ID
+    self.chat_id = chat_id if chat_id is not None else settings.TELEGRAM_CHAT_ID
 
   def send_message(self, message_text: str):
     if not self.enabled:
@@ -31,7 +35,7 @@ class TelegramNotification(Notification):
     url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
     payload = {
       "chat_id": self.chat_id,
-      "text": message_text,
+      "text": _box(message_text),
       "parse_mode": "HTML",
     }
 

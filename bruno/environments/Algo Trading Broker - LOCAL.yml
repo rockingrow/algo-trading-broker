@@ -1,7 +1,11 @@
 name: Algo Trading Broker - LOCAL
 color: "#C77A0F"
 variables:
+  - name: port
+    value: "8080"
   - name: url
-    value: http://localhost:8080
+    value: http://localhost:{{port}}
   - secret: true
     name: webhook_token
+  - secret: true
+    name: broker_token

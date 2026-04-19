@@ -1,0 +1,10 @@
+info:
+  name: worker
+  type: folder
+  seq: 1
+
+request:
+  headers:
+    - name: X-API-KEY
+      value: "{{broker_token}}"
+  auth: inherit

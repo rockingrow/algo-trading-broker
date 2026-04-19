@@ -4,7 +4,7 @@ broker/main.py — Entry point for the central broker process.
 Startup sequence
 ────────────────
 1. Init PostgreSQL connection pool + create tables (init_db)
-2. Bind ZeroMQ PUB socket  (signals → subscribers)
+2. Connect to NATS server  (signals → subscribers)
 3. Start FastAPI / uvicorn webhook server (blocks)
 """
 
@@ -22,11 +22,7 @@ log = get_logger("broker")
 def main() -> None:
   log.info("Starting Algo Trading Broker v1.0")
   log.info("Webhook    → http://%s:%d", settings.WEBHOOK_HOST, settings.WEBHOOK_PORT)
-  log.info(
-    "ZMQ PUB    → tcp://%s:%d (signals to subscribers)",
-    settings.ZMQ_BROKER_HOST,
-    settings.ZMQ_PUB_PORT,
-  )
+  log.info("NATS       → %s (signals to subscribers)", settings.nats_url)
   log.info(
     "PostgreSQL → %s:%d/%s",
     settings.POSTGRES_HOST,
@@ -41,7 +37,9 @@ def main() -> None:
     app,
     host=settings.WEBHOOK_HOST,
     port=settings.WEBHOOK_PORT,
+    workers=1,
     log_level=settings.LOG_LEVEL.lower(),
+    loop="asyncio",  # uvloop's libuv DNS can't resolve Docker service names on Linux 24.04
   )
 
 
