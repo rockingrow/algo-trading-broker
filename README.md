@@ -22,11 +22,11 @@ graph TD
         DB[(PostgreSQL)]
         NATS["NATS Server :4222 (Token Auth)"]
         Broker -- "Log Signal" --> DB
-        Broker -- "Publish signals.*" --> NATS
+        Broker -- "Publish *" --> NATS
     end
-    NATS -- "signals.SIGNAL" --> W1
-    NATS -- "signals.SIGNAL" --> W2
-    NATS -- "signals.SIGNAL" --> WN
+    NATS -- "SIGNAL" --> W1
+    NATS -- "SIGNAL" --> W2
+    NATS -- "SIGNAL" --> WN
     subgraph W1["Worker — Forex (MT5)"]
         W1A[Signal Handler] --> W1B[(SQLite)]
     end
@@ -71,8 +71,8 @@ Signals are published to NATS subjects:
 
 | Subject | Purpose |
 | --------------- | ----------------------------------- |
-| `signals.SIGNAL` | Normal trading signals to workers |
-| `signals.ADMIN` | Administrative / broadcast messages |
+| `SIGNAL` | Normal trading signals to workers |
+| `ADMIN` | Administrative / broadcast messages |
 
 For end-to-end encryption, enable TLS on the NATS server and configure it separately (outside this repo).
 

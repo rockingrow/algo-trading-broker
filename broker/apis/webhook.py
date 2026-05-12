@@ -33,7 +33,7 @@ def get_webhook_router() -> APIRouter:
     request: Request,
   ) -> Dict[str, Any]:
     """
-    Main entry point for incoming signals.
+    Main entry point for incoming signals
     1. Verify Token (inside JSON payload)
     2. Parse & Map Signal
     3. Publish to NATS

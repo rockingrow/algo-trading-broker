@@ -6,7 +6,7 @@ Security
 Authentication is handled by the NATS server via token auth (``settings.NATS_TOKEN``).
 All traffic can be encrypted end-to-end by enabling TLS on the NATS server.
 
-Workers subscribe to subjects ``signals.SIGNAL`` and ``signals.ADMIN``.
+Workers subscribe to subjects ``SIGNAL`` and ``ADMIN``.
 Message body is a raw JSON string (no topic prefix).
 """
 
@@ -31,8 +31,8 @@ class NatsPublisher:
   """
   Async NATS publisher for broadcasting trading signals to subscriber nodes.
 
-  Each signal is published to a subject of the form ``signals.<TOPIC>``
-  (e.g. ``signals.SIGNAL``).  Workers subscribe to ``signals.*`` or a
+  Each signal is published to a subject of the form ``PublishTopicEnum``
+  (e.g. ``SIGNAL``).  Workers subscribe to ``SIGNAL|ADMIN`` or a
   specific subject.  Message body is a raw JSON string.
   """
 
@@ -59,18 +59,17 @@ class NatsPublisher:
 
   async def publish(
     self,
-    topic: PublishTopicEnum = PublishTopicEnum.SIGNAL,
+    subject: PublishTopicEnum = PublishTopicEnum.SIGNAL,
     signal: TradingSignal = None,
   ) -> None:
     """Serialise *signal* and broadcast to all connected subscribers."""
     if signal is None:
       return
-    subject = f"signals.{topic}"
     payload = signal.model_dump_json().encode()
-    await self._nc.publish(subject, payload)
+    await self._nc.publish(subject.value, payload)
     log.info(
       "Published [%s] signal_id=%s action=%s symbol=%s",
-      subject,
+      subject.value,
       signal.signal_id,
       signal.action,
       signal.symbol,
@@ -78,14 +77,13 @@ class NatsPublisher:
 
   async def publish_flat(self, symbol: str, timestamp: datetime) -> None:
     """Broadcast a FLAT (close-all) directive to all connected subscribers."""
-    subject = f"signals.{PublishTopicEnum.SIGNAL}"
     payload = json.dumps({
       "timestamp": timestamp.isoformat(),
       "action": "FLAT",
       "symbol": symbol,
     }).encode()
-    await self._nc.publish(subject, payload)
-    log.info("Published [%s] FLAT directive symbol=%s", subject, symbol)
+    await self._nc.publish(PublishTopicEnum.SIGNAL.value, payload)
+    log.info("Published [%s] FLAT directive symbol=%s", PublishTopicEnum.SIGNAL.value, symbol)
 
   async def close(self) -> None:
     """Gracefully drain pending messages and close the NATS connection."""
