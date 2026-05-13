@@ -77,13 +77,17 @@ class NatsPublisher:
 
   async def publish_flat(self, symbol: str, timestamp: datetime) -> None:
     """Broadcast a FLAT (close-all) directive to all connected subscribers."""
-    payload = json.dumps({
-      "timestamp": timestamp.isoformat(),
-      "action": "FLAT",
-      "symbol": symbol,
-    }).encode()
+    payload = json.dumps(
+      {
+        "timestamp": timestamp.isoformat(),
+        "action": "FLAT",
+        "symbol": symbol,
+      }
+    ).encode()
     await self._nc.publish(PublishTopicEnum.SIGNAL.value, payload)
-    log.info("Published [%s] FLAT directive symbol=%s", PublishTopicEnum.SIGNAL.value, symbol)
+    log.info(
+      "Published [%s] FLAT directive symbol=%s", PublishTopicEnum.SIGNAL.value, symbol
+    )
 
   async def close(self) -> None:
     """Gracefully drain pending messages and close the NATS connection."""

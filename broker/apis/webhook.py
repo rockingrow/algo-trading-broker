@@ -80,7 +80,9 @@ def get_webhook_router() -> APIRouter:
           detail=f"Signal logged but publish failed: {publish_error}",
         )
 
-      notification = TelegramNotification(chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID)
+      notification = TelegramNotification(
+        chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
+      )
       msg = (
         f"-------------------------------------\n"
         f"\n"
@@ -131,7 +133,9 @@ def get_webhook_router() -> APIRouter:
       )
 
     # 5. Send Telegram notification
-    notification = TelegramNotification(chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID)
+    notification = TelegramNotification(
+      chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
+    )
     msg = (
       f"-------------------------------------\n"
       f"\n"

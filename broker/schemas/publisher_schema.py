@@ -10,6 +10,7 @@ from broker.schemas.core import SignalActionEnum
 class PublishTopicEnum(str, Enum):
   SIGNAL = "SIGNAL"
   ADMIN = "ADMIN"
+  TRADE = "TRADE"
 
 
 class TradingSignal(BaseModel):

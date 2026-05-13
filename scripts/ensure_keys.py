@@ -61,7 +61,9 @@ def ensure_keys():
   _write_key(env_file, "ZMQ_CURVE_SERVER_SECRET_KEY", sec_z85)
 
   print("New ZMQ CURVE keypair written to .env")
-  print(f">>> Copy this public key to every Worker's ZMQ_CURVE_SERVER_PUBLIC_KEY: {pub_z85}")
+  print(
+    f">>> Copy this public key to every Worker's ZMQ_CURVE_SERVER_PUBLIC_KEY: {pub_z85}"
+  )
 
 
 if __name__ == "__main__":

@@ -17,7 +17,8 @@ from sqlalchemy import select
 from broker.db.engine import get_session
 from broker.db.models import Signal, Trade
 from broker.schemas.webhook_schema import WebhookPayload
-from broker.schemas.trade_schema import TradeCreateRequest, TradeUpdateRequest
+from broker.schemas.trade_schema import TradeStatusEnum
+from broker.schemas.trade_event_schema import PositionEvent
 from broker.logger import get_logger
 
 log = get_logger(__name__)
@@ -50,8 +51,12 @@ async def log_signal(payload: WebhookPayload) -> str | None:
     risk_percent=payload.inputs.risk_percent
     if payload.inputs is not None and payload.inputs.risk_percent is not None
     else 0.0,
-    indicators=json.loads(payload.indicators.model_dump_json()) if payload.indicators is not None else {},
-    inputs=json.loads(payload.inputs.model_dump_json()) if payload.inputs is not None else {},
+    indicators=json.loads(payload.indicators.model_dump_json())
+    if payload.indicators is not None
+    else {},
+    inputs=json.loads(payload.inputs.model_dump_json())
+    if payload.inputs is not None
+    else {},
     raw=json.loads(payload.model_dump_json()),
   )
   try:
@@ -64,93 +69,103 @@ async def log_signal(payload: WebhookPayload) -> str | None:
     return None
 
 
-async def create_trade(payload: TradeCreateRequest) -> Trade | None:
-  """
-  Persist a new Trade row to the trades table.
+# Map worker position status → broker trade status.
+_POSITION_STATUS_TO_TRADE_STATUS: dict[str, TradeStatusEnum] = {
+  "OPENED": TradeStatusEnum.OPENED,
+  "TP1": TradeStatusEnum.PARTIALLY_CLOSED,
+  "TP2": TradeStatusEnum.CLOSED,
+  "SL": TradeStatusEnum.CLOSED,
+  "R_SL": TradeStatusEnum.CLOSED,
+  "TERMINAL_CLOSED": TradeStatusEnum.CLOSED,
+  "FORCED_CLOSED": TradeStatusEnum.CLOSED,
+  "FLATTED": TradeStatusEnum.FLAT,
+}
 
-  Returns
-  -------
-  Trade | None
-      The inserted ORM instance (with id/timestamps populated), or None on failure.
-  """
-  new_id = uuid.uuid4()
-  row = Trade(
-    id=new_id,
-    account_id=payload.account_id,
-    account_leverage=payload.account_leverage,
-    account_balance_init=payload.account_balance_init,
-    account_balance=payload.account_balance,
-    ticket=payload.ticket,
-    comment=payload.comment,
-    magic=payload.magic,
-    strategy=payload.strategy,
-    symbol=payload.symbol,
-    action=payload.action,
-    price=payload.price,
-    quantity=payload.quantity,
-    sl=payload.sl,
-    tp1=payload.tp1,
-    tp2=payload.tp2,
-    is_running=payload.is_running,
-    risk_percent=payload.risk_percent,
-    status=payload.status,
-    reject_reason=payload.reject_reason,
-  )
-  try:
-    async with get_session() as session:
-      session.add(row)
-      # Flush so the DB assigns server defaults (createdAt/updatedAt) and
-      # makes the row visible within the same transaction before commit.
-      await session.flush()
-      await session.refresh(row)
-    log.debug("trade written id=%s symbol=%s", str(new_id), row.symbol)
-    return row
-  except Exception as exc:
-    log.exception("Failed to write trade: %s", exc)
+_OPEN_STATUSES = {"OPENED", "TP1"}
+
+
+async def upsert_trade_by_position_event(event: PositionEvent) -> Trade | None:
+  """Apply a PositionEvent received from the worker (via NATS TRADE) to the
+  broker's `trades` table. Performs an upsert keyed by (account_id, ticket):
+  updates the row if it exists, otherwise inserts a new one. Idempotent."""
+  trade_status = _POSITION_STATUS_TO_TRADE_STATUS.get(event.status)
+  if trade_status is None:
+    log.warning(
+      "upsert_trade_by_position_event: unknown position status=%s", event.status
+    )
     return None
 
+  is_running = event.status in _OPEN_STATUSES
+  price = event.closed_price if event.closed_price is not None else event.opened_price
 
-async def update_trade(
-  account_id: str, ticket: int, payload: TradeUpdateRequest
-) -> Trade | None:
-  """
-  Apply a partial update to an existing Trade row, identified by account_id + ticket.
-
-  Only non-None fields in *payload* are written to the database.
-
-  Returns
-  -------
-  Trade | None
-      The refreshed ORM instance after update, or None if not found / on failure.
-  """
-  try:
-    async with get_session() as session:
-      result = await session.execute(
-        select(Trade).where(Trade.account_id == account_id, Trade.ticket == ticket)
+  async with get_session() as session:
+    result = await session.execute(
+      select(Trade).where(
+        Trade.account_id == event.account_id,
+        Trade.ticket == event.source_ticket,
       )
-      row: Optional[Trade] = result.scalars().first()
+    )
+    row: Optional[Trade] = result.scalars().first()
 
-      if row is None:
-        log.warning(
-          "update_trade: trade for account_id=%s ticket=%s not found",
-          account_id,
-          ticket,
-        )
-        return None
-
-      update_data = payload.model_dump(exclude_none=True)
-      for field, value in update_data.items():
-        setattr(row, field, value)
-
+    if row is not None:
+      row.status = trade_status
+      row.is_running = is_running
+      row.price = price
+      row.quantity = event.volume
+      if event.comment is not None:
+        row.comment = event.comment
+      if event.account_balance is not None:
+        row.account_balance = event.account_balance
       await session.flush()
       await session.refresh(row)
+      log.debug(
+        "trade upserted (update) id=%s account_id=%s ticket=%s status=%s",
+        str(row.id),
+        event.account_id,
+        event.source_ticket,
+        trade_status,
+      )
+      return row
 
+    if event.account_leverage is None:
+      log.error(
+        "upsert_trade_by_position_event: cannot create Trade for "
+        "account_id=%s ticket=%s without account_leverage",
+        event.account_id,
+        event.source_ticket,
+      )
+      return None
+
+    new_row = Trade(
+      id=uuid.uuid4(),
+      account_id=event.account_id,
+      account_leverage=event.account_leverage,
+      account_balance_init=event.account_balance,
+      account_balance=event.account_balance,
+      ticket=event.source_ticket,
+      comment=event.comment,
+      magic=event.magic or f"{event.action}|{event.signal_id or event.source_ticket}",
+      strategy=event.strategy,
+      symbol=event.symbol,
+      action=event.action.upper(),
+      price=price,
+      quantity=event.volume,
+      sl=event.sl,
+      tp1=event.tp1,
+      tp2=event.tp2,
+      is_running=is_running,
+      risk_percent=event.risk_percent,
+      status=trade_status,
+      reject_reason=None,
+    )
+    session.add(new_row)
+    await session.flush()
+    await session.refresh(new_row)
     log.debug(
-      "trade updated id=%s account_id=%s ticket=%s", str(row.id), account_id, ticket
+      "trade upserted (insert) id=%s account_id=%s ticket=%s status=%s",
+      str(new_row.id),
+      event.account_id,
+      event.source_ticket,
+      trade_status,
     )
-    return row
-  except Exception as exc:
-    log.exception(
-      "Failed to update trade for account_id=%s ticket=%s: %s", account_id, ticket, exc
-    )
-    return None
+    return new_row

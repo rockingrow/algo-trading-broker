@@ -24,9 +24,9 @@ class Settings(BaseSettings):
   BROKER_API_KEY: str
 
   # ── NATS Publisher (broker → workers) ────────────────────────
-  NATS_HOST: str = "localhost"   # overridden to "nats" inside Docker
+  NATS_HOST: str = "localhost"  # overridden to "nats" inside Docker
   NATS_PORT: int = 4222
-  NATS_TOKEN: str = ""           # token auth; leave blank = no auth
+  NATS_TOKEN: str = ""  # token auth; leave blank = no auth
 
   @property
   def nats_url(self) -> str:
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
   # ── Telegram ─────────────────────────────────────────────────────
   TELEGRAM_ENABLED: bool = False
   TELEGRAM_BOT_TOKEN: str = ""
-  TELEGRAM_CHAT_ID: str = ""          # management: NATS events, service start/stop
+  TELEGRAM_CHAT_ID: str = ""  # management: NATS events, service start/stop
   TELEGRAM_CHAT_CHANNEL_ID: str = ""  # signals: NATS published trades
 
   @property
