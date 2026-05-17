@@ -19,6 +19,14 @@ class Settings(BaseSettings):
   WEBHOOK_HOST: str = "0.0.0.0"
   WEBHOOK_PORT: int = 80
   WEBHOOK_SECRET: str = ""  # empty = no HMAC validation
+  BROKER_PUBLIC_URL: str = ""  # e.g. https://broker.example.com; falls back to host:port
+
+  @property
+  def broker_url(self) -> str:
+    if self.BROKER_PUBLIC_URL:
+      return self.BROKER_PUBLIC_URL
+    host = self.WEBHOOK_HOST if self.WEBHOOK_HOST != "0.0.0.0" else "localhost"
+    return f"http://{host}:{self.WEBHOOK_PORT}"
 
   # ── Broker API ───────────────────────────────────────────────────
   BROKER_API_KEY: str

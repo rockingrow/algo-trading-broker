@@ -25,6 +25,7 @@ from broker.db.repository import upsert_trade_by_position_event
 from broker.logger import get_logger
 from broker.schemas.publisher_schema import PublishTopicEnum
 from broker.schemas.trade_event_schema import PositionEvent
+from broker.services.notification_service import TelegramNotification
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -36,6 +37,8 @@ class NatsTradeListener:
   def __init__(self) -> None:
     self._nc: Optional[NATSClient] = None
     self._sub: Optional[Subscription] = None
+
+  LISTEN_SUBJECT = PublishTopicEnum.TRADE
 
   async def start(self) -> None:
     opts: dict = {
@@ -50,10 +53,10 @@ class NatsTradeListener:
       opts["token"] = settings.NATS_TOKEN
 
     self._nc = await nats.connect(**opts)
-    self._sub = await self._nc.subscribe(PublishTopicEnum.TRADE.value, cb=self._handle)
+    self._sub = await self._nc.subscribe(self.LISTEN_SUBJECT.value, cb=self._handle)
     log.info(
       "NATS trade listener subscribed to '%s' on %s",
-      PublishTopicEnum.TRADE.value,
+      self.LISTEN_SUBJECT.value,
       settings.nats_url,
     )
 
@@ -94,9 +97,17 @@ class NatsTradeListener:
 
   async def _on_disconnected(self) -> None:
     log.warning("NATS trade listener disconnected")
+    TelegramNotification().send_message(
+      f"🔴 <b>NATS Listener Disconnected</b>\n"
+      f"📥 Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
+    )
 
   async def _on_reconnected(self) -> None:
     log.info("NATS trade listener reconnected to %s", settings.nats_url)
+    TelegramNotification().send_message(
+      f"🔌 <b>NATS Listener Reconnected</b>\n"
+      f"📥 Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
+    )
 
   async def _on_error(self, exc: Exception) -> None:
     log.error("NATS trade listener error: %s", exc)

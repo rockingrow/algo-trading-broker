@@ -2,6 +2,116 @@ opencollection: 1.0.0
 
 info:
   name: Algo Trading Broker
+
+docs:
+  content: |-
+    # Algo Trading Broker — Bruno Collection
+
+    Bruno API collection at [bruno/](bruno/) for testing the Algo Trading Broker service. Two main flows: **webhook** ingestion (signals from TradingView / strategy) and **worker** trade lifecycle updates (from MT5 worker).
+
+    ## Collection root
+
+    [opencollection.yml](bruno/opencollection.yml) — collection manifest (`Algo Trading Broker`). Ignores `node_modules` and `.git`.
+
+    ## Environments — [environments/](bruno/environments/)
+
+    | Name | `url` | Notes |
+    | --- | --- | --- |
+    | [LOCAL](bruno/environments/Algo%20Trading%20Broker%20-%20LOCAL.yml) | `http://localhost:{{port}}` (port `8080`) | `webhook_token` and `broker_token` are secrets |
+    | [live](bruno/environments/Algo%20Trading%20Broker%20-%20live.yml) | secret | `webhook_token` is a secret |
+    | [Tunneling test](bruno/environments/Algo%20Traing%20Broker%20-%20Tuneling%20test.yml) | `https://algotradingbotvn.a.pinggy.link` | Pinggy tunnel |
+
+    Variables referenced across requests: `{{url}}`, `{{webhook_token}}`, `{{broker_token}}`.
+
+    > Note: the live env defines only `url` + `webhook_token` — running `worker/*` requests against it would fail because `broker_token` is not set.
+
+    ## Top-level requests
+
+    ### [Health Check](bruno/Health%20Check.yml) — `GET {{url}}/health`
+    Liveness probe. No auth, no body.
+
+    ### [Webhook](bruno/Webhook.yml) — `POST {{url}}/webhook` *(legacy at root)*
+    Same endpoint as requests in [webhook/](bruno/webhook/) but kept at the collection root. Sends a `LONG` example payload without the `strategy` field — likely an older sample. Prefer the requests inside [webhook/](bruno/webhook/).
+
+    ---
+
+    ## `webhook/` folder — TradingView → Broker signals
+
+    Folder config: [webhook/folder.yml](bruno/webhook/folder.yml) (auth inherited).
+    All requests POST to `{{url}}/webhook` with the same JSON envelope:
+
+    ```json
+    {
+      "strategy": "MT5_GOLD_M5_V1",
+      "token": "{{webhook_token}}",
+      "symbol": "OANDA:XAUUSD",
+      "timeframe": "5",
+      "timestamp": "YYYY-MM-DD HH:MM:SS",
+      "position": { "action": "...", ... },
+      "indicators": { ... },
+      "inputs": { ... }
+    }
+    ```
+
+    `indicators` and `inputs` are only present on entry/lifecycle signals — `FLAT` skips them.
+
+    | Seq | Request | `position.action` | Payload shape |
+    | --- | --- | --- | --- |
+    | 1 | [Webhook - LONG](bruno/webhook/Webhook%20-%20LONG.yml) | `LONG` | full: `price`, `quantity`, `sl`, `tp1`, `tp2` |
+    | 2 | [Webhook - SHORT](bruno/webhook/Webhook%20-%20SHORT.yml) | `SHORT` | full: `price`, `quantity`, `sl`, `tp1`, `tp2` |
+    | 3 | [Webhook - TP1](bruno/webhook/Webhook%20-%20TP1.yml) | `TP1` | partial close: `price`, `quantity`, `is_running: true` |
+    | 4 | [Webhook - TP2](bruno/webhook/Webhook%20-%20TP2.yml) | `TP2` | full close: `price`, `quantity`, `is_running: false` |
+    | 5 | [Webhook - SL](bruno/webhook/Webhook%20-%20SL.yml) | `SL` | stop-loss: `price`, `quantity` |
+    | 6 | [Webhook - R_SL](bruno/webhook/Webhook%20-%20R_SL.yml) | `R_SL` | trailing/raised SL: `price`, `quantity` |
+    | 7 | [Webhook - FLAT](bruno/webhook/Webhook%20-%20FLAT.yml) | `FLAT` | minimal — only `action`, no `indicators` / `inputs` |
+
+    `indicators` carries chart state (`wt1/wt2`, BB `upper/lower/basis`, `ema200_visual/filter`, `atr_val`, gating flags `in_session`, `vol_spike`, `in_cooldown`, `sl_too_wide`).
+    `inputs` carries the strategy parameters (`watching_candles`, `over_wt_value`, `safe_wt_value`, `skip_windows`, `bb_*`, `atr_*`, `risk_percent`, `tp1_qty_pc`, `use_max_sl_dist`, `max_sl_distance`, `vol_*`, `ema_*_tf`, `use_cooldown`, `cooldown_bars`).
+
+    ---
+
+    ## `worker/` folder — MT5 worker → Broker trade lifecycle
+
+    Folder config: [worker/folder.yml](bruno/worker/folder.yml) — injects header `X-API-KEY: {{broker_token}}` for every request.
+
+    ### Create (POST `{{url}}/trades`)
+
+    | Seq | Request | `status` | Notes |
+    | --- | --- | --- | --- |
+    | 1 | [Worker - Create Opened Long](bruno/worker/Worker%20-%20Create%20Opened%20Long.yml) | `OPENED` | `ticket` set, `is_running: true`, `magic: "LONG\|<uuid>"` |
+    | 2 | [Worker - Create Rejected Short](bruno/worker/Worker%20-%20Create%20Rejected%20Short.yml) | `REJECTED` | `ticket: null`, `reject_reason` populated, `is_running: false` |
+
+    Create body carries: `account_id`, `account_leverage`, `account_balance_init`, `account_balance`, `ticket`, `comment`, `magic`, `strategy`, `symbol`, `action`, `price`, `quantity`, `sl`, `tp1`, `tp2`, `is_running`, `risk_percent`, `status`, `reject_reason`.
+
+    ### Update (PATCH `{{url}}/trades/{account_id}/{ticket}`)
+
+    Path uses example values `12345678` / `123456789`.
+
+    | Seq | Request | `status` | Notes |
+    | --- | --- | --- | --- |
+    | 3 | [Worker - Update Partially Closed](bruno/worker/Worker%20-%20Update%20Partially%20Closed.yml) | `PARTIALLY_CLOSED` | `is_running: true`, partial fill `price`/`quantity` |
+    | 4 | [Worker - Update Closed SL](bruno/worker/Worker%20-%20Update%20Closed%20SL.yml) | `CLOSED` | `sl: null`, `is_running: false` |
+    | 5 | [Worker - Update Closed TP2](bruno/worker/Worker%20-%20Update%20Closed%20TP2.yml) | `CLOSED` | final TP2 fill, `is_running: false` |
+    | 6 | [Worker - Update Flat](bruno/worker/Worker%20-%20Update%20Flat.yml) | `FLAT` | minimal: just identity + `status` |
+
+    ---
+
+    ## Auth summary
+
+    | Surface | Auth mechanism |
+    | --- | --- |
+    | `GET /health` | none |
+    | `POST /webhook` | `token` field in JSON body (= `{{webhook_token}}`) |
+    | `POST /trades`, `PATCH /trades/{acct}/{ticket}` | `X-API-KEY` header (= `{{broker_token}}`) injected by [worker/folder.yml](bruno/worker/folder.yml) |
+
+    ## Typical test sequences
+
+    - **Happy path long:** `webhook/LONG` → `worker/Create Opened Long` → `webhook/TP1` → `worker/Update Partially Closed` → `webhook/TP2` → `worker/Update Closed TP2`.
+    - **Stopped out:** `webhook/LONG` → `worker/Create Opened Long` → `webhook/SL` → `worker/Update Closed SL`.
+    - **Trail to BE / raise SL:** insert `webhook/R_SL` after `TP1`.
+    - **Rejected entry:** `webhook/SHORT` → `worker/Create Rejected Short`.
+    - **Reset state:** `webhook/FLAT` → `worker/Update Flat`.
+  type: text/markdown
 bundled: false
 extensions:
   bruno:

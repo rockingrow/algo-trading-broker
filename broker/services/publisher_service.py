@@ -36,8 +36,13 @@ class NatsPublisher:
   specific subject.  Message body is a raw JSON string.
   """
 
+  PUBLISH_SUBJECTS = [PublishTopicEnum.SIGNAL, PublishTopicEnum.ADMIN]
+
   def __init__(self) -> None:
     self._nc: Optional[NATSClient] = None
+
+  def _subjects_line(self) -> str:
+    return " | ".join(s.value for s in self.PUBLISH_SUBJECTS)
 
   async def connect(self) -> None:
     """Connect to the NATS server and register lifecycle callbacks."""
@@ -53,7 +58,6 @@ class NatsPublisher:
 
     self._nc = await nats.connect(**opts)
     log.info("NATS publisher connected to %s", settings.nats_url)
-    TelegramNotification().send_message("🔌 <b>NATS Publisher Connected</b>")
 
   # ── Public API ────────────────────────────────────────────────────
 
@@ -75,10 +79,11 @@ class NatsPublisher:
       signal.symbol,
     )
 
-  async def publish_flat(self, symbol: str, timestamp: datetime) -> None:
+  async def publish_flat(self, symbol: str, timestamp: datetime, strategy: str) -> None:
     """Broadcast a FLAT (close-all) directive to all connected subscribers."""
     payload = json.dumps(
       {
+        "strategy": strategy,
         "timestamp": timestamp.isoformat(),
         "action": "FLAT",
         "symbol": symbol,
@@ -100,11 +105,17 @@ class NatsPublisher:
 
   async def _on_disconnected(self) -> None:
     log.warning("NATS publisher disconnected")
-    TelegramNotification().send_message("🔴 <b>NATS Publisher Disconnected</b>")
+    TelegramNotification().send_message(
+      f"🔴 <b>NATS Publisher Disconnected</b>\n"
+      f"📤 Publishing: <code>{self._subjects_line()}</code>"
+    )
 
   async def _on_reconnected(self) -> None:
     log.info("NATS publisher reconnected to %s", settings.nats_url)
-    TelegramNotification().send_message("🔌 <b>NATS Publisher Reconnected</b>")
+    TelegramNotification().send_message(
+      f"🔌 <b>NATS Publisher Reconnected</b>\n"
+      f"📤 Publishing: <code>{self._subjects_line()}</code>"
+    )
 
   async def _on_closed(self) -> None:
     log.info("NATS publisher connection closed")

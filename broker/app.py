@@ -5,18 +5,18 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from broker.db.engine import close_db, init_db
+from broker.services.notification_service import TelegramNotification
 from broker.services.publisher_service import NatsPublisher
 from broker.services.trade_listener import NatsTradeListener
 from broker.router import get_core_router
 from broker.logger import get_logger
+from broker.settings import settings
 
 log = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-  from broker.services.notification_service import TelegramNotification
-
   await init_db()
   publisher = NatsPublisher()
   await publisher.connect()
@@ -27,12 +27,20 @@ async def lifespan(app: FastAPI):
   app.state.trade_listener = trade_listener
 
   # Notification: Startup
-  TelegramNotification().send_message("🟢 Broker Node Started")
+  TelegramNotification().send_message(
+    f"🟢 <b>Broker Node Started</b>\n"
+    f"🔌 NATS Publisher: <code>{publisher._subjects_line()}</code>\n"
+    f"🔌 NATS Listener: <code>{NatsTradeListener.LISTEN_SUBJECT.value}</code>\n"
+    f"🌐 Endpoint: <code>{settings.broker_url}</code>"
+  )
 
   yield
 
   # Notification: Shutdown
-  TelegramNotification().send_message("🛑 Broker Node Stopped")
+  TelegramNotification().send_message(
+    f"🛑 <b>Broker Node Stopped</b>\n"
+    f"🌐 Endpoint: <code>{settings.broker_url}</code>"
+  )
 
   await trade_listener.stop()
   await publisher.close()

@@ -83,6 +83,14 @@ _POSITION_STATUS_TO_TRADE_STATUS: dict[str, TradeStatusEnum] = {
 
 _OPEN_STATUSES = {"OPENED", "TP1"}
 
+_STATUS_ORDER: dict[TradeStatusEnum, int] = {
+  TradeStatusEnum.OPENED: 0,
+  TradeStatusEnum.PARTIALLY_CLOSED: 1,
+  TradeStatusEnum.CLOSED: 2,
+  TradeStatusEnum.FLAT: 2,
+  TradeStatusEnum.REJECTED: -1,
+}
+
 
 async def upsert_trade_by_position_event(event: PositionEvent) -> Trade | None:
   """Apply a PositionEvent received from the worker (via NATS TRADE) to the
@@ -108,6 +116,13 @@ async def upsert_trade_by_position_event(event: PositionEvent) -> Trade | None:
     row: Optional[Trade] = result.scalars().first()
 
     if row is not None:
+      if _STATUS_ORDER.get(trade_status, 0) < _STATUS_ORDER.get(row.status, 0):
+        log.warning(
+          "upsert_trade_by_position_event: ignoring status downgrade %s → %s "
+          "for account_id=%s ticket=%s",
+          row.status, trade_status, event.account_id, event.source_ticket,
+        )
+        return row
       row.status = trade_status
       row.is_running = is_running
       row.price = price

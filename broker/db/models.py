@@ -12,6 +12,7 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import (
+  BigInteger,
   Boolean,
   DateTime,
   Enum,
@@ -99,7 +100,7 @@ class Trade(Base):
   account_balance: Mapped[float] = mapped_column(Float, nullable=True)
 
   # Broker-specific fields
-  ticket: Mapped[int | None] = mapped_column(Float, nullable=True, index=True)
+  ticket: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
   comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
   magic: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 

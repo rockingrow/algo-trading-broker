@@ -69,7 +69,7 @@ def get_webhook_router() -> APIRouter:
       publish_error: str | None = None
       try:
         publisher = request.app.state.publisher
-        await publisher.publish_flat(symbol=flat_symbol, timestamp=payload.timestamp)
+        await publisher.publish_flat(symbol=flat_symbol, timestamp=payload.timestamp, strategy=payload.strategy)
       except Exception as exc:
         publish_error = str(exc)
         log.exception("NATS publish_flat error: %s", exc)

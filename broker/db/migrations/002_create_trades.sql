@@ -5,7 +5,7 @@
 DO $$ 
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tradestatusenum') THEN
-        CREATE TYPE tradestatusenum AS ENUM ('OPENED', 'REJECTED', 'PARTIALLY_CLOSED', 'CLOSED');
+        CREATE TYPE tradestatusenum AS ENUM ('OPENED', 'REJECTED', 'PARTIALLY_CLOSED', 'CLOSED', 'FLAT');
     END IF;
 END $$;
 
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS trades (
     account_balance_init DOUBLE PRECISION,
     account_balance DOUBLE PRECISION,
 
-    ticket DOUBLE PRECISION,
+    ticket BIGINT,
     comment VARCHAR(255),
     magic VARCHAR(255) NOT NULL,
 
