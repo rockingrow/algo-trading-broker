@@ -23,6 +23,8 @@ RUN uv sync --no-dev --no-install-project
 
 # Copy application source
 COPY README.md ./
+COPY alembic.ini ./
+COPY alembic/ alembic/
 COPY broker/ broker/
 COPY scripts/ scripts/
 

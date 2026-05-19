@@ -15,13 +15,46 @@ from typing import Optional
 from sqlalchemy import select
 
 from broker.db.engine import get_session
-from broker.db.models import Signal, Trade
+from broker.db.models import BrokerSetting, Signal, Trade
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.logger import get_logger
 
 log = get_logger(__name__)
+
+
+async def get_broker_setting_by_key(key: str) -> str | None:
+  """Return the value for the given broker_settings key, or None if not found."""
+  try:
+    async with get_session() as session:
+      result = await session.execute(
+        select(BrokerSetting).where(BrokerSetting.key == key)
+      )
+      row: Optional[BrokerSetting] = result.scalars().first()
+      return row.value if row is not None else None
+  except Exception as exc:
+    log.exception("Failed to read broker setting key=%s: %s", key, exc)
+    return None
+
+
+async def set_broker_setting_value(key: str, value: str) -> bool:
+  """Upsert a broker_settings row. Returns True on success, False on error."""
+  try:
+    async with get_session() as session:
+      result = await session.execute(
+        select(BrokerSetting).where(BrokerSetting.key == key)
+      )
+      row: Optional[BrokerSetting] = result.scalars().first()
+      if row is not None:
+        row.value = value
+      else:
+        session.add(BrokerSetting(id=uuid.uuid4(), key=key, value=value))
+    log.debug("broker setting upserted key=%s value=%s", key, value)
+    return True
+  except Exception as exc:
+    log.exception("Failed to upsert broker setting key=%s: %s", key, exc)
+    return False
 
 
 async def log_signal(payload: WebhookPayload) -> str | None:

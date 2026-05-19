@@ -30,6 +30,9 @@ docs:
     ### [Health Check](bruno/Health%20Check.yml) — `GET {{url}}/health`
     Liveness probe. No auth, no body.
 
+    ### [Toggle Prevent Signal](bruno/Toggle%20Prevent%20Signal.yml) — `POST {{url}}/settings/prevent-signal`
+    Toggles the `prevent_signal` broker setting between `1` (signal processing enabled) and `0` (disabled). No body required. Returns `{"setting": "prevent_signal", "value": "<new>", "state": "ENABLED|DISABLED"}`. Sends a Telegram notification to the private chat on every toggle.
+
     ### [Webhook](bruno/Webhook.yml) — `POST {{url}}/webhook` *(legacy at root)*
     Same endpoint as requests in [webhook/](bruno/webhook/) but kept at the collection root. Sends a `LONG` example payload without the `strategy` field — likely an older sample. Prefer the requests inside [webhook/](bruno/webhook/).
 
@@ -101,6 +104,7 @@ docs:
     | Surface | Auth mechanism |
     | --- | --- |
     | `GET /health` | none |
+    | `POST /settings/prevent-signal` | none |
     | `POST /webhook` | `token` field in JSON body (= `{{webhook_token}}`) |
     | `POST /trades`, `PATCH /trades/{acct}/{ticket}` | `X-API-KEY` header (= `{{broker_token}}`) injected by [worker/folder.yml](bruno/worker/folder.yml) |
 

@@ -1,18 +1,26 @@
-.PHONY: help install install-dev update lock fix format lint check run simulate-nats
+.PHONY: help install install-dev update lock fix format lint check run simulate-nats \
+        db-upgrade db-downgrade db-history db-current db-revision
 
 help:
 	@echo "Available commands:"
-	@echo "  make install     - Install production dependencies"
-	@echo "  make install-dev - Install all dependencies including dev"
-	@echo "  make update      - Update dependencies and regenerate lock file"
-	@echo "  make lock        - Regenerate uv.lock"
-	@echo "  make fix         - Run ruff format and check --fix"
-	@echo "  make format      - Run ruff format"
-	@echo "  make lint        - Run ruff check"
-	@echo "  make check       - Alias for lint"
-	@echo "  make run         - Run the broker locally"
-	@echo "  make dev         - Run docker compose locally with hot module reload on code change"
+	@echo "  make install       - Install production dependencies"
+	@echo "  make install-dev   - Install all dependencies including dev"
+	@echo "  make update        - Update dependencies and regenerate lock file"
+	@echo "  make lock          - Regenerate uv.lock"
+	@echo "  make fix           - Run ruff format and check --fix"
+	@echo "  make format        - Run ruff format"
+	@echo "  make lint          - Run ruff check"
+	@echo "  make check         - Alias for lint"
+	@echo "  make run           - Run the broker locally"
+	@echo "  make dev           - Run docker compose locally with hot module reload on code change"
 	@echo "  make simulate-nats - Run NATS signal simulator (E2E)"
+	@echo ""
+	@echo "Database (Alembic):"
+	@echo "  make db-upgrade    - Apply all pending migrations (upgrade head)"
+	@echo "  make db-downgrade  - Roll back one migration step"
+	@echo "  make db-history    - Show migration history"
+	@echo "  make db-current    - Show current revision in the database"
+	@echo "  make db-revision m='msg' - Create a new blank migration file"
 
 install:
 	uv sync --no-dev
@@ -63,3 +71,23 @@ logging:
 
 simulate-nats:
 	uv run python e2e/simulate_signals.py
+
+# ── Alembic ──────────────────────────────────────────────────────────────────
+# POSTGRES_HOST override: .env uses "postgres" (Docker service name); locally
+# the DB is reachable via the mapped port on localhost.
+ALEMBIC = POSTGRES_HOST=localhost uv run alembic
+
+db-upgrade:
+	$(ALEMBIC) upgrade head
+
+db-downgrade:
+	$(ALEMBIC) downgrade -1
+
+db-history:
+	$(ALEMBIC) history --verbose
+
+db-current:
+	$(ALEMBIC) current
+
+db-revision:
+	$(ALEMBIC) revision --autogenerate -m "$(m)"

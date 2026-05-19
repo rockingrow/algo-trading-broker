@@ -23,6 +23,7 @@ from sqlalchemy import (
   UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.trade_schema import TradeStatusEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -127,3 +128,42 @@ class Trade(Base):
       f"<Trade id={self.id} account_id={self.account_id} ticket={self.ticket} "
       f"action={self.action} symbol={self.symbol}>"
     )
+
+
+class Account(Base):
+  """
+  One row per account managed by the broker.
+  """
+
+  __tablename__ = "accounts"
+  __table_args__ = (UniqueConstraint("account_id", name="uq_accounts_account_id"),)
+
+  # Trading Account info
+  account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+  account_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+  account_balance: Mapped[float] = mapped_column(Float, nullable=True)
+  market_type: Mapped[MarketTypeEnum] = mapped_column(
+    Enum(MarketTypeEnum), nullable=False
+  )
+
+  last_activity_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
+
+  def __repr__(self) -> str:
+    return f"<Account id={self.id} account_id={self.account_id} market_type={self.market_type}>"
+
+
+class BrokerSetting(Base):
+  """
+  One row per broker setting.
+  """
+
+  __tablename__ = "broker_settings"
+  __table_args__ = (UniqueConstraint("key", name="uq_broker_settings_key"),)
+
+  key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+  value: Mapped[str] = mapped_column(String(255), nullable=False)
+
+  def __repr__(self) -> str:
+    return f"<BrokerSetting id={self.id} key={self.key} value={self.value}>"

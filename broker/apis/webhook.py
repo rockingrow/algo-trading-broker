@@ -11,12 +11,13 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from broker.db.repository import log_signal
+from broker.db.repository import get_broker_setting_by_key, log_signal
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.schemas.publisher_schema import TradingSignal
 from broker.schemas.core import SignalActionEnum
 from broker.helpers.signal_helper import parse_signal, action_to_emoji
 from broker.settings import settings
+from broker.constants import PREVENT_SIGNAL
 from broker.logger import get_logger
 from broker.services.notification_service import TelegramNotification
 from broker.helpers.timeframe_helper import format_timeframe
@@ -53,9 +54,25 @@ def get_webhook_router() -> APIRouter:
         detail="Invalid token received in webhook payload",
       )
 
+    # 2. Check broker setting: PREVENT_SIGNAL must be "1" to allow flow
+    prevent_signal_value = await get_broker_setting_by_key(PREVENT_SIGNAL)
+    if prevent_signal_value != "1":
+      log.warning("Signal blocked: broker setting '%s' = %r", PREVENT_SIGNAL, prevent_signal_value)
+      TelegramNotification(
+        chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
+      ).send_message(
+        f"🚫 <b>Broker signal blocked</b>\n"
+        f"Symbol: <b>{payload.symbol}</b>\n"
+        f"Reason: Signal processing is temporarily disabled (<code>{PREVENT_SIGNAL}</code> != 1)"
+      )
+      raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Signal processing is currently disabled",
+      )
+
     log.info("Webhook payload: %s", {**payload.model_dump(), "token": "***"})
 
-    # 2. Log to DB to generate signal_id
+    # 4. Log to DB to generate signal_id
     db_signal_id = await log_signal(payload=payload)
     if not db_signal_id:
       raise HTTPException(
@@ -63,7 +80,7 @@ def get_webhook_router() -> APIRouter:
         detail="Failed to persist signal into database",
       )
 
-    # 3a. FLAT — close-all shortcut: publish directive then notify
+    # 4a. FLAT — close-all shortcut: publish directive then notify
     if payload.position.action == SignalActionEnum.FLAT:
       flat_symbol = payload.symbol.split(":")[-1].upper().strip()
       publish_error: str | None = None
@@ -84,13 +101,9 @@ def get_webhook_router() -> APIRouter:
         chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
       )
       msg = (
-        f"-------------------------------------\n"
-        f"\n"
         f"{action_to_emoji(payload.position.action)} <b>{payload.symbol}</b> ({format_timeframe(payload.timeframe)})\n"
         f"Action: <b>FLAT</b>\n"
         f"Time: {payload.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"\n"
-        f"-------------------------------------\n"
       )
       notification.send_message(msg)
 
@@ -137,16 +150,12 @@ def get_webhook_router() -> APIRouter:
       chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
     )
     msg = (
-      f"-------------------------------------\n"
-      f"\n"
       f"{action_to_emoji(payload.position.action)} <b>{payload.symbol}</b> ({format_timeframe(payload.timeframe)})\n"
       f"Action: <b>{payload.position.action.value}</b>\n"
       f"Price: <code>{payload.position.price}</code>\n"
       f"Quantity: <code>{payload.position.quantity}</code>\n"
       f"SL: <code>{payload.position.sl}</code> | TP1: <code>{payload.position.tp1}</code> | TP2: <code>{payload.position.tp2}</code>\n"
       f"Time: {payload.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n"
-      f"\n"
-      f"-------------------------------------\n"
     )
     notification.send_message(msg)
 
