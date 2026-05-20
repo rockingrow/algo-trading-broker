@@ -27,6 +27,19 @@ from broker.logger import get_logger
 log = get_logger(__name__)
 
 
+async def get_accounts() -> list[Account]:
+  """Return all rows from the accounts table ordered by last_activity_at desc."""
+  try:
+    async with get_session() as session:
+      result = await session.execute(
+        select(Account).order_by(Account.last_activity_at.desc())
+      )
+      return list(result.scalars().all())
+  except Exception as exc:
+    log.exception("Failed to fetch accounts: %s", exc)
+    return []
+
+
 async def get_broker_setting_by_key(key: str) -> str | None:
   """Return the value for the given broker_settings key, or None if not found."""
   try:

@@ -1,8 +1,13 @@
-from typing import Dict
+from typing import Dict, List
 
 from fastapi import APIRouter, HTTPException, status
 
-from broker.db.repository import get_broker_setting_by_key, set_broker_setting_value
+from broker.db.repository import (
+  get_accounts,
+  get_broker_setting_by_key,
+  set_broker_setting_value,
+)
+from broker.schemas.account_schema import AccountResponse
 from broker.settings import settings
 from broker.constants import PREVENT_SIGNAL
 from broker.services.notification_service import TelegramNotification
@@ -17,6 +22,12 @@ def get_router() -> APIRouter:
   @router.get("/health", tags=["system"])
   async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+  @router.get("/accounts", tags=["accounts"], response_model=List[AccountResponse])
+  async def list_accounts() -> List[AccountResponse]:
+    """Return all accounts ordered by last activity descending."""
+    accounts = await get_accounts()
+    return [AccountResponse.model_validate(a) for a in accounts]
 
   @router.post("/settings/prevent-signal", tags=["settings"])
   async def toggle_prevent_signal() -> Dict[str, str]:
