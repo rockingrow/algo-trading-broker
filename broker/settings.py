@@ -19,7 +19,9 @@ class Settings(BaseSettings):
   WEBHOOK_HOST: str = "0.0.0.0"
   WEBHOOK_PORT: int = 80
   WEBHOOK_SECRET: str = ""  # empty = no HMAC validation
-  BROKER_PUBLIC_URL: str = ""  # e.g. https://broker.example.com; falls back to host:port
+  BROKER_PUBLIC_URL: str = (
+    ""  # e.g. https://broker.example.com; falls back to host:port
+  )
 
   @property
   def broker_url(self) -> str:

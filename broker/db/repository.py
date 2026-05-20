@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from broker.db.engine import get_session
-from broker.db.models import BrokerSetting, Signal, Trade
+from broker.db.models import Account, BrokerSetting, Signal, Trade
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.trade_event_schema import PositionEvent
@@ -125,6 +128,33 @@ _STATUS_ORDER: dict[TradeStatusEnum, int] = {
 }
 
 
+async def _upsert_account(session: AsyncSession, event: PositionEvent) -> None:
+  """Upsert the accounts row within an existing session. Always refreshes last_activity_at."""
+  result = await session.execute(
+    select(Account).where(Account.account_id == event.account_id)
+  )
+  row: Optional[Account] = result.scalars().first()
+  now = datetime.now(timezone.utc)
+
+  if row is not None:
+    row.account_name = event.account_name
+    row.market_type = MarketTypeEnum(event.market_type)
+    if event.account_balance is not None:
+      row.account_balance = event.account_balance
+    row.last_activity_at = now
+  else:
+    session.add(
+      Account(
+        id=uuid.uuid4(),
+        account_id=event.account_id,
+        account_name=event.account_name,
+        account_balance=event.account_balance,
+        market_type=MarketTypeEnum(event.market_type),
+        last_activity_at=now,
+      )
+    )
+
+
 async def upsert_trade_by_position_event(event: PositionEvent) -> Trade | None:
   """Apply a PositionEvent received from the worker (via NATS TRADE) to the
   broker's `trades` table. Performs an upsert keyed by (account_id, ticket):
@@ -140,6 +170,8 @@ async def upsert_trade_by_position_event(event: PositionEvent) -> Trade | None:
   price = event.closed_price if event.closed_price is not None else event.opened_price
 
   async with get_session() as session:
+    await _upsert_account(session, event)
+
     result = await session.execute(
       select(Trade).where(
         Trade.account_id == event.account_id,
@@ -153,7 +185,10 @@ async def upsert_trade_by_position_event(event: PositionEvent) -> Trade | None:
         log.warning(
           "upsert_trade_by_position_event: ignoring status downgrade %s → %s "
           "for account_id=%s ticket=%s",
-          row.status, trade_status, event.account_id, event.source_ticket,
+          row.status,
+          trade_status,
+          event.account_id,
+          event.source_ticket,
         )
         return row
       row.status = trade_status

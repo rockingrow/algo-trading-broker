@@ -57,7 +57,9 @@ def get_webhook_router() -> APIRouter:
     # 2. Check broker setting: PREVENT_SIGNAL must be "1" to allow flow
     prevent_signal_value = await get_broker_setting_by_key(PREVENT_SIGNAL)
     if prevent_signal_value != "1":
-      log.warning("Signal blocked: broker setting '%s' = %r", PREVENT_SIGNAL, prevent_signal_value)
+      log.warning(
+        "Signal blocked: broker setting '%s' = %r", PREVENT_SIGNAL, prevent_signal_value
+      )
       TelegramNotification(
         chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
       ).send_message(
@@ -86,7 +88,9 @@ def get_webhook_router() -> APIRouter:
       publish_error: str | None = None
       try:
         publisher = request.app.state.publisher
-        await publisher.publish_flat(symbol=flat_symbol, timestamp=payload.timestamp, strategy=payload.strategy)
+        await publisher.publish_flat(
+          symbol=flat_symbol, timestamp=payload.timestamp, strategy=payload.strategy
+        )
       except Exception as exc:
         publish_error = str(exc)
         log.exception("NATS publish_flat error: %s", exc)

@@ -38,8 +38,7 @@ async def lifespan(app: FastAPI):
 
   # Notification: Shutdown
   TelegramNotification().send_message(
-    f"🛑 <b>Broker Node Stopped</b>\n"
-    f"🌐 Endpoint: <code>{settings.broker_url}</code>"
+    f"🛑 <b>Broker Node Stopped</b>\n🌐 Endpoint: <code>{settings.broker_url}</code>"
   )
 
   await trade_listener.stop()

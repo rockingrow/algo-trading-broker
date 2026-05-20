@@ -23,7 +23,7 @@ class PositionEvent(BaseModel):
   model_config = ConfigDict(use_enum_values=True)
 
   event: PositionEventType
-  account_id: str
+  market_type: str
 
   id: int
   source_ticket: int
@@ -52,5 +52,7 @@ class PositionEvent(BaseModel):
   risk_percent: float = 0.0
 
   # MT5 account snapshot from the worker — needed to create a Trade row.
+  account_id: str
+  account_name: str
   account_leverage: Optional[int] = None
   account_balance: Optional[float] = None

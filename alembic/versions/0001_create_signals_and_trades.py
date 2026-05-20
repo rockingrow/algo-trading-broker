@@ -5,6 +5,7 @@ Revises:
 Create Date: 2026-05-19 00:00:00.000000
 
 """
+
 from alembic import op
 
 revision = "0001"
@@ -14,9 +15,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # ── Shared enum & trigger function ───────────────────────────────────────
+  # ── Shared enum & trigger function ───────────────────────────────────────
 
-    op.execute("""
+  op.execute("""
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'signalactionenum') THEN
@@ -27,7 +28,7 @@ def upgrade() -> None:
         END $$;
     """)
 
-    op.execute("""
+  op.execute("""
         CREATE OR REPLACE FUNCTION update_updated_at_column()
         RETURNS TRIGGER AS $$
         BEGIN
@@ -37,9 +38,9 @@ def upgrade() -> None:
         $$ LANGUAGE 'plpgsql';
     """)
 
-    # ── signals ───────────────────────────────────────────────────────────────
+  # ── signals ───────────────────────────────────────────────────────────────
 
-    op.execute("""
+  op.execute("""
         CREATE TABLE IF NOT EXISTS signals (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -65,20 +66,22 @@ def upgrade() -> None:
         );
     """)
 
-    op.execute('CREATE INDEX IF NOT EXISTS idx_signals_symbol    ON signals (symbol);')
-    op.execute('CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals ("timestamp");')
+  op.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol    ON signals (symbol);")
+  op.execute(
+    'CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals ("timestamp");'
+  )
 
-    op.execute('DROP TRIGGER IF EXISTS trg_update_signals_updated_at ON signals;')
-    op.execute("""
+  op.execute("DROP TRIGGER IF EXISTS trg_update_signals_updated_at ON signals;")
+  op.execute("""
         CREATE TRIGGER trg_update_signals_updated_at
             BEFORE UPDATE ON signals
             FOR EACH ROW
             EXECUTE FUNCTION update_updated_at_column();
     """)
 
-    # ── trades ────────────────────────────────────────────────────────────────
+  # ── trades ────────────────────────────────────────────────────────────────
 
-    op.execute("""
+  op.execute("""
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tradestatusenum') THEN
@@ -89,7 +92,7 @@ def upgrade() -> None:
         END $$;
     """)
 
-    op.execute("""
+  op.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -120,16 +123,16 @@ def upgrade() -> None:
         );
     """)
 
-    op.execute("""
+  op.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_account_ticket
             ON trades (account_id, ticket);
     """)
-    op.execute('CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades (account_id);')
-    op.execute('CREATE INDEX IF NOT EXISTS idx_trades_magic      ON trades (magic);')
-    op.execute('CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades (symbol);')
+  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades (account_id);")
+  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_magic      ON trades (magic);")
+  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades (symbol);")
 
-    op.execute('DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;')
-    op.execute("""
+  op.execute("DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;")
+  op.execute("""
         CREATE TRIGGER trg_update_trades_updated_at
             BEFORE UPDATE ON trades
             FOR EACH ROW
@@ -138,13 +141,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute('DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;')
-    op.execute('DROP TABLE IF EXISTS trades;')
-    op.execute('DROP TYPE IF EXISTS tradestatusenum;')
+  op.execute("DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;")
+  op.execute("DROP TABLE IF EXISTS trades;")
+  op.execute("DROP TYPE IF EXISTS tradestatusenum;")
 
-    op.execute('DROP TRIGGER IF EXISTS trg_update_signals_updated_at ON signals;')
-    op.execute('DROP TABLE IF EXISTS signals;')
+  op.execute("DROP TRIGGER IF EXISTS trg_update_signals_updated_at ON signals;")
+  op.execute("DROP TABLE IF EXISTS signals;")
 
-    # CASCADE removes any remaining trigger dependencies
-    op.execute('DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;')
-    op.execute('DROP TYPE IF EXISTS signalactionenum;')
+  # CASCADE removes any remaining trigger dependencies
+  op.execute("DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;")
+  op.execute("DROP TYPE IF EXISTS signalactionenum;")
