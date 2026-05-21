@@ -91,7 +91,7 @@ def upgrade() -> None:
   # 8. seed default settings
   op.execute("""
         INSERT INTO broker_settings (key, value)
-        VALUES ('prevent_signal', '0')
+        VALUES ('signal_blocked', '0')
         ON CONFLICT DO NOTHING;
     """)
 

@@ -1,1 +1,1 @@
-PREVENT_SIGNAL = "prevent_signal"
+SIGNAL_BLOCKED = "signal_blocked"

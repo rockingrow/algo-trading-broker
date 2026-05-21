@@ -17,7 +17,7 @@ from broker.schemas.publisher_schema import TradingSignal
 from broker.schemas.core import SignalActionEnum
 from broker.helpers.signal_helper import parse_signal, action_to_emoji
 from broker.settings import settings
-from broker.constants import PREVENT_SIGNAL
+from broker.constants import SIGNAL_BLOCKED
 from broker.logger import get_logger
 from broker.services.notification_service import TelegramNotification
 from broker.helpers.timeframe_helper import format_timeframe
@@ -54,18 +54,18 @@ def get_webhook_router() -> APIRouter:
         detail="Invalid token received in webhook payload",
       )
 
-    # 2. Check broker setting: PREVENT_SIGNAL must be "1" to allow flow
-    prevent_signal_value = await get_broker_setting_by_key(PREVENT_SIGNAL)
-    if prevent_signal_value != "1":
+    # 2. Check broker setting: SIGNAL_BLOCKED must be "1" to allow flow
+    signal_blocked_setting = await get_broker_setting_by_key(SIGNAL_BLOCKED)
+    if signal_blocked_setting == "1":
       log.warning(
-        "Signal blocked: broker setting '%s' = %r", PREVENT_SIGNAL, prevent_signal_value
+        "Signal blocked: Enabled - %s = %r", SIGNAL_BLOCKED, signal_blocked_setting
       )
       TelegramNotification(
         chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
       ).send_message(
         f"🚫 <b>Broker signal blocked</b>\n"
         f"Symbol: <b>{payload.symbol}</b>\n"
-        f"Reason: Signal processing is temporarily disabled (<code>{PREVENT_SIGNAL}</code> != 1)"
+        f"Reason: Signal processing is temporarily disabled (<code>{SIGNAL_BLOCKED}</code> != 1)"
       )
       raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
