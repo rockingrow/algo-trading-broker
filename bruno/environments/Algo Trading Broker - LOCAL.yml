@@ -1,5 +1,5 @@
 name: Algo Trading Broker - LOCAL
-color: "#C77A0F"
+color: "#2E8A54"
 variables:
   - name: port
     value: "8080"

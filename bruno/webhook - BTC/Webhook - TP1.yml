@@ -17,7 +17,7 @@ http:
         "timestamp": "2026-04-22 03:50:00",
         "position": {
           "action": "TP1",
-          "price": 78070.50,
+          "price": 75080.50,
           "quantity": 0.01,
           "is_running": true
         },

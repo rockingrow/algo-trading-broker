@@ -1,5 +1,5 @@
 name: Algo Traing Broker - Tuneling test
-color: "#2E8A54"
+color: "#C77A0F"
 variables:
   - name: url
     value: https://algotradingbotvn.a.pinggy.link

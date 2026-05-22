@@ -13,3 +13,36 @@ settings:
   timeout: 0
   followRedirects: true
   maxRedirects: 5
+
+examples:
+  - name: accounts
+    request:
+      url: "{{url}}/accounts"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: date
+          value: Sat, 23 May 2026 13:53:39 GMT
+        - name: server
+          value: uvicorn
+        - name: content-length
+          value: "279"
+        - name: content-type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          [
+            {
+              "id": "56e102ed-a90f-48ed-8bf4-8d7b42d7b717",
+              "account_id": "413652379",
+              "account_name": "WangDemo1",
+              "account_balance": 708.42,
+              "market_type": "FOREX",
+              "last_activity_at": "2026-05-23T13:52:56.885421Z",
+              "createdAt": "2026-05-23T13:47:35.574796Z",
+              "updatedAt": "2026-05-23T13:52:56.884832Z"
+            }
+          ]

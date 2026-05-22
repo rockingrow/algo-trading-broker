@@ -29,8 +29,8 @@ def get_router() -> APIRouter:
     accounts = await get_accounts()
     return [AccountResponse.model_validate(a) for a in accounts]
 
-  @router.post("/settings/prevent-signal", tags=["settings"])
-  async def toggle_prevent_signal() -> Dict[str, str]:
+  @router.post("/settings/block-signal", tags=["settings"])
+  async def toggle_block_signal() -> Dict[str, str]:
     """Toggle SIGNAL_BLOCKED between '1' (enabled) and '0' (disabled)."""
     current = await get_broker_setting_by_key(SIGNAL_BLOCKED)
     new_value = "0" if current == "1" else "1"
@@ -48,7 +48,7 @@ def get_router() -> APIRouter:
     TelegramNotification(chat_id=settings.TELEGRAM_CHAT_ID).send_message(
       f"⚙️ <b>Broker setting changed</b>\n"
       f"Setting: <code>{SIGNAL_BLOCKED}</code>\n"
-      f"Signal processing: <b>{state_label}</b>\n"
+      f"Signal blocked: <b>{state_label}</b>\n"
     )
 
     return {"setting": SIGNAL_BLOCKED, "value": new_value, "state": state_label}

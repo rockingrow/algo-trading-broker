@@ -17,11 +17,11 @@ http:
         "timestamp": "2026-04-10 22:55:00",
         "position": {
           "action": "LONG",
-          "price": 4503.5,
+          "price": 4520.5,
           "quantity": 6.0000,
-          "sl": 4490,
-          "tp1": 4510.00,
-          "tp2": 4515.00
+          "sl": 4500,
+          "tp1": 4525.00,
+          "tp2": 4530.00
         },
         "indicators": {
           "wt1": -65.50,
