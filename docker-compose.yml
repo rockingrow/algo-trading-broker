@@ -23,7 +23,7 @@ services:
       - trading_net
 
   # ─────────────────────────────────────────────────────────────────
-  # NATS — message broker (broker → workers)
+  # NATS — message broker (broker <-> workers)
   # ─────────────────────────────────────────────────────────────────
   nats:
     image: nats:2.10-alpine

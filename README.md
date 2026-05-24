@@ -5,10 +5,13 @@ A high-performance, decentralized **trading signal broker** built with FastAPI a
 ## Features
 
 - **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification).
-- **Persistence**: Logs every signal and trade to **PostgreSQL** for auditing and analytics.
-- **Distribution**: Fan-out signals via **NATS** with token-based authentication.
+- **Persistence**: Logs every signal, trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
+- **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need.
+- **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
+- **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
+- **Signal Gating**: A `SIGNAL_BLOCKED` broker setting can pause signal forwarding without restarting the server.
 - **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals.
-- **Developer Friendly**: Includes Makefile, Bruno API collections, and Ruff for linting.
+- **Developer Friendly**: Includes Makefile, Bruno API collections, Alembic CLI helpers, and Ruff for linting.
 
 ---
 
@@ -22,22 +25,25 @@ graph TD
         DB[(PostgreSQL)]
         NATS["NATS Server :4222 (Token Auth)"]
         Broker -- "Log Signal" --> DB
-        Broker -- "Publish *" --> NATS
+        Broker -- "Publish {strategy}" --> NATS
+        NATS -- "TRADE events" --> NatsService
+        NatsService -- "Upsert Trade + Account" --> DB
     end
-    NATS -- "SIGNAL" --> W1
-    NATS -- "SIGNAL" --> W2
-    NATS -- "SIGNAL" --> WN
+    NATS -- "{strategy}" --> W1
+    NATS -- "{strategy}" --> W2
+    NATS -- "{strategy}" --> WN
     subgraph W1["Worker — Forex (MT5)"]
         W1A[Signal Handler] --> W1B[(SQLite)]
+        W1B -. "NATS TRADE event" .-> NATS
     end
     subgraph W2["Worker — Forex (MT5)"]
         W2A[Signal Handler] --> W2B[(SQLite)]
+        W2B -. "NATS TRADE event" .-> NATS
     end
     subgraph WN["Worker — Crypto (TBD)"]
         WNA[Signal Handler] --> WNB[(SQLite)]
+        WNB -. "NATS TRADE event" .-> NATS
     end
-    W1 -. "POST/PATCH :8080/trades (Log Trade)" .-> Broker
-    W2 -. "POST/PATCH :8080/trades (Log Trade)" .-> Broker
 ```
 
 ---
@@ -47,15 +53,17 @@ graph TD
 ```text
 algo-trading-broker/
 ├── broker/
-│   ├── apis/            # Webhook and trade API routes
-│   ├── db/              # SQLAlchemy models, engine, repository, migrations
+│   ├── apis/            # Webhook, accounts, and settings API routes
+│   ├── db/              # SQLAlchemy models, engine, repository
 │   ├── helpers/         # Signal and timeframe utilities
-│   ├── schemas/         # Pydantic schemas (webhook, publisher, trade, core)
-│   └── services/        # NatsPublisher, TelegramNotification
+│   ├── nats.py          # NATS connection lifecycle (connect/drain/close)
+│   ├── schemas/         # Pydantic schemas (webhook, publisher, trade, account)
+│   └── services/        # NatsService (publish + trade listener), TelegramNotification
+├── alembic/             # Alembic migration environment and version scripts
 ├── bruno/               # Bruno API client collections
 ├── examples/            # Example JSON payloads
 ├── scripts/             # Utility scripts (docker-entrypoint, etc.)
-├── Makefile             # Automation shortcuts (uv, Docker, linters)
+├── Makefile             # Automation shortcuts (uv, Docker, Alembic, linters)
 ├── Dockerfile           # Production container definition
 ├── docker-compose.yml   # Infrastructure (PostgreSQL + NATS + Broker)
 └── pyproject.toml       # uv dependencies & tool config
@@ -63,18 +71,17 @@ algo-trading-broker/
 
 ---
 
-## NATS Security
+## NATS Subjects
 
-The broker authenticates with the NATS server via **token auth**. Workers must supply the same token when subscribing.
+The broker uses **token-based authentication** with the NATS server. Workers must supply the same token when connecting.
 
-Signals are published to NATS subjects:
+| Direction | Subject | Purpose |
+| --------- | ------- | ------- |
+| Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
+| Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
+| Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
 
-| Subject | Purpose |
-| --------------- | ----------------------------------- |
-| `SIGNAL` | Normal trading signals to workers |
-| `ADMIN` | Administrative / broadcast messages |
-
-For end-to-end encryption, enable TLS on the NATS server and configure it separately (outside this repo).
+Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
 
 ---
 
@@ -103,7 +110,13 @@ make install-dev
 docker compose up -d postgres nats
 ```
 
-### 4. Run the Broker
+### 4. Run Database Migrations
+
+```bash
+make db-upgrade
+```
+
+### 5. Run the Broker
 
 ```bash
 # Run locally (requires postgres and nats to be reachable)
@@ -127,13 +140,12 @@ WEBHOOK_PORT=8080
 # Leave blank to disable validation.
 WEBHOOK_SECRET=
 
-# Callback API key for worker → broker trade reporting
+# Callback API key for authenticating requests to the broker API
 BROKER_API_KEY=api_key
 
 # ── NATS ─────────────────────────────────────────────
 NATS_HOST=localhost        # overridden to "nats" inside Docker
 NATS_PORT=4222
-NATS_MONITOR_PORT=8222    # HTTP monitoring dashboard
 NATS_TOKEN=changeme       # shared secret; leave blank = no auth
 
 # ── PostgreSQL ────────────────────────────────────────
@@ -172,13 +184,29 @@ TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
 | `make fix` | Auto-fix linting issues |
 | `make simulate-nats` | Run NATS signal simulator (E2E test) |
 
+### Database (Alembic)
+
+| Command | Description |
+| ----------------------------- | ------------------------------------------- |
+| `make db-upgrade` | Apply all pending migrations (`upgrade head`) |
+| `make db-downgrade` | Roll back one migration step |
+| `make db-history` | Show full migration history |
+| `make db-current` | Show current revision in the database |
+| `make db-revision m='msg'` | Generate a new auto-migration file |
+
 ---
 
-## Webhook API
+## API
+
+### GET `/health`
+
+Returns `{"status": "ok"}`.
+
+---
 
 ### POST `/webhook`
 
-Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set.
+Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Publishes the signal to the NATS subject matching `signal.strategy` (e.g. `wt_cross_v1`).
 
 **Example Payload:**
 
@@ -214,6 +242,37 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 
 ---
 
+### GET `/accounts`
+
+Returns all trading accounts ordered by most recent activity.
+
+**Response:**
+
+```json
+[
+  {
+    "id": "uuid",
+    "account_id": "12345678",
+    "account_name": "Demo Account",
+    "account_balance": 10000.0,
+    "market_type": "FOREX",
+    "last_activity_at": "2024-03-20T10:05:00Z",
+    "createdAt": "2024-03-01T00:00:00Z",
+    "updatedAt": "2024-03-20T10:05:00Z"
+  }
+]
+```
+
+Accounts are automatically created or updated each time a `TRADE` event arrives from a worker.
+
+---
+
+### POST `/settings/block-signal`
+
+Toggles the `SIGNAL_BLOCKED` broker setting between `"1"` (signals blocked) and `"0"` (signals forwarded). Does not require a restart. Sends a Telegram notification on change.
+
+---
+
 ## PostgreSQL Schema
 
 ### `signals` table
@@ -245,7 +304,7 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 | `account_leverage` | Integer | Account leverage at time of trade |
 | `account_balance_init` | Float | Account balance before trade |
 | `account_balance` | Float | Account balance after trade |
-| `ticket` | Float | Broker-assigned order ticket number |
+| `ticket` | BigInteger | Broker-assigned order ticket number |
 | `magic` | String(255) | EA magic number for order identification |
 | `comment` | String(255) | Trade comment |
 | `strategy` | String(50) | Strategy that originated the signal |
@@ -256,15 +315,36 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 | `sl`, `tp1`, `tp2` | Float | Exit prices |
 | `is_running` | Boolean | Strategy active state |
 | `risk_percent` | Float | Risk percentage used |
-| `status` | Enum | Trade status (e.g., OPEN, CLOSED, REJECTED) |
+| `status` | Enum | Trade status (OPEN, CLOSED, REJECTED, …) |
 | `reject_reason` | String(255) | Reason if trade was rejected |
 | `createdAt` | DateTime | Record insertion time |
+
+### `accounts` table
+
+| Column | Type | Description |
+| ------------------- | ------------ | ------------------------------------------ |
+| `id` | UUID (PK) | Unique record identifier |
+| `account_id` | String(50) | Worker's broker account ID (unique) |
+| `account_name` | String(255) | Display name of the account |
+| `account_balance` | Float | Most recent account balance |
+| `market_type` | Enum | `FOREX` or `CRYPTO` |
+| `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+### `broker_settings` table
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `key` | String(255) | Setting key (e.g. `signal_blocked`) |
+| `value` | String(255) | Setting value (`"0"` / `"1"` for flags) |
 
 ---
 
 ## Testing
 
-Open the `/bruno` directory with the [Bruno API Client](https://www.usebruno.com/) to find pre-configured requests for testing the webhook, health, and trade endpoints.
+Open the `/bruno` directory with the [Bruno API Client](https://www.usebruno.com/) to find pre-configured requests for testing the webhook, accounts, settings, and health endpoints.
 
 For end-to-end NATS signal flow testing:
 
