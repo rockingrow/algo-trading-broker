@@ -15,11 +15,11 @@ help:
 	@echo "  make dev           - Run docker compose locally with hot module reload on code change"
 	@echo "  make simulate-nats - Run NATS signal simulator (E2E)"
 	@echo ""
-	@echo "Database (Alembic):"
-	@echo "  make db-upgrade    - Apply all pending migrations (upgrade head)"
-	@echo "  make db-downgrade  - Roll back one migration step"
-	@echo "  make db-history    - Show migration history"
-	@echo "  make db-current    - Show current revision in the database"
+	@echo "Database (Alembic — runs inside broker container, requires stack up):"
+	@echo "  make db-upgrade          - Apply all pending migrations"
+	@echo "  make db-downgrade        - Roll back one migration step"
+	@echo "  make db-history          - Show migration history"
+	@echo "  make db-current          - Show current revision"
 	@echo "  make db-revision m='msg' - Create a new blank migration file"
 
 install:
@@ -73,9 +73,7 @@ simulate-nats:
 	uv run python e2e/simulate_signals.py
 
 # ── Alembic ──────────────────────────────────────────────────────────────────
-# POSTGRES_HOST override: .env uses "postgres" (Docker service name); locally
-# the DB is reachable via the mapped port on localhost.
-ALEMBIC = POSTGRES_HOST=localhost uv run alembic
+ALEMBIC = docker compose exec broker alembic
 
 db-upgrade:
 	$(ALEMBIC) upgrade head

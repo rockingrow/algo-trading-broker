@@ -51,7 +51,7 @@ def create_app() -> FastAPI:
       "Receives TradingView JSON webhook alerts, logs them to PostgreSQL, "
       "and fans them out via NATS to subscriber VPS nodes."
     ),
-    version="2.0.0",
+    version="1.0.0",
     lifespan=lifespan,
   )
 

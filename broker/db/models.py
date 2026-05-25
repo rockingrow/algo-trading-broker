@@ -16,7 +16,7 @@ from sqlalchemy import (
   Boolean,
   DateTime,
   Enum,
-  Float,
+  Numeric,
   String,
   func,
   Integer,
@@ -64,13 +64,13 @@ class Signal(Base):
   action: Mapped[SignalActionEnum] = mapped_column(
     Enum(SignalActionEnum), nullable=False
   )
-  price: Mapped[float] = mapped_column(Float, nullable=False)
-  quantity: Mapped[float] = mapped_column(Float, nullable=False)
-  sl: Mapped[float | None] = mapped_column(Float, nullable=True)
-  tp1: Mapped[float | None] = mapped_column(Float, nullable=True)
-  tp2: Mapped[float | None] = mapped_column(Float, nullable=True)
+  price: Mapped[float] = mapped_column(Numeric(20, 8), nullable=False)
+  quantity: Mapped[float] = mapped_column(Numeric(20, 8), nullable=False)
+  sl: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
+  tp1: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
+  tp2: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
   is_running: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-  risk_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+  risk_percent: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, default=0.0)
 
   # Complex objects stored as JSONB
   indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)
@@ -97,8 +97,8 @@ class Trade(Base):
   # Trading Account info
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   account_leverage: Mapped[int] = mapped_column(Integer, nullable=False)
-  account_balance_init: Mapped[float] = mapped_column(Float, nullable=True)
-  account_balance: Mapped[float] = mapped_column(Float, nullable=True)
+  account_balance_init: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
+  account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
 
   # Broker-specific fields
   ticket: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
@@ -111,13 +111,13 @@ class Trade(Base):
   action: Mapped[SignalActionEnum] = mapped_column(
     Enum(SignalActionEnum), nullable=False
   )
-  price: Mapped[float] = mapped_column(Float, nullable=False)
-  quantity: Mapped[float] = mapped_column(Float, nullable=False)
-  sl: Mapped[float | None] = mapped_column(Float, nullable=True)
-  tp1: Mapped[float | None] = mapped_column(Float, nullable=True)
-  tp2: Mapped[float | None] = mapped_column(Float, nullable=True)
+  price: Mapped[float] = mapped_column(Numeric(20, 8), nullable=False)
+  quantity: Mapped[float] = mapped_column(Numeric(20, 8), nullable=False)
+  sl: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
+  tp1: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
+  tp2: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
   is_running: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-  risk_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+  risk_percent: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, default=0.0)
 
   # Status
   status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)
@@ -141,7 +141,7 @@ class Account(Base):
   # Trading Account info
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   account_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-  account_balance: Mapped[float] = mapped_column(Float, nullable=True)
+  account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
   market_type: Mapped[MarketTypeEnum] = mapped_column(
     Enum(MarketTypeEnum), nullable=False
   )
