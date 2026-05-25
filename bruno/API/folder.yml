@@ -1,0 +1,11 @@
+info:
+  name: API
+  type: folder
+  seq: 5
+
+request:
+  auth:
+    type: apikey
+    key: X-API-KEY
+    value: "{{api_key}}"
+    placement: header

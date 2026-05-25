@@ -9,6 +9,7 @@ A high-performance, decentralized **trading signal broker** built with FastAPI a
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
+- **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
 - **Signal Gating**: A `SIGNAL_BLOCKED` broker setting can pause signal forwarding without restarting the server.
 - **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals.
 - **Developer Friendly**: Includes Makefile, Bruno API collections, Alembic CLI helpers, and Ruff for linting.
@@ -53,7 +54,8 @@ graph TD
 ```text
 algo-trading-broker/
 ├── broker/
-│   ├── apis/            # Webhook, accounts, and settings API routes
+│   ├── api/             # Webhook, accounts, and settings API routes
+│   ├── security/        # Auth guards (e.g. X-API-KEY via ensure_api_key)
 │   ├── db/              # SQLAlchemy models, engine, repository
 │   ├── helpers/         # Signal and timeframe utilities
 │   ├── nats.py          # NATS connection lifecycle (connect/drain/close)
@@ -198,9 +200,28 @@ TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
 
 ## API
 
+### Authentication
+
+Management endpoints require an API key passed in the `X-API-KEY` header, validated against `BROKER_API_KEY`:
+
+```bash
+curl http://localhost:8080/accounts -H "X-API-KEY: $BROKER_API_KEY"
+```
+
+Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset, protected endpoints return `500`. The `/health` and `/webhook` endpoints are **not** key-protected (`/webhook` uses its own in-payload `token`).
+
+| Endpoint | Auth |
+| -------- | ---- |
+| `GET /health` | None |
+| `POST /webhook` | In-payload `token` (+ optional HMAC) |
+| `GET /accounts` | `X-API-KEY` |
+| `POST /settings/block-signal` | `X-API-KEY` |
+
+---
+
 ### GET `/health`
 
-Returns `{"status": "ok"}`.
+Returns `{"status": "ok"}`. No authentication required.
 
 ---
 
@@ -244,7 +265,7 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 
 ### GET `/accounts`
 
-Returns all trading accounts ordered by most recent activity.
+Returns all trading accounts ordered by most recent activity. Requires the `X-API-KEY` header.
 
 **Response:**
 
@@ -269,7 +290,7 @@ Accounts are automatically created or updated each time a `TRADE` event arrives 
 
 ### POST `/settings/block-signal`
 
-Toggles the `SIGNAL_BLOCKED` broker setting between `"1"` (signals blocked) and `"0"` (signals forwarded). Does not require a restart. Sends a Telegram notification on change.
+Toggles the `SIGNAL_BLOCKED` broker setting between `"1"` (signals blocked) and `"0"` (signals forwarded). Requires the `X-API-KEY` header. Does not require a restart. Sends a Telegram notification on change.
 
 ---
 

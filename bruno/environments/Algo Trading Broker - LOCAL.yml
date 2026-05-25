@@ -9,3 +9,5 @@ variables:
     name: webhook_token
   - secret: true
     name: broker_token
+  - secret: true
+    name: api_key

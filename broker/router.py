@@ -1,7 +1,8 @@
 from fastapi import APIRouter
 
-from broker.apis.api import get_router as get_api_router
-from broker.apis.webhook import get_webhook_router
+from broker.api.api import get_api_router
+from broker.api.admin import get_admin_router
+from broker.api.webhook import get_webhook_router
 
 
 def get_core_router() -> APIRouter:
@@ -10,6 +11,7 @@ def get_core_router() -> APIRouter:
 
   # Include all sub-routers
   router.include_router(get_api_router())
+  router.include_router(get_admin_router())
   router.include_router(get_webhook_router())
 
   return router
