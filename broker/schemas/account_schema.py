@@ -15,11 +15,15 @@ from pydantic import BaseModel
 
 
 class MarketTypeEnum(str, Enum):
+  """Market segment that a trading account operates in."""
+
   FOREX = "FOREX"
   CRYPTO = "CRYPTO"
 
 
 class AccountResponse(BaseModel):
+  """API response model for a registered trading account, serialised from the Account ORM row."""
+
   id: uuid.UUID
   account_id: str
   account_name: Optional[str]

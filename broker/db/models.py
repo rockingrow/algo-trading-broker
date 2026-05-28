@@ -30,6 +30,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
+  """Abstract base for all ORM models, providing UUID primary key and auto-managed timestamps."""
+
   id: Mapped[uuid.UUID] = mapped_column(
     UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
   )

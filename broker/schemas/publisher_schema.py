@@ -8,6 +8,8 @@ from broker.schemas.core import SignalActionEnum
 
 
 class PublishTopicEnum(str, Enum):
+  """NATS subjects the broker publishes to or listens on for system-level and trading messages."""
+
   SIGNAL = "SIGNAL"
   ADMIN = "ADMIN"
   TRADE = "TRADE"

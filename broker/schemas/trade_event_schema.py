@@ -15,11 +15,15 @@ from pydantic import BaseModel, ConfigDict
 
 
 class PositionEventType(str, Enum):
+  """Whether this NATS TRADE event represents a newly opened position or an update to an existing one."""
+
   CREATED = "CREATED"
   UPDATED = "UPDATED"
 
 
 class PositionEvent(BaseModel):
+  """Wire payload published by a worker on the NATS TRADE subject whenever a position row is created or updated."""
+
   model_config = ConfigDict(use_enum_values=True)
 
   event: PositionEventType

@@ -13,6 +13,8 @@ from broker.schemas.core import SignalActionEnum
 
 
 class PositionSchema(BaseModel):
+  """Nested position block within a TradingView webhook, carrying action, price, size, and risk levels."""
+
   action: SignalActionEnum
   price: Optional[float] = None
   quantity: Optional[float] = None
@@ -23,6 +25,8 @@ class PositionSchema(BaseModel):
 
 
 class IndicatorsSchema(BaseModel):
+  """Snapshot of strategy indicator values at signal time; unknown extra fields are accepted and preserved."""
+
   model_config = ConfigDict(extra="allow")
 
   wt1: Optional[float] = None
@@ -41,6 +45,8 @@ class IndicatorsSchema(BaseModel):
 
 
 class InputsSchema(BaseModel):
+  """Strategy input parameters sent alongside each signal for audit; extra fields are accepted and preserved."""
+
   model_config = ConfigDict(extra="allow")
 
   watching_candles: Optional[int] = None

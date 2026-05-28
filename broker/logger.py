@@ -16,6 +16,8 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class _DailyFileHandler(logging.FileHandler):
+  """FileHandler that rolls over to a new dated log file at midnight without restarting the process."""
+
   def __init__(self, directory: Path, mode: str = "a", encoding: str = "utf-8"):
     self.directory = directory
     self.current_date = datetime.datetime.now().strftime("%Y%m%d")
