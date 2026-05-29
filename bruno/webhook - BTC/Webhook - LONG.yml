@@ -10,18 +10,18 @@ http:
     type: json
     data: |-
       {
-        "strategy": "MT5_GOLD_M5_V1",
+        "strategy": "MT5_BTC_M5_V1",
         "token": "{{webhook_token}}",
         "symbol": "OANDA:BTCUSD",
         "timeframe": "5",
         "timestamp": "2026-04-10 22:55:00",
         "position": {
           "action": "LONG",
-          "price": 76500.5,
+          "price": 73600.5,
           "quantity": 1.0000,
-          "sl": 76400,
-          "tp1": 76650.00,
-          "tp2": 76800.00
+          "sl": 73500,
+          "tp1": 73700.00,
+          "tp2": 73800.00
         },
         "indicators": {
           "wt1": -65.50,

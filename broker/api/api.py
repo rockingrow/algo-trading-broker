@@ -27,3 +27,5 @@ def get_api_router() -> APIRouter:
     """Return all accounts ordered by last activity descending."""
     accounts = await get_accounts()
     return [AccountResponse.model_validate(a) for a in accounts]
+
+  return router

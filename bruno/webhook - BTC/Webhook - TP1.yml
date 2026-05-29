@@ -10,7 +10,7 @@ http:
     type: json
     data: |-
       {
-        "strategy": "MT5_GOLD_M5_V1",
+        "strategy": "MT5_BTC_M5_V1",
         "token": "{{webhook_token}}",
         "symbol": "OANDA:BTCUSD",
         "timeframe": "5",
