@@ -5,11 +5,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from broker.db.engine import close_db, init_db
-from broker.nats import nats_client
-from broker.services.notification_service import TelegramNotification
-from broker.services.nats_service import NatsService
-from broker.router import get_core_router
+from broker.db.repository import SqlAlchemyTradeRepository
 from broker.logger import get_logger
+from broker.nats import nats_client
+from broker.router import get_core_router
+from broker.services.nats_consumer import TradeEventConsumer
+from broker.services.nats_publisher import NatsPublisher
+from broker.services.notification_service import TelegramNotification
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -17,16 +19,23 @@ log = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+  notifier = TelegramNotification()
+
   await init_db()
+  nats_client.set_notifier(notifier)
   await nats_client.connect()
-  nats_service = NatsService()
-  await nats_service.start()
-  app.state.publisher = nats_service
+
+  publisher = NatsPublisher(connection=nats_client)
+  consumer = TradeEventConsumer(
+    trade_repository=SqlAlchemyTradeRepository(), connection=nats_client
+  )
+  await consumer.start()
+  app.state.publisher = publisher
 
   # Notification: Startup
-  TelegramNotification().send_message(
+  await notifier.send_message(
     f"🟢 <b>Broker Node Started</b>\n"
-    f"🔌 NATS Publishing: <code>{nats_client._subjects_line()}</code> + dynamic (by strategy)\n"
+    f"🔌 NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy)\n"
     f"🔌 NATS Listening: <code>{nats_client.LISTEN_SUBJECT.value}</code>\n"
     f"🌐 Endpoint: <code>{settings.broker_url}</code>"
   )
@@ -34,11 +43,11 @@ async def lifespan(app: FastAPI):
   yield
 
   # Notification: Shutdown
-  TelegramNotification().send_message(
+  await notifier.send_message(
     f"🛑 <b>Broker Node Stopped</b>\n🌐 Endpoint: <code>{settings.broker_url}</code>"
   )
 
-  await nats_service.stop()
+  await consumer.stop()
   await nats_client.close()
   await close_db()
 
