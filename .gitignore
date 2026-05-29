@@ -48,4 +48,8 @@ dist/
 # ====== Dependency Management ======
 poetry.toml
 
-.claude/
+.claude/*
+# Keep the shared SessionStart hook tracked so remote sessions can install deps.
+!.claude/settings.json
+!.claude/hooks/
+.claude/settings.local.json
