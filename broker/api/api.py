@@ -2,7 +2,7 @@ from typing import Dict, List
 
 from fastapi import APIRouter, Depends
 
-from broker.dependencies import get_account_repository
+from broker.providers import get_account_repository
 from broker.interfaces import AccountRepository
 from broker.logger import get_logger
 from broker.schemas.account_schema import AccountResponse

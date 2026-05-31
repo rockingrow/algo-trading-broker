@@ -3,7 +3,7 @@ from typing import Dict
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from broker.constants import SIGNAL_BLOCKED
-from broker.dependencies import get_admin_notifier, get_setting_repository
+from broker.providers import get_admin_notifier, get_setting_repository
 from broker.interfaces import Notifier, SettingRepository
 from broker.logger import get_logger
 from broker.security.ensure_api_key import ensure_api_key

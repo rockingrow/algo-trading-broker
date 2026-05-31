@@ -15,7 +15,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from broker.dependencies import get_signal_service
+from broker.providers import get_signal_service
 from broker.logger import get_logger
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.services.signal_processing_service import (

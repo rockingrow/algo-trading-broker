@@ -13,6 +13,7 @@ from datetime import datetime
 
 from broker.logger import get_logger
 from broker.nats import NatsClient, nats_client
+from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import TradingSignal
 
 log = get_logger(__name__)
@@ -46,7 +47,7 @@ class NatsPublisher:
       {
         "strategy": strategy,
         "timestamp": timestamp.isoformat(),
-        "action": "FLAT",
+        "action": SignalActionEnum.FLAT.value,
         "symbol": symbol,
       }
     ).encode()

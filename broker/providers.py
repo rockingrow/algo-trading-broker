@@ -1,5 +1,5 @@
 """
-broker/dependencies.py — FastAPI dependency providers.
+broker/providers.py — FastAPI dependency providers.
 
 This is the composition root for the HTTP layer: it wires concrete
 implementations to the abstractions that routers and services depend on, so
