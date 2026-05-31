@@ -2,9 +2,10 @@
 broker/nats.py — Core NATS connection manager and module-level singleton.
 
 Owns the raw NATSClient lifecycle: connect, drain, close, and the
-disconnected/reconnected/error callbacks.  Domain logic (publish, subscribe)
-lives in broker/services/nats_service.py which imports ``nats_client`` from
-here.
+disconnected/reconnected/error callbacks. It depends only on the ``Notifier``
+abstraction for lifecycle alerts (injected via ``set_notifier``), not on any
+concrete channel. Domain logic (publish, subscribe) lives in
+``broker/services/nats_publisher.py`` and ``broker/services/nats_consumer.py``.
 """
 
 from __future__ import annotations
@@ -14,9 +15,9 @@ from typing import Optional
 import nats as nats_lib
 from nats.aio.client import Client as NATSClient
 
+from broker.interfaces import Notifier
 from broker.logger import get_logger
 from broker.schemas.publisher_schema import PublishTopicEnum
-from broker.services.notification_service import TelegramNotification
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -28,15 +29,24 @@ class NatsClient:
   PUBLISH_SUBJECTS = [PublishTopicEnum.ADMIN]
   LISTEN_SUBJECT = PublishTopicEnum.TRADE
 
-  def __init__(self) -> None:
+  def __init__(self, notifier: Optional[Notifier] = None) -> None:
     self._nc: Optional[NATSClient] = None
+    self._notifier: Optional[Notifier] = notifier
 
   @property
   def nc(self) -> NATSClient:
     return self._nc
 
-  def _subjects_line(self) -> str:
+  def set_notifier(self, notifier: Notifier) -> None:
+    """Wire a notification channel used for connection lifecycle alerts."""
+    self._notifier = notifier
+
+  def subjects_line(self) -> str:
     return " | ".join(s.value for s in self.PUBLISH_SUBJECTS)
+
+  async def _notify(self, message: str) -> None:
+    if self._notifier is not None:
+      await self._notifier.send_message(message)
 
   async def connect(self) -> None:
     """Establish connection to the NATS server."""
@@ -66,17 +76,17 @@ class NatsClient:
 
   async def _on_disconnected(self) -> None:
     log.warning("NATS disconnected")
-    TelegramNotification().send_message(
+    await self._notify(
       "🔴 <b>NATS Disconnected</b>\n"
-      f"📤 Publishing: <code>{self._subjects_line()}</code> + dynamic (by strategy)\n"
+      f"📤 Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
       f"📥 Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
     )
 
   async def _on_reconnected(self) -> None:
     log.info("NATS reconnected to %s", settings.nats_url)
-    TelegramNotification().send_message(
+    await self._notify(
       "🔌 <b>NATS Reconnected</b>\n"
-      f"📤 Publishing: <code>{self._subjects_line()}</code> + dynamic (by strategy)\n"
+      f"📤 Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
       f"📥 Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
     )
 

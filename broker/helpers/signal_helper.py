@@ -45,23 +45,20 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   return signal
 
 
+_ACTION_EMOJI: dict[SignalActionEnum, str] = {
+  SignalActionEnum.LONG: "🟢",
+  SignalActionEnum.SHORT: "🔴",
+  SignalActionEnum.TP1: "🎯",
+  SignalActionEnum.TP2: "🚀",
+  SignalActionEnum.R_SL: "🛡️",
+  SignalActionEnum.SL: "❌",
+  SignalActionEnum.FLAT: "🏳️",
+}
+
+
 def action_to_emoji(action: SignalActionEnum) -> str:
   """
-  Convert a SignalActionEnum to a Telegram emoji.
+  Convert a SignalActionEnum to a Telegram emoji. Adding a new action only
+  requires extending ``_ACTION_EMOJI`` — no control-flow changes.
   """
-  if action == SignalActionEnum.LONG:
-    return "🟢"
-  elif action == SignalActionEnum.SHORT:
-    return "🔴"
-  elif action == SignalActionEnum.TP1:
-    return "🎯"
-  elif action == SignalActionEnum.TP2:
-    return "🚀"
-  elif action == SignalActionEnum.R_SL:
-    return "🛡️"
-  elif action == SignalActionEnum.SL:
-    return "❌"
-  elif action == SignalActionEnum.FLAT:
-    return "🏳️"
-  else:
-    return "📡"
+  return _ACTION_EMOJI.get(action, "📡")

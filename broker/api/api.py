@@ -2,10 +2,11 @@ from typing import Dict, List
 
 from fastapi import APIRouter, Depends
 
-from broker.security.ensure_api_key import ensure_api_key
-from broker.db.repository import get_accounts
-from broker.schemas.account_schema import AccountResponse
+from broker.providers import get_account_repository
+from broker.interfaces import AccountRepository
 from broker.logger import get_logger
+from broker.schemas.account_schema import AccountResponse
+from broker.security.ensure_api_key import ensure_api_key
 
 log = get_logger(__name__)
 
@@ -23,9 +24,11 @@ def get_api_router() -> APIRouter:
     response_model=List[AccountResponse],
     dependencies=[Depends(ensure_api_key)],
   )
-  async def list_accounts() -> List[AccountResponse]:
+  async def list_accounts(
+    accounts_repo: AccountRepository = Depends(get_account_repository),
+  ) -> List[AccountResponse]:
     """Return all accounts ordered by last activity descending."""
-    accounts = await get_accounts()
+    accounts = await accounts_repo.get_all()
     return [AccountResponse.model_validate(a) for a in accounts]
 
   return router
