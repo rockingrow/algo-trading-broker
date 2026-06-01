@@ -200,6 +200,18 @@ TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
 
 ## API
 
+### Interactive docs (Swagger / OpenAPI)
+
+FastAPI auto-generates interactive API documentation. With the server running:
+
+| Page | URL | Notes |
+| ---- | --- | ----- |
+| Swagger UI | `http://localhost:8080/docs` | Try endpoints; click **Authorize** to set `X-API-KEY`. |
+| ReDoc | `http://localhost:8080/redoc` | Read-only reference. |
+| OpenAPI schema | `http://localhost:8080/openapi.json` | Raw spec. |
+
+Set `DOCS_ENABLED=false` in `.env` to disable all three in production.
+
 ### Authentication
 
 Management endpoints require an API key passed in the `X-API-KEY` header, validated against `BROKER_API_KEY`:

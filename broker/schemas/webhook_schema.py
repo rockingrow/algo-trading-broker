@@ -76,6 +76,27 @@ class InputsSchema(BaseModel):
 class WebhookPayload(BaseModel):
   """Raw TradingView alert JSON payload."""
 
+  model_config = ConfigDict(
+    json_schema_extra={
+      "example": {
+        "strategy": "wt_bb_atr",
+        "symbol": "BTCUSDT",
+        "timeframe": "15",
+        "timestamp": "2026-06-02T10:15:00Z",
+        "position": {
+          "action": "LONG",
+          "price": 68250.5,
+          "quantity": 0.05,
+          "sl": 67800.0,
+          "tp1": 68900.0,
+          "tp2": 69500.0,
+          "is_running": True,
+        },
+        "token": "shared-webhook-token",
+      }
+    }
+  )
+
   strategy: str
   symbol: str
   timeframe: str

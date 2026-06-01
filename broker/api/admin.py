@@ -6,6 +6,7 @@ from broker.constants import SIGNAL_BLOCKED
 from broker.providers import get_admin_notifier, get_setting_repository
 from broker.interfaces import Notifier, SettingRepository
 from broker.logger import get_logger
+from broker.openapi import AUTH_RESPONSES
 from broker.security.ensure_api_key import ensure_api_key
 
 log = get_logger(__name__)
@@ -14,7 +15,12 @@ log = get_logger(__name__)
 def get_admin_router() -> APIRouter:
   router = APIRouter(dependencies=[Depends(ensure_api_key)])
 
-  @router.post("/settings/block-signal", tags=["settings"])
+  @router.post(
+    "/settings/block-signal",
+    tags=["settings"],
+    summary="Toggle signal blocking",
+    responses={**AUTH_RESPONSES, 500: {"description": "Failed to persist the setting."}},
+  )
   async def toggle_block_signal(
     setting_repo: SettingRepository = Depends(get_setting_repository),
     notifier: Notifier = Depends(get_admin_notifier),

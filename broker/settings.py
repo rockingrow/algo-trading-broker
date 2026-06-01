@@ -54,6 +54,11 @@ class Settings(BaseSettings):
   # ── Logging ──────────────────────────────────────────────────────
   LOG_LEVEL: str = "INFO"
 
+  # ── API Docs (Swagger / ReDoc) ───────────────────────────────────
+  # Master switch for the interactive docs. Set to ``false`` in production
+  # to fully hide /docs, /redoc and /openapi.json.
+  DOCS_ENABLED: bool = True
+
   # ── Telegram ─────────────────────────────────────────────────────
   TELEGRAM_ENABLED: bool = False
   TELEGRAM_BOT_TOKEN: str = ""
