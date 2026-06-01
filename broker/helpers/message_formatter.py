@@ -30,10 +30,26 @@ def format_flat_message(payload: WebhookPayload) -> str:
   )
 
 
-def format_signal_message(payload: WebhookPayload) -> str:
+def _format_raw_section(payload: WebhookPayload) -> str:
+  """Append indicators and inputs blocks when NOTIFICATION_INCLUDE_SIGNAL_RAW is on."""
+  parts: list[str] = []
+  if payload.indicators is not None:
+    data = {k: v for k, v in payload.indicators.model_dump().items() if v is not None}
+    if data:
+      lines = "\n".join(f"  {k}: {v}" for k, v in data.items())
+      parts.append(f"Indicators:\n{lines}")
+  if payload.inputs is not None:
+    data = {k: v for k, v in payload.inputs.model_dump().items() if v is not None}
+    if data:
+      lines = "\n".join(f"  {k}: {v}" for k, v in data.items())
+      parts.append(f"Inputs:\n{lines}")
+  return ("\n" + "\n".join(parts)) if parts else ""
+
+
+def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False) -> str:
   """Telegram body for a normal entry / target / stop signal."""
   pos = payload.position
-  return (
+  base = (
     f"{_header(payload)}"
     f"Action: <b>{pos.action.value}</b>\n"
     f"Price: <code>{pos.price}</code>\n"
@@ -42,6 +58,7 @@ def format_signal_message(payload: WebhookPayload) -> str:
     f"TP2: <code>{pos.tp2}</code>\n"
     f"Time: {payload.timestamp.strftime(_TIME_FMT)}\n"
   )
+  return base + (_format_raw_section(payload) if include_raw else "")
 
 
 def format_blocked_message(payload: WebhookPayload) -> str:

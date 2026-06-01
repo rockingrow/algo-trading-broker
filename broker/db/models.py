@@ -72,7 +72,9 @@ class Signal(Base):
   tp1: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
   tp2: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
   is_running: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-  risk_percent: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, default=0.0)
+  risk_percent: Mapped[float] = mapped_column(
+    Numeric(10, 4), nullable=False, default=0.0
+  )
 
   # Complex objects stored as JSONB
   indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)
@@ -119,7 +121,9 @@ class Trade(Base):
   tp1: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
   tp2: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
   is_running: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-  risk_percent: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, default=0.0)
+  risk_percent: Mapped[float] = mapped_column(
+    Numeric(10, 4), nullable=False, default=0.0
+  )
 
   # Status
   status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)

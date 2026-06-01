@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from broker.constants import SIGNAL_BLOCKED
+from broker.constants import NOTIFICATION_INCLUDE_SIGNAL_RAW, SIGNAL_BLOCKED
 from broker.helpers.message_formatter import (
   format_blocked_message,
   format_flat_message,
@@ -125,7 +125,10 @@ class SignalProcessingService:
       log.exception("NATS publish error: %s", exc)
       raise SignalError(500, f"Signal logged but publish failed: {exc}")
 
-    await self._notifier.send_message(format_signal_message(payload))
+    include_raw = await self._settings.get(NOTIFICATION_INCLUDE_SIGNAL_RAW) == "1"
+    await self._notifier.send_message(
+      format_signal_message(payload, include_raw=include_raw)
+    )
     return {
       "status": "accepted",
       "signal_id": signal.signal_id,

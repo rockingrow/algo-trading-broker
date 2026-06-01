@@ -73,7 +73,7 @@ simulate-nats:
 	uv run python e2e/simulate_signals.py
 
 # ── Alembic ──────────────────────────────────────────────────────────────────
-ALEMBIC = docker compose exec broker alembic
+ALEMBIC = docker compose exec broker uv run alembic
 
 db-upgrade:
 	$(ALEMBIC) upgrade head

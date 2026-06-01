@@ -19,36 +19,36 @@ _USING = "USING {}::numeric"
 
 
 def upgrade() -> None:
-    op.execute(f"""
+  op.execute(f"""
         ALTER TABLE signals
-            ALTER COLUMN price        TYPE {_PRICE_TYPE} {_USING.format('price')},
-            ALTER COLUMN quantity     TYPE {_PRICE_TYPE} {_USING.format('quantity')},
-            ALTER COLUMN sl           TYPE {_PRICE_TYPE} {_USING.format('sl')},
-            ALTER COLUMN tp1          TYPE {_PRICE_TYPE} {_USING.format('tp1')},
-            ALTER COLUMN tp2          TYPE {_PRICE_TYPE} {_USING.format('tp2')},
-            ALTER COLUMN risk_percent TYPE {_PCT_TYPE}   {_USING.format('risk_percent')};
+            ALTER COLUMN price        TYPE {_PRICE_TYPE} {_USING.format("price")},
+            ALTER COLUMN quantity     TYPE {_PRICE_TYPE} {_USING.format("quantity")},
+            ALTER COLUMN sl           TYPE {_PRICE_TYPE} {_USING.format("sl")},
+            ALTER COLUMN tp1          TYPE {_PRICE_TYPE} {_USING.format("tp1")},
+            ALTER COLUMN tp2          TYPE {_PRICE_TYPE} {_USING.format("tp2")},
+            ALTER COLUMN risk_percent TYPE {_PCT_TYPE}   {_USING.format("risk_percent")};
     """)
 
-    op.execute(f"""
+  op.execute(f"""
         ALTER TABLE trades
-            ALTER COLUMN account_balance_init TYPE {_PRICE_TYPE} {_USING.format('account_balance_init')},
-            ALTER COLUMN account_balance      TYPE {_PRICE_TYPE} {_USING.format('account_balance')},
-            ALTER COLUMN price                TYPE {_PRICE_TYPE} {_USING.format('price')},
-            ALTER COLUMN quantity             TYPE {_PRICE_TYPE} {_USING.format('quantity')},
-            ALTER COLUMN sl                   TYPE {_PRICE_TYPE} {_USING.format('sl')},
-            ALTER COLUMN tp1                  TYPE {_PRICE_TYPE} {_USING.format('tp1')},
-            ALTER COLUMN tp2                  TYPE {_PRICE_TYPE} {_USING.format('tp2')},
-            ALTER COLUMN risk_percent         TYPE {_PCT_TYPE}   {_USING.format('risk_percent')};
+            ALTER COLUMN account_balance_init TYPE {_PRICE_TYPE} {_USING.format("account_balance_init")},
+            ALTER COLUMN account_balance      TYPE {_PRICE_TYPE} {_USING.format("account_balance")},
+            ALTER COLUMN price                TYPE {_PRICE_TYPE} {_USING.format("price")},
+            ALTER COLUMN quantity             TYPE {_PRICE_TYPE} {_USING.format("quantity")},
+            ALTER COLUMN sl                   TYPE {_PRICE_TYPE} {_USING.format("sl")},
+            ALTER COLUMN tp1                  TYPE {_PRICE_TYPE} {_USING.format("tp1")},
+            ALTER COLUMN tp2                  TYPE {_PRICE_TYPE} {_USING.format("tp2")},
+            ALTER COLUMN risk_percent         TYPE {_PCT_TYPE}   {_USING.format("risk_percent")};
     """)
 
-    op.execute(f"""
+  op.execute(f"""
         ALTER TABLE accounts
-            ALTER COLUMN account_balance TYPE {_PRICE_TYPE} {_USING.format('account_balance')};
+            ALTER COLUMN account_balance TYPE {_PRICE_TYPE} {_USING.format("account_balance")};
     """)
 
 
 def downgrade() -> None:
-    op.execute("""
+  op.execute("""
         ALTER TABLE signals
             ALTER COLUMN price        TYPE DOUBLE PRECISION USING price::double precision,
             ALTER COLUMN quantity     TYPE DOUBLE PRECISION USING quantity::double precision,
@@ -58,7 +58,7 @@ def downgrade() -> None:
             ALTER COLUMN risk_percent TYPE DOUBLE PRECISION USING risk_percent::double precision;
     """)
 
-    op.execute("""
+  op.execute("""
         ALTER TABLE trades
             ALTER COLUMN account_balance_init TYPE DOUBLE PRECISION USING account_balance_init::double precision,
             ALTER COLUMN account_balance      TYPE DOUBLE PRECISION USING account_balance::double precision,
@@ -70,7 +70,7 @@ def downgrade() -> None:
             ALTER COLUMN risk_percent         TYPE DOUBLE PRECISION USING risk_percent::double precision;
     """)
 
-    op.execute("""
+  op.execute("""
         ALTER TABLE accounts
             ALTER COLUMN account_balance TYPE DOUBLE PRECISION USING account_balance::double precision;
     """)

@@ -39,10 +39,13 @@ def get_account_repository() -> AccountRepository:
   return SqlAlchemyAccountRepository()
 
 
-def get_signals_notifier() -> Notifier:
+def get_signals_notifier(
+  setting_repository: SettingRepository = Depends(get_setting_repository),
+) -> Notifier:
   """Channel for trade/signal notifications (falls back to the management chat)."""
   return TelegramNotification(
-    chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID
+    chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID,
+    setting_repository=setting_repository,
   )
 
 

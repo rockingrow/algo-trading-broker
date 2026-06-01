@@ -17,7 +17,7 @@ http:
         "timestamp": "2026-04-10 22:55:00",
         "position": {
           "action": "R_SL",
-          "price": 4736.50,
+          "price": 71500.50,
           "quantity": 2.2
         },
         "indicators": {

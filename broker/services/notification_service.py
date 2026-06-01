@@ -12,6 +12,8 @@ import abc
 
 import httpx
 
+from broker.constants import SILENT_SIGNAL
+from broker.interfaces.db_protocol import SettingRepository
 from broker.logger import get_logger
 from broker.settings import settings
 
@@ -37,15 +39,26 @@ class TelegramNotification(Notification):
   """Sends HTML-formatted messages to a Telegram chat via the Bot API. Silently
   no-ops when disabled or misconfigured."""
 
-  def __init__(self, chat_id: str | None = None):
+  def __init__(
+    self,
+    chat_id: str | None = None,
+    setting_repository: SettingRepository | None = None,
+  ):
     self.enabled = settings.TELEGRAM_ENABLED
     self.bot_token = settings.TELEGRAM_BOT_TOKEN
     self.chat_id = chat_id if chat_id is not None else settings.TELEGRAM_CHAT_ID
+    self._setting_repository = setting_repository
 
   async def send_message(self, message_text: str) -> None:
     if not self.enabled:
       logger.debug("Telegram notifications are disabled in settings.")
       return
+
+    if self._setting_repository is not None:
+      silent = await self._setting_repository.get(SILENT_SIGNAL)
+      if silent == "1":
+        logger.debug("SILENT_SIGNAL is enabled; skipping notification.")
+        return
 
     if not self.bot_token or not self.chat_id:
       logger.warning(
