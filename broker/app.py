@@ -8,6 +8,7 @@ from broker.db.engine import close_db, init_db
 from broker.db.repository import SqlAlchemyTradeRepository
 from broker.logger import get_logger
 from broker.nats import nats_client
+from broker.openapi import fastapi_kwargs
 from broker.router import get_core_router
 from broker.services.nats_consumer import TradeEventConsumer
 from broker.services.nats_publisher import NatsPublisher
@@ -54,15 +55,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
   """Build and return the FastAPI application with all routes wired up."""
-  app = FastAPI(
-    title="Algo Trading Broker",
-    description=(
-      "Receives TradingView JSON webhook alerts, logs them to PostgreSQL, "
-      "and fans them out via NATS to subscriber VPS nodes."
-    ),
-    version="1.0.0",
-    lifespan=lifespan,
-  )
+  app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
 
   @app.exception_handler(Exception)
   async def global_exception_handler(request: Request, exc: Exception):

@@ -29,12 +29,27 @@ log = get_logger(__name__)
 def get_webhook_router() -> APIRouter:
   router = APIRouter()
 
-  @router.post("/webhook", status_code=status.HTTP_202_ACCEPTED, tags=["webhook"])
+  @router.post(
+    "/webhook",
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["webhook"],
+    summary="Receive a TradingView alert",
+    responses={
+      202: {"description": "Signal accepted, persisted and published."},
+      401: {"description": "Invalid webhook `token`."},
+      403: {"description": "Signals are currently blocked by the broker."},
+    },
+  )
   async def receive_webhook(
     payload: WebhookPayload,
     service: SignalProcessingService = Depends(get_signal_service),
   ) -> Dict[str, Any]:
-    """Main entry point for incoming signals."""
+    """Main entry point for incoming signals.
+
+    Authenticated via the `token` field inside the JSON body (not the
+    `X-API-KEY` header). Delegates the full pipeline — auth, block-check,
+    persist, publish, notify — to ``SignalProcessingService``.
+    """
     try:
       return await service.process(payload)
     except SignalError as exc:

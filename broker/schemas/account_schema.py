@@ -33,4 +33,18 @@ class AccountResponse(BaseModel):
   createdAt: datetime
   updatedAt: datetime
 
-  model_config = {"from_attributes": True}
+  model_config = {
+    "from_attributes": True,
+    "json_schema_extra": {
+      "example": {
+        "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "account_id": "MT5-12345678",
+        "account_name": "Main Forex",
+        "account_balance": 10250.75,
+        "market_type": "FOREX",
+        "last_activity_at": "2026-06-02T09:30:00Z",
+        "createdAt": "2026-01-15T08:00:00Z",
+        "updatedAt": "2026-06-02T09:30:00Z",
+      }
+    },
+  }
