@@ -148,6 +148,11 @@ WEBHOOK_SECRET=
 # Callback API key for authenticating requests to the broker API
 BROKER_API_KEY=api_key
 
+# Secret URL prefix — all routes are mounted under /<BROKER_API_PREFIX>/
+# e.g. set to "abc123xyz" → endpoints become /abc123xyz/v1/..., /abc123xyz/admin/..., etc.
+# Leave blank to use the default paths without a prefix.
+BROKER_API_PREFIX=
+
 # ── NATS ─────────────────────────────────────────────
 NATS_HOST=localhost        # overridden to "nats" inside Docker
 NATS_PORT=4222
@@ -229,6 +234,17 @@ All routes are grouped under versioned or purpose-scoped prefixes:
 | `/v1` | API | Public API endpoints (accounts, trades, health) |
 | `/admin` | Admin | Management endpoints (settings, trading actions) |
 | `/secret` | Webhook | TradingView webhook receiver |
+
+If `BROKER_API_PREFIX` is set (e.g. `abc123xyz`), every route is mounted under that secret segment:
+
+```text
+/abc123xyz/v1/health
+/abc123xyz/v1/accounts
+/abc123xyz/admin/flat
+/abc123xyz/secret/webhook
+```
+
+The prefix acts as a URL secret — an attacker who knows the IP or domain still cannot enumerate endpoints without it. Leave blank to use the default paths.
 
 ### Authentication
 

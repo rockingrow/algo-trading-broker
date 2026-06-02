@@ -1,5 +1,13 @@
 # Changelog
 
+## [v1.0.1] — 2026-06-03
+
+### Security Hardening
+
+- **Secret URL prefix** — Added `BROKER_API_PREFIX` environment variable. When set, all routes are mounted under `/<prefix>/v1/...`, `/<prefix>/admin/...`, and `/<prefix>/secret/...`. An attacker who knows the server IP or domain cannot enumerate endpoints without the prefix. Leave blank to keep the default paths.
+
+---
+
 ## [v1.0.0] — 2026-06-03
 
 First stable release of **Algo Trading Broker** — a high-performance, decentralized trading signal broker built with FastAPI and NATS.
