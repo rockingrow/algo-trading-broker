@@ -25,6 +25,7 @@ def format_flat_message(payload: WebhookPayload) -> str:
   """Telegram body for a FLAT (close-all) directive."""
   return (
     f"{_header(payload)}"
+    f"Strategy: <b>{payload.strategy}</b>\n"
     f"Action: <b>FLAT</b>\n"
     f"Time: {payload.timestamp.strftime(_TIME_FMT)}\n"
   )
@@ -51,6 +52,7 @@ def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False)
   pos = payload.position
   base = (
     f"{_header(payload)}"
+    f"Strategy: <b>{payload.strategy}</b>\n"
     f"Action: <b>{pos.action.value}</b>\n"
     f"Price: <code>{pos.price}</code>\n"
     f"Quantity: <code>{pos.quantity}</code>\n"

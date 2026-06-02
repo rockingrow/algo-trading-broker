@@ -1,0 +1,13 @@
+name: Algo Trading Broker
+color: "#2E8A54"
+variables:
+  - name: port
+    value: "{{process.env.port}}"
+  - name: url
+    value: "{{process.env.url}}:{{process.env.port}}"
+  - name: webhook_token
+    value: "{{process.env.webhook_token}}"
+  - name: broker_token
+    value: "{{process.env.broker_token}}"
+  - name: api_key
+    value: "{{process.env.api_key}}"

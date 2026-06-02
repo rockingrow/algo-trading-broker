@@ -5,65 +5,26 @@ info:
 
 http:
   method: POST
-  url: "{{url}}/webhook"
+  url: "{{url}}/secret/webhook"
   body:
     type: json
     data: |-
       {
-        "strategy": "MT5_GOLD_M5_V1",
+        "strategy": "{{process.env.strategy}}",
         "token": "{{webhook_token}}",
-        "symbol": "OANDA:XAUUSD",
+        "symbol": "OANDA:{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-10 22:55:00",
         "position": {
           "action": "LONG",
-          "price": 4520.5,
+          "price": 67600.5,
           "quantity": 6.0000,
-          "sl": 4500,
-          "tp1": 4525.00,
-          "tp2": 4530.00
+          "sl": 67300,
+          "tp1": 68000.00,
+          "tp2": 68100.00
         },
-        "indicators": {
-          "wt1": -65.50,
-          "wt2": -60.20,
-          "close": 2334.50,
-          "upper": 2345.00,
-          "lower": 2335.00,
-          "basis": 2340.00,
-          "ema200_visual": 2320.00,
-          "ema200_filter": 2320.00,
-          "atr_val": 2.50,
-          "in_session": true,
-          "vol_spike": false,
-          "in_cooldown": false,
-          "sl_too_wide": false
-        },
-        "inputs": {
-          "watching_candles": 2,
-          "over_wt_value": 60,
-          "safe_wt_value": 60,
-          "use_session": true,
-          "skip_windows": "10:00-11:00,23:00-00:00",
-          "bb_len": 20,
-          "bb_mult": 2.0,
-          "show_imb": true,
-          "atr_len": 14,
-          "atr_sl_mult": 2.0,
-          "min_rr_ratio": 0.75,
-          "risk_percent": 3.0,
-          "use_basis_exit": false,
-          "basis_exit_buffer": 1.5,
-          "tp1_qty_pc": 30.0,
-          "use_max_sl_dist": true,
-          "max_sl_distance": 30,
-          "vol_spike_mult": 2.0,
-          "vol_spike_lookback": 50,
-          "use_vol_filter": true,
-          "ema_visual_tf": "15",
-          "ema_filter_tf": "240",
-          "use_cooldown": false,
-          "cooldown_bars": 6
-        }
+        "indicators": {},
+        "inputs": {}
       }
   auth: inherit
 

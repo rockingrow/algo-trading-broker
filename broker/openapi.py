@@ -38,6 +38,10 @@ OPENAPI_TAGS: List[Dict[str, Any]] = [
     "description": "Read registered trading accounts. **Requires `X-API-KEY`.**",
   },
   {
+    "name": "trades",
+    "description": "List trade history for a trading account. **Requires `X-API-KEY`.**",
+  },
+  {
     "name": "settings",
     "description": "Runtime broker toggles (e.g. block signals). **Requires `X-API-KEY`.**",
   },

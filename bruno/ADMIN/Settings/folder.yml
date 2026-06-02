@@ -1,7 +1,7 @@
 info:
-  name: webhook - BTC
+  name: Settings
   type: folder
-  seq: 3
+  seq: 2
 
 request:
   auth: inherit

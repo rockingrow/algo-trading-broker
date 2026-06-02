@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from broker.db.engine import get_session
@@ -259,3 +259,46 @@ class SqlAlchemyTradeRepository:
         trade_status,
       )
       return new_row
+
+  async def list_by_account(
+    self,
+    account_id: str,
+    limit: int,
+    offset: int,
+    order: str = "desc",
+    order_by: str = "updatedAt",
+  ) -> list[Trade]:
+    """Return trades for an account with offset/limit pagination and configurable sort."""
+    _sortable = {
+      "updatedAt": Trade.updatedAt,
+      "createdAt": Trade.createdAt,
+      "status": Trade.status,
+      "symbol": Trade.symbol,
+    }
+    col = _sortable.get(order_by, Trade.updatedAt)
+    sort_expr = col.desc() if order == "desc" else col.asc()
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Trade)
+          .where(Trade.account_id == account_id)
+          .order_by(sort_expr)
+          .offset(offset)
+          .limit(limit)
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception("Failed to fetch trades for account_id=%s: %s", account_id, exc)
+      return []
+
+  async def count_by_account(self, account_id: str) -> int:
+    """Return the total number of trades for an account."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(func.count()).select_from(Trade).where(Trade.account_id == account_id)
+        )
+        return result.scalar_one()
+    except Exception as exc:
+      log.exception("Failed to count trades for account_id=%s: %s", account_id, exc)
+      return 0

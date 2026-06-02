@@ -1,11 +1,11 @@
 info:
-  name: Toggle BlockSignal
+  name: Toggle SilentSignal
   type: http
   seq: 2
 
 http:
   method: POST
-  url: "{{url}}/settings/block-signal"
+  url: "{{url}}/admin/settings/silent-signal"
   auth: inherit
 
 settings:

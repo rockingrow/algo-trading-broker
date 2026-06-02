@@ -7,7 +7,7 @@ docs:
   content: |-
     # Algo Trading Broker — Bruno Collection
 
-    Bruno API collection at [bruno/](bruno/) for testing the Algo Trading Broker service. Two main flows: **webhook** ingestion (signals from TradingView / strategy) and **worker** trade lifecycle updates (from MT5 worker).
+    Bruno API collection at [bruno/](bruno/) for testing the Algo Trading Broker service. Three folders: **webhook** (signals from TradingView / strategy), **ADMIN** (broker admin operations), and **API** (read endpoints).
 
     ## Collection root
 
@@ -15,39 +15,24 @@ docs:
 
     ## Environments — [environments/](bruno/environments/)
 
-    | Name | `url` | Notes |
-    | --- | --- | --- |
-    | [LOCAL](bruno/environments/Algo%20Trading%20Broker%20-%20LOCAL.yml) | `http://localhost:{{port}}` (port `8080`) | `webhook_token` and `broker_token` are secrets |
-    | [live](bruno/environments/Algo%20Trading%20Broker%20-%20live.yml) | secret | `webhook_token` is a secret |
-    | [Tunneling test](bruno/environments/Algo%20Traing%20Broker%20-%20Tuneling%20test.yml) | `https://algotradingbotvn.a.pinggy.link` | Pinggy tunnel |
+    | Name | File |
+    | --- | --- |
+    | [Algo Trading Broker](bruno/environments/Algo%20Trading%20Broker.yml) | Single environment; all values pulled from `process.env.*` |
 
-    Variables referenced across requests: `{{url}}`, `{{webhook_token}}`, `{{broker_token}}`.
-
-    > Note: the live env defines only `url` + `webhook_token` — running `worker/*` requests against it would fail because `broker_token` is not set.
-
-    ## Top-level requests
-
-    ### [Health Check](bruno/Health%20Check.yml) — `GET {{url}}/health`
-    Liveness probe. No auth, no body.
-
-    ### [Toggle Prevent Signal](bruno/Toggle%20Prevent%20Signal.yml) — `POST {{url}}/settings/prevent-signal`
-    Toggles the `prevent_signal` broker setting between `1` (signal processing enabled) and `0` (disabled). No body required. Returns `{"setting": "prevent_signal", "value": "<new>", "state": "ENABLED|DISABLED"}`. Sends a Telegram notification to the private chat on every toggle.
-
-    ### [Webhook](bruno/Webhook.yml) — `POST {{url}}/webhook` *(legacy at root)*
-    Same endpoint as requests in [webhook/](bruno/webhook/) but kept at the collection root. Sends a `LONG` example payload without the `strategy` field — likely an older sample. Prefer the requests inside [webhook/](bruno/webhook/).
+    Variables: `port`, `url` (`{{process.env.url}}:{{process.env.port}}`), `webhook_token`, `broker_token`, `api_key`.
 
     ---
 
     ## `webhook/` folder — TradingView → Broker signals
 
     Folder config: [webhook/folder.yml](bruno/webhook/folder.yml) (auth inherited).
-    All requests POST to `{{url}}/webhook` with the same JSON envelope:
+    All requests POST to `{{url}}/secret/webhook` with the same JSON envelope:
 
     ```json
     {
-      "strategy": "MT5_GOLD_M5_V1",
+      "strategy": "{{process.env.strategy}}",
       "token": "{{webhook_token}}",
-      "symbol": "OANDA:XAUUSD",
+      "symbol": "OANDA:{{process.env.symbol}}",
       "timeframe": "5",
       "timestamp": "YYYY-MM-DD HH:MM:SS",
       "position": { "action": "...", ... },
@@ -73,29 +58,37 @@ docs:
 
     ---
 
-    ## `worker/` folder — MT5 worker → Broker trade lifecycle
+    ## `ADMIN/` folder — Broker admin operations
 
-    Folder config: [worker/folder.yml](bruno/worker/folder.yml) — injects header `X-API-KEY: {{broker_token}}` for every request.
+    Folder config: [ADMIN/folder.yml](bruno/ADMIN/folder.yml) — injects header `X-API-KEY: {{api_key}}` for every request.
 
-    ### Create (POST `{{url}}/trades`)
+    ### [FLAT](bruno/ADMIN/FLAT.yml) — `POST {{url}}/admin/flat`
 
-    | Seq | Request | `status` | Notes |
+    Force-flattens the broker state for a given strategy/symbol/account. Body: `strategy`, `symbol`, `account_id` (all from `process.env`).
+
+    ### `ADMIN/Settings/` subfolder — broker setting toggles
+
+    | Seq | Request | Endpoint |
+    | --- | --- | --- |
+    | 1 | [Toggle Include Signal Raw](bruno/ADMIN/Settings/Toggle%20Include%20Signal%20Raw.yml) | `POST {{url}}/admin/settings/include-signal-raw` |
+    | 2 | [Toggle BlockSignal](bruno/ADMIN/Settings/Toggle%20BlockSignal.yml) | `POST {{url}}/admin/settings/block-signal` |
+    | 2 | [Toggle SilentSignal](bruno/ADMIN/Settings/Toggle%20SilentSignal.yml) | `POST {{url}}/admin/settings/silent-signal` |
+
+    All toggles: no body, auth inherited from `ADMIN/` folder (`X-API-KEY`).
+
+    ---
+
+    ## `API/` folder — Read endpoints
+
+    Folder config: [API/folder.yml](bruno/API/folder.yml) — injects header `X-API-KEY: {{api_key}}` for every request.
+
+    | Seq | Request | Method & Endpoint | Notes |
     | --- | --- | --- | --- |
-    | 1 | [Worker - Create Opened Long](bruno/worker/Worker%20-%20Create%20Opened%20Long.yml) | `OPENED` | `ticket` set, `is_running: true`, `magic: "LONG\|<uuid>"` |
-    | 2 | [Worker - Create Rejected Short](bruno/worker/Worker%20-%20Create%20Rejected%20Short.yml) | `REJECTED` | `ticket: null`, `reject_reason` populated, `is_running: false` |
+    | 1 | [Health Check](bruno/API/Health%20Check.yml) | `GET {{url}}/v1/health` | Liveness probe, no body |
+    | 3 | [accounts](bruno/API/accounts.yml) | `GET {{url}}/v1/accounts` | Returns list of registered accounts |
+    | 3 | [trades](bruno/API/trades.yml) | `GET {{url}}/v1/{{account_id}}/trades` | Paginated trade list; query params: `offset` (default `0`), `limit` (optional, default `20`) |
 
-    Create body carries: `account_id`, `account_leverage`, `account_balance_init`, `account_balance`, `ticket`, `comment`, `magic`, `strategy`, `symbol`, `action`, `price`, `quantity`, `sl`, `tp1`, `tp2`, `is_running`, `risk_percent`, `status`, `reject_reason`.
-
-    ### Update (PATCH `{{url}}/trades/{account_id}/{ticket}`)
-
-    Path uses example values `12345678` / `123456789`.
-
-    | Seq | Request | `status` | Notes |
-    | --- | --- | --- | --- |
-    | 3 | [Worker - Update Partially Closed](bruno/worker/Worker%20-%20Update%20Partially%20Closed.yml) | `PARTIALLY_CLOSED` | `is_running: true`, partial fill `price`/`quantity` |
-    | 4 | [Worker - Update Closed SL](bruno/worker/Worker%20-%20Update%20Closed%20SL.yml) | `CLOSED` | `sl: null`, `is_running: false` |
-    | 5 | [Worker - Update Closed TP2](bruno/worker/Worker%20-%20Update%20Closed%20TP2.yml) | `CLOSED` | final TP2 fill, `is_running: false` |
-    | 6 | [Worker - Update Flat](bruno/worker/Worker%20-%20Update%20Flat.yml) | `FLAT` | minimal: just identity + `status` |
+    `trades` response shape: `{ data: Trade[], page: { total, limit, offset, order, order_by } }`.
 
     ---
 
@@ -103,18 +96,18 @@ docs:
 
     | Surface | Auth mechanism |
     | --- | --- |
-    | `GET /health` | none |
-    | `POST /settings/prevent-signal` | none |
-    | `POST /webhook` | `token` field in JSON body (= `{{webhook_token}}`) |
-    | `POST /trades`, `PATCH /trades/{acct}/{ticket}` | `X-API-KEY` header (= `{{broker_token}}`) injected by [worker/folder.yml](bruno/worker/folder.yml) |
+    | `POST /secret/webhook` | `token` field in JSON body (= `{{webhook_token}}`) |
+    | `POST /admin/*` | `X-API-KEY` header (= `{{api_key}}`) injected by [ADMIN/folder.yml](bruno/ADMIN/folder.yml) |
+    | `GET /v1/*` | `X-API-KEY` header (= `{{api_key}}`) injected by [API/folder.yml](bruno/API/folder.yml) |
 
     ## Typical test sequences
 
-    - **Happy path long:** `webhook/LONG` → `worker/Create Opened Long` → `webhook/TP1` → `worker/Update Partially Closed` → `webhook/TP2` → `worker/Update Closed TP2`.
-    - **Stopped out:** `webhook/LONG` → `worker/Create Opened Long` → `webhook/SL` → `worker/Update Closed SL`.
+    - **Happy path long:** `webhook/LONG` → `webhook/TP1` → `webhook/TP2`.
+    - **Stopped out:** `webhook/LONG` → `webhook/SL`.
     - **Trail to BE / raise SL:** insert `webhook/R_SL` after `TP1`.
-    - **Rejected entry:** `webhook/SHORT` → `worker/Create Rejected Short`.
-    - **Reset state:** `webhook/FLAT` → `worker/Update Flat`.
+    - **Rejected entry:** `webhook/SHORT`.
+    - **Reset state:** `webhook/FLAT` or `ADMIN/FLAT`.
+    - **Check trades:** `API/trades` (paginate with `offset`).
   type: text/markdown
 bundled: false
 extensions:

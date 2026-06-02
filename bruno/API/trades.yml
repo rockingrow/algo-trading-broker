@@ -1,0 +1,447 @@
+info:
+  name: trades
+  type: http
+  seq: 3
+
+http:
+  method: GET
+  url: "{{url}}/v1/{{process.env.account_id}}/trades?offset=0"
+  params:
+    - name: limit
+      value: "20"
+      type: query
+      disabled: true
+    - name: offset
+      value: "0"
+      type: query
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: trades
+    request:
+      url: "{{url}}/v1/{{process.env.account_id}}/trades?offset=0"
+      method: GET
+      params:
+        - name: limit
+          value: "20"
+          type: query
+          disabled: true
+        - name: offset
+          value: "0"
+          type: query
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: date
+          value: Tue, 02 Jun 2026 16:54:31 GMT
+        - name: server
+          value: uvicorn
+        - name: content-length
+          value: "8864"
+        - name: content-type
+          value: application/json
+      body:
+        type: json
+        data: |-
+          {
+            "data": [
+              {
+                "id": "e0d2fa92-4452-460b-ab96-0b545425d00a",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 823.55,
+                "account_balance": 823.55,
+                "ticket": 4520040787,
+                "comment": "",
+                "magic": "LONG|b5dc0374-9639-4861-acf4-2d239aa5c1b4",
+                "strategy": "BTC",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 71340.01,
+                "quantity": 0.75,
+                "sl": 71300.0,
+                "tp1": 71700.0,
+                "tp2": 71800.0,
+                "is_running": true,
+                "risk_percent": 3.0,
+                "status": "OPENED",
+                "reject_reason": null,
+                "createdAt": "2026-06-01T18:24:15.772188Z",
+                "updatedAt": "2026-06-01T18:24:15.772188Z"
+              },
+              {
+                "id": "03da1b49-f610-4cc5-afb0-8a8c534b5e1d",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 831.54,
+                "account_balance": 823.55,
+                "ticket": 4520039059,
+                "comment": "Closed 1 position(s) [R_SL]",
+                "magic": "LONG|d682a444-20c4-47a7-88f8-38041023a8c3",
+                "strategy": "BTC",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 71344.53,
+                "quantity": 0.49,
+                "sl": 71300.0,
+                "tp1": 71700.0,
+                "tp2": 71800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-06-01T18:23:01.468449Z",
+                "updatedAt": "2026-06-01T18:24:03.712674Z"
+              },
+              {
+                "id": "3f9e4877-d832-4e71-9700-d8d738cf0393",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 853.57,
+                "account_balance": 831.54,
+                "ticket": 4520018106,
+                "comment": "Closed 1 position(s) [R_SL]",
+                "magic": "LONG|68261a36-6559-4db0-941e-e3bc763b532e",
+                "strategy": "BTC",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 71413.19,
+                "quantity": 0.62,
+                "sl": 71400.0,
+                "tp1": 71700.0,
+                "tp2": 71800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-06-01T18:11:17.456341Z",
+                "updatedAt": "2026-06-01T18:11:47.093187Z"
+              },
+              {
+                "id": "795a0488-e196-4860-9a2c-77754f81bd60",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 779.5,
+                "account_balance": 853.57,
+                "ticket": 4519864323,
+                "comment": "Terminal close [TP]",
+                "magic": "LONG|9ae5ab02-5b12-4ab3-be9f-6137a61440ba",
+                "strategy": "BTC",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 71600.0,
+                "quantity": 0.52,
+                "sl": 71400.0,
+                "tp1": 71700.0,
+                "tp2": 71800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-06-01T17:24:50.793265Z",
+                "updatedAt": "2026-06-01T17:29:58.031194Z"
+              },
+              {
+                "id": "324c2a07-d00c-4d48-a953-f4e6aff4738a",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 782.62,
+                "account_balance": 779.5,
+                "ticket": 4519861002,
+                "comment": "Closed 1 position(s) [R_SL]",
+                "magic": "LONG|00b707db-1733-4861-bdc0-aa8deb92646b",
+                "strategy": "BTC",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 71447.17,
+                "quantity": 0.55,
+                "sl": 71400.0,
+                "tp1": 71700.0,
+                "tp2": 71800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-06-01T17:23:32.474401Z",
+                "updatedAt": "2026-06-01T17:24:16.632576Z"
+              },
+              {
+                "id": "0a7d26aa-6c30-4e58-94de-65126b6cd39e",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 683.92,
+                "account_balance": 782.62,
+                "ticket": 4509409240,
+                "comment": "Terminal close [TP]",
+                "magic": "LONG|1b2f7209-aa27-4a3d-bd58-b406e9ae8480",
+                "strategy": "BTC",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 73800.0,
+                "quantity": 0.43,
+                "sl": 73500.0,
+                "tp1": 73700.0,
+                "tp2": 73800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-05-29T08:08:03.693223Z",
+                "updatedAt": "2026-05-29T09:25:27.536148Z"
+              },
+              {
+                "id": "329c01f3-a40a-4e61-92ae-610ff7a4587f",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 679.23,
+                "account_balance": 683.92,
+                "ticket": 4480955260,
+                "comment": "FLAT by webhook",
+                "magic": "LONG|7040d3d2-4ed3-462d-8cb2-4914f94f9cd1",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 76535.47,
+                "quantity": 0.26,
+                "sl": 76400.0,
+                "tp1": 76650.0,
+                "tp2": 76800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "FLAT",
+                "reject_reason": null,
+                "createdAt": "2026-05-24T16:52:03.809107Z",
+                "updatedAt": "2026-05-24T16:55:10.679234Z"
+              },
+              {
+                "id": "c4dd4d75-0aee-4254-8143-a0f6868fe71f",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 680.32,
+                "account_balance": 679.23,
+                "ticket": 4480955183,
+                "comment": "Force-closed by new entry signal",
+                "magic": "LONG|859d5f75-6841-4269-bc3a-d47303fdc9af",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 76503.44,
+                "quantity": 0.28,
+                "sl": 76400.0,
+                "tp1": 76650.0,
+                "tp2": 76800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-05-24T16:51:51.708265Z",
+                "updatedAt": "2026-05-24T16:52:01.813566Z"
+              },
+              {
+                "id": "7cc2a0d8-1fb4-499b-be0e-8125ebae0430",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 676.63,
+                "account_balance": 680.32,
+                "ticket": 4480952014,
+                "comment": "FLAT by webhook",
+                "magic": "LONG|cbcb3830-530d-44e9-a0dd-d1bd4398a385",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 76450.29,
+                "quantity": 0.67,
+                "sl": 76400.0,
+                "tp1": 76650.0,
+                "tp2": 76800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "FLAT",
+                "reject_reason": null,
+                "createdAt": "2026-05-24T16:46:22.129317Z",
+                "updatedAt": "2026-05-24T16:46:42.249957Z"
+              },
+              {
+                "id": "18812bb2-826a-4884-832f-e3ab2b3d3b02",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 707.16,
+                "account_balance": 676.63,
+                "ticket": 4480942117,
+                "comment": "Terminal close [SL]",
+                "magic": "LONG|c32bf8c9-4c94-4a31-855d-47e7b7d2856b",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 76400.0,
+                "quantity": 0.27,
+                "sl": 76400.0,
+                "tp1": 76650.0,
+                "tp2": 76800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-05-24T16:31:32.022709Z",
+                "updatedAt": "2026-05-24T16:36:03.231362Z"
+              },
+              {
+                "id": "aad37b9e-6c57-43ef-bd6a-e67fbf555c63",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 704.71,
+                "account_balance": 707.16,
+                "ticket": 4480941898,
+                "comment": "Force-closed by new entry signal",
+                "magic": "LONG|55e4db46-91dd-4b62-ad17-59cf469ae897",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 76497.67,
+                "quantity": 0.33,
+                "sl": 76400.0,
+                "tp1": 76700.0,
+                "tp2": 76800.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "CLOSED",
+                "reject_reason": null,
+                "createdAt": "2026-05-24T16:30:55.848718Z",
+                "updatedAt": "2026-05-24T16:31:32.002984Z"
+              },
+              {
+                "id": "5ada51d3-21ec-40da-b73c-93c2526b336f",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 705.67,
+                "account_balance": 704.71,
+                "ticket": 4480048373,
+                "comment": "FLAT by webhook",
+                "magic": "LONG|21c4a76e-aa1d-4956-a3f3-a35c78bc0c1d",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 75142.83,
+                "quantity": 0.08,
+                "sl": 74800.0,
+                "tp1": 75300.0,
+                "tp2": 75500.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "FLAT",
+                "reject_reason": null,
+                "createdAt": "2026-05-23T14:11:00.929947Z",
+                "updatedAt": "2026-05-23T14:20:15.609443Z"
+              },
+              {
+                "id": "ab119aa4-90cb-40dc-ae99-4697fe46a363",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 709.88,
+                "account_balance": 705.67,
+                "ticket": 4480041002,
+                "comment": "FLAT by webhook",
+                "magic": "LONG|223effa3-de95-44b8-9c50-ca1aee1830af",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 75044.46,
+                "quantity": 0.11,
+                "sl": 74800.0,
+                "tp1": 75300.0,
+                "tp2": 75500.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "FLAT",
+                "reject_reason": null,
+                "createdAt": "2026-05-23T14:03:21.276924Z",
+                "updatedAt": "2026-05-23T14:04:07.519580Z"
+              },
+              {
+                "id": "4ee2aa27-45a3-425b-a318-26eaa66931f0",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 716.83,
+                "account_balance": 709.88,
+                "ticket": 4480035101,
+                "comment": "FLAT by webhook",
+                "magic": "LONG|ba02adad-d4ab-47ae-9ff4-d9a835be9074",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 75069.6,
+                "quantity": 0.08,
+                "sl": 74800.0,
+                "tp1": 75300.0,
+                "tp2": 75500.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "FLAT",
+                "reject_reason": null,
+                "createdAt": "2026-05-23T13:55:11.426450Z",
+                "updatedAt": "2026-05-23T14:01:14.904145Z"
+              },
+              {
+                "id": "5e7621ff-0c96-42c1-804d-f8892a058c1c",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 709.92,
+                "account_balance": 709.88,
+                "ticket": 4480029930,
+                "comment": "FLAT by webhook",
+                "magic": "LONG|9690b575-4d22-4f99-9da1-ca15a29c377f",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "BTCUSD",
+                "action": "LONG",
+                "price": 75069.6,
+                "quantity": 0.12,
+                "sl": 74800.0,
+                "tp1": 75200.0,
+                "tp2": 75300.0,
+                "is_running": false,
+                "risk_percent": 3.0,
+                "status": "FLAT",
+                "reject_reason": null,
+                "createdAt": "2026-05-23T13:52:08.699899Z",
+                "updatedAt": "2026-05-23T14:01:14.890438Z"
+              },
+              {
+                "id": "958a9df6-466b-4bab-9ae8-5c6033375806",
+                "account_id": "123456789",
+                "account_leverage": 1000,
+                "account_balance_init": 709.92,
+                "account_balance": 709.92,
+                "ticket": 4478696439,
+                "comment": "",
+                "magic": "LONG|58139407-53aa-442e-a2c1-75fcdb56f995",
+                "strategy": "MT5_GOLD_M5_V1",
+                "symbol": "XAUUSD",
+                "action": "LONG",
+                "price": 4519.513,
+                "quantity": 0.02,
+                "sl": 4500.0,
+                "tp1": 4525.0,
+                "tp2": 4530.0,
+                "is_running": true,
+                "risk_percent": 3.0,
+                "status": "OPENED",
+                "reject_reason": null,
+                "createdAt": "2026-05-23T13:47:35.574796Z",
+                "updatedAt": "2026-05-23T13:47:35.574796Z"
+              }
+            ],
+            "page": {
+              "total": 16,
+              "limit": 20,
+              "offset": 0,
+              "order": "desc",
+              "order_by": "updatedAt"
+            }
+          }
