@@ -4,7 +4,7 @@ variables:
   - name: port
     value: "{{process.env.port}}"
   - name: url
-    value: "{{process.env.url}}:{{process.env.port}}"
+    value: "{{process.env.url}}:{{process.env.port}}/{{process.env.url_prefix}}"
   - name: webhook_token
     value: "{{process.env.webhook_token}}"
   - name: broker_token

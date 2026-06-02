@@ -19,14 +19,16 @@ docs:
     | --- | --- |
     | [Algo Trading Broker](bruno/environments/Algo%20Trading%20Broker.yml) | Single environment; all values pulled from `process.env.*` |
 
-    Variables: `port`, `url` (`{{process.env.url}}:{{process.env.port}}`), `webhook_token`, `broker_token`, `api_key`.
+    Variables: `port`, `url` (`{{process.env.url}}:{{process.env.port}}/{{process.env.url_prefix}}`), `webhook_token`, `broker_token`, `api_key`.
+
+    `url_prefix` maps to `BROKER_API_PREFIX` in the broker's `.env`. All request URLs are expressed as `{{url}}/v1/...` etc. — the prefix is baked into `{{url}}` so no individual request needs to be changed. Leave `url_prefix` empty (or omit it from `.env`) to use the default paths without a prefix.
 
     ---
 
     ## `webhook/` folder — TradingView → Broker signals
 
     Folder config: [webhook/folder.yml](bruno/webhook/folder.yml) (auth inherited).
-    All requests POST to `{{url}}/secret/webhook` with the same JSON envelope:
+    All requests POST to `{{url}}/secret/webhook` with the same JSON envelope (prefix is already embedded in `{{url}}`):
 
     ```json
     {
@@ -62,7 +64,7 @@ docs:
 
     Folder config: [ADMIN/folder.yml](bruno/ADMIN/folder.yml) — injects header `X-API-KEY: {{api_key}}` for every request.
 
-    ### [FLAT](bruno/ADMIN/FLAT.yml) — `POST {{url}}/admin/flat`
+    ### [FLAT](bruno/ADMIN/FLAT.yml) — `POST {{url}}/admin/flat` (prefix embedded in `{{url}}`)
 
     Force-flattens the broker state for a given strategy/symbol/account. Body: `strategy`, `symbol`, `account_id` (all from `process.env`).
 

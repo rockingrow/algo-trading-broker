@@ -33,19 +33,21 @@ async def lifespan(app: FastAPI):
   await consumer.start()
   app.state.publisher = publisher
 
+  api_prefix = f"/{settings.BROKER_API_PREFIX}" if settings.BROKER_API_PREFIX else ""
+
   # Notification: Startup
   await notifier.send_message(
     f"🟢 <b>Broker Node Started</b>\n"
     f"🔌 NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy)\n"
     f"🔌 NATS Listening: <code>{nats_client.LISTEN_SUBJECT.value}</code>\n"
-    f"🌐 Endpoint: <code>{settings.broker_url}</code>"
+    f"🌐 Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
 
   yield
 
   # Notification: Shutdown
   await notifier.send_message(
-    f"🛑 <b>Broker Node Stopped</b>\n🌐 Endpoint: <code>{settings.broker_url}</code>"
+    f"🛑 <b>Broker Node Stopped</b>\n🌐 Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
 
   await consumer.stop()
@@ -63,7 +65,8 @@ def create_app() -> FastAPI:
     log.error(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
-  # Include Core Router
-  app.include_router(get_core_router())
+  # Include Core Router — mount under secret prefix if configured
+  api_prefix = f"/{settings.BROKER_API_PREFIX}" if settings.BROKER_API_PREFIX else ""
+  app.include_router(get_core_router(), prefix=api_prefix)
 
   return app
