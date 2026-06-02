@@ -1,0 +1,23 @@
+info:
+  name: FLAT
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{url}}/admin/flat"
+  body:
+    type: json
+    data: |-
+      {
+        "strategy": "{{process.env.strategy}}",
+        "symbol": "{{process.env.symbol}}",
+        "account_id": "{{process.env.account_id}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

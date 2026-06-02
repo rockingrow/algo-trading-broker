@@ -35,3 +35,14 @@ class TradeRepository(Protocol):
   """Applies position events from workers to the broker's trades table."""
 
   async def upsert_by_position_event(self, event: PositionEvent) -> Trade | None: ...
+
+  async def list_by_account(
+    self,
+    account_id: str,
+    limit: int,
+    offset: int,
+    order: str = "desc",
+    order_by: str = "updatedAt",
+  ) -> list[Trade]: ...
+
+  async def count_by_account(self, account_id: str) -> int: ...

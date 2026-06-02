@@ -5,14 +5,14 @@ info:
 
 http:
   method: POST
-  url: "{{url}}/webhook"
+  url: "{{url}}/secret/webhook"
   body:
     type: json
     data: |-
       {
-        "strategy": "MT5_GOLD_M5_V1",
+        "strategy": "{{process.env.strategy}}",
         "token": "{{webhook_token}}",
-        "symbol": "OANDA:XAUUSD",
+        "symbol": "OANDA:{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-22 03:50:00",
         "position": {
@@ -21,47 +21,8 @@ http:
           "quantity": 0.01,
           "is_running": true
         },
-        "indicators": {
-          "wt1": 42.44,
-          "wt2": 48.87,
-          "close": 4757.82,
-          "upper": 4762.94,
-          "lower": 4751.38,
-          "basis": 4757.16,
-          "ema200_visual": 4772.59,
-          "ema200_filter": 4783.94,
-          "atr_val": 3.65,
-          "in_session": true,
-          "vol_spike": false,
-          "in_cooldown": false,
-          "sl_too_wide": false
-        },
-        "inputs": {
-          "watching_candles": 1,
-          "over_wt_value": 30,
-          "safe_wt_value": 30,
-          "use_session": true,
-          "skip_windows": "10:00-11:00,23:00-00:00",
-          "bb_len": 20,
-          "bb_mult": 2,
-          "show_imb": true,
-          "atr_len": 14,
-          "atr_sl_mult": 2,
-          "min_rr_ratio": 0.75,
-          "risk_percent": 3,
-          "use_basis_exit": false,
-          "basis_exit_buffer": 1.5,
-          "tp1_qty_pc": 30,
-          "use_max_sl_dist": true,
-          "max_sl_distance": 30,
-          "vol_spike_mult": 2,
-          "vol_spike_lookback": 50,
-          "use_vol_filter": true,
-          "ema_visual_tf": "15",
-          "ema_filter_tf": "240",
-          "use_cooldown": false,
-          "cooldown_bars": 6
-        }
+        "indicators": {},
+        "inputs": {}
       }
   auth: inherit
 

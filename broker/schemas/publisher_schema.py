@@ -15,6 +15,12 @@ class PublishTopicEnum(str, Enum):
   TRADE = "TRADE"
 
 
+class AdminActionEnum(str, Enum):
+  """Admin actions that can be published to the ADMIN topic."""
+
+  FLAT = "FLAT"
+
+
 class TradingSignal(BaseModel):
   """Normalised signal produced from a TradingView webhook payload."""
 
@@ -33,3 +39,28 @@ class TradingSignal(BaseModel):
   tp2: Optional[float] = None
   is_running: Optional[bool] = None
   risk_percent: Optional[float] = None
+
+
+class AdminSignal(BaseModel):
+  """Admin signal published to the ADMIN topic."""
+
+  model_config = ConfigDict(use_enum_values=True)
+
+  action: AdminActionEnum
+  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+  strategy: Optional[str] = None
+  symbol: Optional[str] = None
+  account_id: Optional[str] = None
+
+  model_config = {
+    "from_attributes": True,
+    "json_schema_extra": {
+      "example": {
+        "action": "FLAT",
+        "timestamp": "2026-06-02T08:00:00+00:00",
+        "strategy": "my_strategy",
+        "symbol": "XAUUSD",
+        "account_id": "123456",
+      }
+    },
+  }

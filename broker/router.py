@@ -10,8 +10,8 @@ def get_core_router() -> APIRouter:
   router = APIRouter()
 
   # Include all sub-routers
-  router.include_router(get_api_router())
-  router.include_router(get_admin_router())
-  router.include_router(get_webhook_router())
+  router.include_router(get_api_router(), prefix="/v1")
+  router.include_router(get_admin_router(), prefix="/admin")
+  router.include_router(get_webhook_router(), prefix="/secret")
 
   return router

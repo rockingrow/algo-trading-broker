@@ -133,9 +133,12 @@ make dev
 ## Configuration (`.env`)
 
 ```env
+# ── Server ───────────────────────────────────────────
+BROKER_PUBLIC_URL=server_ip_or_domain
+
 # ── Webhook ──────────────────────────────────────────
 WEBHOOK_HOST=0.0.0.0
-WEBHOOK_PORT=8080
+WEBHOOK_PORT=80
 
 # Optional HMAC secret — set the same value in TradingView alert header
 # X-Signature: <sha256-hex-of-body>
@@ -148,6 +151,7 @@ BROKER_API_KEY=api_key
 # ── NATS ─────────────────────────────────────────────
 NATS_HOST=localhost        # overridden to "nats" inside Docker
 NATS_PORT=4222
+NATS_MONITOR_PORT=8222
 NATS_TOKEN=changeme       # shared secret; leave blank = no auth
 
 # ── PostgreSQL ────────────────────────────────────────
@@ -159,6 +163,10 @@ POSTGRES_PASSWORD=algotrading_broker_db_password
 
 # ── Logging ──────────────────────────────────────────
 LOG_LEVEL=INFO
+
+# ── API Docs ─────────────────────────────────────────
+# Set to false in production to hide /docs, /redoc and /openapi.json.
+DOCS_ENABLED=false
 
 # ── Telegram (optional) ──────────────────────────────
 TELEGRAM_ENABLED=false
@@ -212,32 +220,46 @@ FastAPI auto-generates interactive API documentation. With the server running:
 
 Set `DOCS_ENABLED=false` in `.env` to disable all three in production.
 
+### URL Prefixes
+
+All routes are grouped under versioned or purpose-scoped prefixes:
+
+| Prefix | Router | Description |
+| ------ | ------ | ----------- |
+| `/v1` | API | Public API endpoints (accounts, trades, health) |
+| `/admin` | Admin | Management endpoints (settings, trading actions) |
+| `/secret` | Webhook | TradingView webhook receiver |
+
 ### Authentication
 
 Management endpoints require an API key passed in the `X-API-KEY` header, validated against `BROKER_API_KEY`:
 
 ```bash
-curl http://localhost:8080/accounts -H "X-API-KEY: $BROKER_API_KEY"
+curl http://localhost:8080/v1/accounts -H "X-API-KEY: $BROKER_API_KEY"
 ```
 
-Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset, protected endpoints return `500`. The `/health` and `/webhook` endpoints are **not** key-protected (`/webhook` uses its own in-payload `token`).
+Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset, protected endpoints return `500`. The `/v1/health` and `/secret/webhook` endpoints are **not** key-protected (`/secret/webhook` uses its own in-payload `token`).
 
 | Endpoint | Auth |
 | -------- | ---- |
-| `GET /health` | None |
-| `POST /webhook` | In-payload `token` (+ optional HMAC) |
-| `GET /accounts` | `X-API-KEY` |
-| `POST /settings/block-signal` | `X-API-KEY` |
+| `GET /v1/health` | None |
+| `POST /secret/webhook` | In-payload `token` (+ optional HMAC) |
+| `GET /v1/accounts` | `X-API-KEY` |
+| `GET /v1/{account_id}/trades` | `X-API-KEY` |
+| `POST /admin/settings/block-signal` | `X-API-KEY` |
+| `POST /admin/settings/silent-signal` | `X-API-KEY` |
+| `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
+| `POST /admin/flat` | `X-API-KEY` |
 
 ---
 
-### GET `/health`
+### GET `/v1/health`
 
 Returns `{"status": "ok"}`. No authentication required.
 
 ---
 
-### POST `/webhook`
+### POST `/secret/webhook`
 
 Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Publishes the signal to the NATS subject matching `signal.strategy` (e.g. `wt_cross_v1`).
 
@@ -275,7 +297,7 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 
 ---
 
-### GET `/accounts`
+### GET `/v1/accounts`
 
 Returns all trading accounts ordered by most recent activity. Requires the `X-API-KEY` header.
 
@@ -300,9 +322,82 @@ Accounts are automatically created or updated each time a `TRADE` event arrives 
 
 ---
 
-### POST `/settings/block-signal`
+### GET `/v1/{account_id}/trades`
+
+Returns a paginated list of trades for the given account. Requires the `X-API-KEY` header.
+
+**Query Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `limit` | `20` | Number of results (1–100) |
+| `offset` | `0` | Skip this many rows |
+| `order` | `desc` | Sort direction: `asc` or `desc` |
+| `order_by` | `updatedAt` | Sort column: `updatedAt`, `createdAt`, `status`, `symbol` |
+
+**Response:**
+
+```json
+{
+  "data": [
+    {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "account_id": "MT5-12345678",
+      "strategy": "BTC-M15",
+      "symbol": "BTCUSDT",
+      "action": "LONG",
+      "price": 65000.0,
+      "quantity": 0.01,
+      "status": "OPENED",
+      "createdAt": "2026-06-01T08:00:00Z",
+      "updatedAt": "2026-06-02T09:30:00Z"
+    }
+  ],
+  "page": {
+    "total": 42,
+    "limit": 20,
+    "offset": 0,
+    "order": "desc",
+    "order_by": "updatedAt"
+  }
+}
+```
+
+---
+
+### POST `/admin/settings/block-signal`
 
 Toggles the `SIGNAL_BLOCKED` broker setting between `"1"` (signals blocked) and `"0"` (signals forwarded). Requires the `X-API-KEY` header. Does not require a restart. Sends a Telegram notification on change.
+
+---
+
+### POST `/admin/settings/silent-signal`
+
+Toggles the `SILENT_SIGNAL` broker setting between `"1"` (Telegram notifications muted) and `"0"` (notifications active). Useful for pausing alerts without disabling Telegram entirely. Requires the `X-API-KEY` header.
+
+---
+
+### POST `/admin/settings/include-signal-raw`
+
+Toggles the `NOTIFICATION_INCLUDE_SIGNAL_RAW` setting. When enabled (`"1"`), Telegram signal notifications include the full `indicators` and `inputs` blocks. Requires the `X-API-KEY` header.
+
+---
+
+### POST `/admin/flat`
+
+Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
+
+**Request Body (all fields optional):**
+
+```json
+{
+  "strategy": "wt_cross_v1",
+  "symbol": "XAUUSD",
+  "account_id": "MT5-12345678"
+}
+```
+
+Omit all fields (or send an empty body `{}`) to flat every open position across all workers.
 
 ---
 
@@ -351,6 +446,7 @@ Toggles the `SIGNAL_BLOCKED` broker setting between `"1"` (signals blocked) and 
 | `status` | Enum | Trade status (OPEN, CLOSED, REJECTED, …) |
 | `reject_reason` | String(255) | Reason if trade was rejected |
 | `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
 
 ### `accounts` table
 
@@ -370,8 +466,16 @@ Toggles the `SIGNAL_BLOCKED` broker setting between `"1"` (signals blocked) and 
 | Column | Type | Description |
 | ------- | ------------ | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
-| `key` | String(255) | Setting key (e.g. `signal_blocked`) |
+| `key` | String(255) | Setting key (see known keys below) |
 | `value` | String(255) | Setting value (`"0"` / `"1"` for flags) |
+
+**Known setting keys:**
+
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `signal_blocked` | `"0"` | Pause signal forwarding to workers |
+| `silent_signal` | `"0"` | Mute Telegram signal notifications |
+| `notification_include_signal_raw` | `"0"` | Append indicators/inputs to notifications |
 
 ---
 

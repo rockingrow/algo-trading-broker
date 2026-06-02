@@ -57,7 +57,7 @@ class Settings(BaseSettings):
   # ── API Docs (Swagger / ReDoc) ───────────────────────────────────
   # Master switch for the interactive docs. Set to ``false`` in production
   # to fully hide /docs, /redoc and /openapi.json.
-  DOCS_ENABLED: bool = True
+  DOCS_ENABLED: bool = False
 
   # ── Telegram ─────────────────────────────────────────────────────
   TELEGRAM_ENABLED: bool = False

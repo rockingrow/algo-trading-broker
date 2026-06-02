@@ -1,7 +1,7 @@
 info:
   name: API
   type: folder
-  seq: 5
+  seq: 3
 
 request:
   auth:

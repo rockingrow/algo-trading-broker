@@ -14,6 +14,7 @@ from broker.db.repository import (
   SqlAlchemyAccountRepository,
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
+  SqlAlchemyTradeRepository,
 )
 from broker.interfaces import (
   AccountRepository,
@@ -21,6 +22,7 @@ from broker.interfaces import (
   SettingRepository,
   SignalPublisher,
   SignalRepository,
+  TradeRepository,
 )
 from broker.services.notification_service import TelegramNotification
 from broker.services.signal_processing_service import SignalProcessingService
@@ -37,6 +39,10 @@ def get_setting_repository() -> SettingRepository:
 
 def get_account_repository() -> AccountRepository:
   return SqlAlchemyAccountRepository()
+
+
+def get_trade_repository() -> TradeRepository:
+  return SqlAlchemyTradeRepository()
 
 
 def get_signals_notifier(

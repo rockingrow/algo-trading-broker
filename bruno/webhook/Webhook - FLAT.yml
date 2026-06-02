@@ -5,14 +5,14 @@ info:
 
 http:
   method: POST
-  url: "{{url}}/webhook"
+  url: "{{url}}/secret/webhook"
   body:
     type: json
     data: |-
       {
-        "strategy": "MT5_GOLD_M5_V1",
+        "strategy": "{{process.env.strategy}}",
         "token": "{{webhook_token}}",
-        "symbol": "OANDA:XAUUSD",
+        "symbol": "OANDA:{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-25 20:03:00",
         "position": {

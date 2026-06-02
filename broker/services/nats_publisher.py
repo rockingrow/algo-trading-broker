@@ -14,7 +14,7 @@ from datetime import datetime
 from broker.logger import get_logger
 from broker.nats import NatsClient, nats_client
 from broker.schemas.core import SignalActionEnum
-from broker.schemas.publisher_schema import TradingSignal
+from broker.schemas.publisher_schema import AdminSignal, PublishTopicEnum, TradingSignal
 
 log = get_logger(__name__)
 
@@ -53,3 +53,16 @@ class NatsPublisher:
     ).encode()
     await self._conn.nc.publish(strategy, payload)
     log.info("Published [%s] FLAT directive symbol=%s", strategy, symbol)
+
+  async def publish_admin_signal(self, **kwargs) -> None:
+    """Broadcast an admin signal on the ADMIN subject."""
+    signal = AdminSignal(**kwargs)
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(PublishTopicEnum.ADMIN.value, payload)
+    log.info(
+      "Published [ADMIN] action=%s strategy=%s symbol=%s account_id=%s",
+      signal.action,
+      signal.strategy,
+      signal.symbol,
+      signal.account_id,
+    )
