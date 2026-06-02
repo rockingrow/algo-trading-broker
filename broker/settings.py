@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
   # ── Broker API ───────────────────────────────────────────────────
   BROKER_API_KEY: str
+  BROKER_API_PREFIX: str = ""  # optional prefix for API endpoints
 
   # ── NATS Publisher (broker → workers) ────────────────────────
   NATS_HOST: str = "localhost"  # overridden to "nats" inside Docker
