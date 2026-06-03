@@ -2,92 +2,7 @@
 
 A high-performance, decentralized **trading signal broker** built with FastAPI and NATS. It acts as a central hub between TradingView alerts and distributed execution nodes (VPS workers).
 
-## Features
-
-- **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification).
-- **Persistence**: Logs every signal, trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
-- **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need.
-- **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
-- **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
-- **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
-- **Signal Gating**: A `SIGNAL_BLOCKED` broker setting can pause signal forwarding without restarting the server.
-- **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals.
-- **Developer Friendly**: Includes Makefile, Bruno API collections, Alembic CLI helpers, and Ruff for linting.
-
----
-
-## System Architecture
-
-```mermaid
-graph TD
-    TV[TradingView Alert] -- "POST :8080/webhook" --> Broker
-    subgraph "Broker Node (This Repo)"
-        Broker[FastAPI Webhook Server]
-        DB[(PostgreSQL)]
-        NATS["NATS Server :4222 (Token Auth)"]
-        Broker -- "Log Signal" --> DB
-        Broker -- "Publish {strategy}" --> NATS
-        NATS -- "TRADE events" --> NatsService
-        NatsService -- "Upsert Trade + Account" --> DB
-    end
-    NATS -- "{strategy}" --> W1
-    NATS -- "{strategy}" --> W2
-    NATS -- "{strategy}" --> WN
-    subgraph W1["Worker — Forex (MT5)"]
-        W1A[Signal Handler] --> W1B[(SQLite)]
-        W1B -. "NATS TRADE event" .-> NATS
-    end
-    subgraph W2["Worker — Forex (MT5)"]
-        W2A[Signal Handler] --> W2B[(SQLite)]
-        W2B -. "NATS TRADE event" .-> NATS
-    end
-    subgraph WN["Worker — Crypto (TBD)"]
-        WNA[Signal Handler] --> WNB[(SQLite)]
-        WNB -. "NATS TRADE event" .-> NATS
-    end
-```
-
----
-
-## Project Structure
-
-```text
-algo-trading-broker/
-├── broker/
-│   ├── api/             # Webhook, accounts, and settings API routes
-│   ├── security/        # Auth guards (e.g. X-API-KEY via ensure_api_key)
-│   ├── db/              # SQLAlchemy models, engine, repository
-│   ├── helpers/         # Signal and timeframe utilities
-│   ├── nats.py          # NATS connection lifecycle (connect/drain/close)
-│   ├── schemas/         # Pydantic schemas (webhook, publisher, trade, account)
-│   └── services/        # NatsService (publish + trade listener), TelegramNotification
-├── alembic/             # Alembic migration environment and version scripts
-├── bruno/               # Bruno API client collections
-├── examples/            # Example JSON payloads
-├── scripts/             # Utility scripts (docker-entrypoint, etc.)
-├── Makefile             # Automation shortcuts (uv, Docker, Alembic, linters)
-├── Dockerfile           # Production container definition
-├── docker-compose.yml   # Infrastructure (PostgreSQL + NATS + Broker)
-└── pyproject.toml       # uv dependencies & tool config
-```
-
----
-
-## NATS Subjects
-
-The broker uses **token-based authentication** with the NATS server. Workers must supply the same token when connecting.
-
-| Direction | Subject | Purpose |
-| --------- | ------- | ------- |
-| Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
-| Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
-| Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
-
-Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
-
----
-
-## Quick Start
+## ⚡ Quick Start
 
 ### 1. Prerequisites
 
@@ -130,7 +45,92 @@ make dev
 
 ---
 
-## Configuration (`.env`)
+## ✨ Features
+
+- **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification).
+- **Persistence**: Logs every signal, trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
+- **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need.
+- **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
+- **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
+- **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
+- **Signal Gating**: A `SIGNAL_BLOCKED` broker setting can pause signal forwarding without restarting the server.
+- **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals.
+- **Developer Friendly**: Includes Makefile, Bruno API collections, Alembic CLI helpers, and Ruff for linting.
+
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+graph TD
+    TV[TradingView Alert] -- "POST :8080/webhook" --> Broker
+    subgraph "Broker Node (This Repo)"
+        Broker[FastAPI Webhook Server]
+        DB[(PostgreSQL)]
+        NATS["NATS Server :4222 (Token Auth)"]
+        Broker -- "Log Signal" --> DB
+        Broker -- "Publish {strategy}" --> NATS
+        NATS -- "TRADE events" --> NatsService
+        NatsService -- "Upsert Trade + Account" --> DB
+    end
+    NATS -- "{strategy}" --> W1
+    NATS -- "{strategy}" --> W2
+    NATS -- "{strategy}" --> WN
+    subgraph W1["Worker — Forex (MT5)"]
+        W1A[Signal Handler] --> W1B[(SQLite)]
+        W1B -. "NATS TRADE event" .-> NATS
+    end
+    subgraph W2["Worker — Forex (MT5)"]
+        W2A[Signal Handler] --> W2B[(SQLite)]
+        W2B -. "NATS TRADE event" .-> NATS
+    end
+    subgraph WN["Worker — Crypto (TBD)"]
+        WNA[Signal Handler] --> WNB[(SQLite)]
+        WNB -. "NATS TRADE event" .-> NATS
+    end
+```
+
+---
+
+## 📁 Project Structure
+
+```text
+algo-trading-broker/
+├── broker/
+│   ├── api/             # Webhook, accounts, and settings API routes
+│   ├── security/        # Auth guards (e.g. X-API-KEY via ensure_api_key)
+│   ├── db/              # SQLAlchemy models, engine, repository
+│   ├── helpers/         # Signal and timeframe utilities
+│   ├── nats.py          # NATS connection lifecycle (connect/drain/close)
+│   ├── schemas/         # Pydantic schemas (webhook, publisher, trade, account)
+│   └── services/        # NatsService (publish + trade listener), TelegramNotification
+├── alembic/             # Alembic migration environment and version scripts
+├── bruno/               # Bruno API client collections
+├── examples/            # Example JSON payloads
+├── scripts/             # Utility scripts (docker-entrypoint, etc.)
+├── Makefile             # Automation shortcuts (uv, Docker, Alembic, linters)
+├── Dockerfile           # Production container definition
+├── docker-compose.yml   # Infrastructure (PostgreSQL + NATS + Broker)
+└── pyproject.toml       # uv dependencies & tool config
+```
+
+---
+
+## 📡 NATS Subjects
+
+The broker uses **token-based authentication** with the NATS server. Workers must supply the same token when connecting.
+
+| Direction | Subject | Purpose |
+| --------- | ------- | ------- |
+| Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
+| Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
+| Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
+
+Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
+
+---
+
+## ⚙️ Configuration (`.env`)
 
 ```env
 # ── Server ───────────────────────────────────────────
@@ -182,7 +182,7 @@ TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
 
 ---
 
-## Development
+## 🛠️ Development
 
 | Command | Description |
 | ----------------------- | ----------------------------------------------- |
@@ -211,7 +211,7 @@ TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
 
 ---
 
-## API
+## 🌐 API
 
 ### Interactive docs (Swagger / OpenAPI)
 
@@ -417,7 +417,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 
 ---
 
-## PostgreSQL Schema
+## 🗄️ PostgreSQL Schema
 
 ### `signals` table
 
@@ -495,7 +495,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 
 ---
 
-## Testing
+## 🧪 Testing
 
 Open the `/bruno` directory with the [Bruno API Client](https://www.usebruno.com/) to find pre-configured requests for testing the webhook, accounts, settings, and health endpoints.
 
