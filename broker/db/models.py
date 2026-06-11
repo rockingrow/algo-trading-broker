@@ -12,7 +12,6 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import (
-  BigInteger,
   Boolean,
   DateTime,
   Enum,
@@ -95,7 +94,7 @@ class Trade(Base):
 
   __tablename__ = "trades"
   __table_args__ = (
-    UniqueConstraint("account_id", "ticket", name="uq_trades_account_ticket"),
+    UniqueConstraint("account_id", "ref_id", name="uq_trades_account_ref_id"),
   )
 
   # Trading Account info
@@ -105,9 +104,9 @@ class Trade(Base):
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
 
   # Broker-specific fields
-  ticket: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+  ref_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
   comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
-  magic: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+  strategy_code: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
   # Trade details
   strategy: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -131,7 +130,7 @@ class Trade(Base):
 
   def __repr__(self) -> str:
     return (
-      f"<Trade id={self.id} account_id={self.account_id} ticket={self.ticket} "
+      f"<Trade id={self.id} account_id={self.account_id} ref_id={self.ref_id} "
       f"action={self.action} symbol={self.symbol}>"
     )
 

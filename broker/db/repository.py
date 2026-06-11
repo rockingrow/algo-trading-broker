@@ -147,7 +147,8 @@ class SqlAlchemyTradeRepository:
     now = datetime.now(timezone.utc)
 
     if row is not None:
-      row.account_name = event.account_name
+      if event.account_name is not None:
+        row.account_name = event.account_name
       row.market_type = MarketTypeEnum(event.market_type)
       if event.account_balance is not None:
         row.account_balance = event.account_balance
@@ -182,7 +183,7 @@ class SqlAlchemyTradeRepository:
       result = await session.execute(
         select(Trade).where(
           Trade.account_id == event.account_id,
-          Trade.ticket == event.source_ticket,
+          Trade.ref_id == event.ref_source_id,
         )
       )
       row: Optional[Trade] = result.scalars().first()
@@ -195,7 +196,7 @@ class SqlAlchemyTradeRepository:
             row.status,
             trade_status,
             event.account_id,
-            event.source_ticket,
+            event.ref_source_id,
           )
           return row
         row.status = trade_status
@@ -212,7 +213,7 @@ class SqlAlchemyTradeRepository:
           "trade upserted (update) id=%s account_id=%s ticket=%s status=%s",
           str(row.id),
           event.account_id,
-          event.source_ticket,
+          event.ref_source_id,
           trade_status,
         )
         return row
@@ -222,7 +223,7 @@ class SqlAlchemyTradeRepository:
           "upsert_by_position_event: cannot create Trade for "
           "account_id=%s ticket=%s without account_leverage",
           event.account_id,
-          event.source_ticket,
+          event.ref_source_id,
         )
         return None
 
@@ -232,9 +233,9 @@ class SqlAlchemyTradeRepository:
         account_leverage=event.account_leverage,
         account_balance_init=event.account_balance,
         account_balance=event.account_balance,
-        ticket=event.source_ticket,
+        ref_id=event.ref_source_id,
         comment=event.comment,
-        magic=event.magic or f"{event.action}|{event.signal_id or event.source_ticket}",
+        strategy_code=event.strategy_code or f"{event.action}|{event.signal_id or event.ref_source_id}",
         strategy=event.strategy,
         symbol=event.symbol,
         action=event.action.upper(),
@@ -255,7 +256,7 @@ class SqlAlchemyTradeRepository:
         "trade upserted (insert) id=%s account_id=%s ticket=%s status=%s",
         str(new_row.id),
         event.account_id,
-        event.source_ticket,
+        event.ref_source_id,
         trade_status,
       )
       return new_row
