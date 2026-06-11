@@ -34,9 +34,9 @@ class TradeResponse(BaseModel):
   account_leverage: int
   account_balance_init: Optional[float]
   account_balance: Optional[float]
-  ticket: Optional[int]
+  ref_id: Optional[str]
   comment: Optional[str]
-  magic: str
+  strategy_code: str
   strategy: str
   symbol: str
   action: SignalActionEnum
@@ -61,9 +61,9 @@ class TradeResponse(BaseModel):
         "account_leverage": 100,
         "account_balance_init": 10000.0,
         "account_balance": 10250.75,
-        "ticket": 987654321,
+        "ref_id": "987654321",
         "comment": None,
-        "magic": "LONG|SIG-001",
+        "strategy_code": "LONG|SIG-001",
         "strategy": "BTC-M15",
         "symbol": "BTCUSDT",
         "action": "LONG",
