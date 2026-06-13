@@ -117,7 +117,9 @@ def upgrade() -> None:
       op.f("ix_trades_account_id"), "trades", ["account_id"], unique=False
     )
   if "ix_trades_strategy_code" not in existing_trade_indexes:
-    op.create_index(op.f("ix_trades_strategy_code"), "trades", ["strategy_code"], unique=False)
+    op.create_index(
+      op.f("ix_trades_strategy_code"), "trades", ["strategy_code"], unique=False
+    )
   if "ix_trades_symbol" not in existing_trade_indexes:
     op.create_index(op.f("ix_trades_symbol"), "trades", ["symbol"], unique=False)
   if "ix_trades_ref_id" not in existing_trade_indexes:
@@ -141,8 +143,12 @@ def downgrade() -> None:
             ON trades (account_id, ref_id);
     """)
   op.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol        ON trades (symbol);")
-  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy_code ON trades (strategy_code);")
-  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_account_id    ON trades (account_id);")
+  op.execute(
+    "CREATE INDEX IF NOT EXISTS idx_trades_strategy_code ON trades (strategy_code);"
+  )
+  op.execute(
+    "CREATE INDEX IF NOT EXISTS idx_trades_account_id    ON trades (account_id);"
+  )
   op.drop_index(op.f("ix_signals_symbol"), table_name="signals")
   op.execute(
     'CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals ("timestamp");'

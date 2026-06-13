@@ -37,6 +37,7 @@ class TradeResponse(BaseModel):
   ref_id: Optional[str]
   comment: Optional[str]
   strategy_code: str
+  gateway_return_code: Optional[int]
   strategy: str
   symbol: str
   action: SignalActionEnum
@@ -64,6 +65,7 @@ class TradeResponse(BaseModel):
         "ref_id": "987654321",
         "comment": None,
         "strategy_code": "LONG|SIG-001",
+        "gateway_return_code": 0,
         "strategy": "BTC-M15",
         "symbol": "BTCUSDT",
         "action": "LONG",

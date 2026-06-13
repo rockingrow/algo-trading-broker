@@ -103,13 +103,14 @@ class Trade(Base):
   account_balance_init: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
 
-  # Broker-specific fields
-  ref_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-  comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
+  # Strategy
+  strategy: Mapped[str] = mapped_column(String(50), nullable=False)
   strategy_code: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
+  # Trade
+  ref_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+
   # Trade details
-  strategy: Mapped[str] = mapped_column(String(50), nullable=False)
   symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   action: Mapped[SignalActionEnum] = mapped_column(
     Enum(SignalActionEnum), nullable=False
@@ -123,6 +124,8 @@ class Trade(Base):
   risk_percent: Mapped[float] = mapped_column(
     Numeric(10, 4), nullable=False, default=0.0
   )
+  comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
+  gateway_return_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
   # Status
   status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)
