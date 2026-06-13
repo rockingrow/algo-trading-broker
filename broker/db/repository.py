@@ -167,7 +167,7 @@ class SqlAlchemyTradeRepository:
 
   async def upsert_by_position_event(self, event: PositionEvent) -> Trade | None:
     """Apply a PositionEvent received from the worker (via NATS TRADE) to the
-    broker's `trades` table. Performs an upsert keyed by (account_id, ticket):
+    broker's `trades` table. Performs an upsert keyed by (account_id, ref_id):
     updates the row if it exists, otherwise inserts a new one. Idempotent."""
     trade_status = self._policy.to_trade_status(event.status)
     if trade_status is None:
@@ -192,7 +192,7 @@ class SqlAlchemyTradeRepository:
         if self._policy.is_downgrade(trade_status, row.status):
           log.warning(
             "upsert_by_position_event: ignoring status downgrade %s → %s "
-            "for account_id=%s ticket=%s",
+            "for account_id=%s ref_id=%s",
             row.status,
             trade_status,
             event.account_id,
@@ -210,7 +210,7 @@ class SqlAlchemyTradeRepository:
         await session.flush()
         await session.refresh(row)
         log.debug(
-          "trade upserted (update) id=%s account_id=%s ticket=%s status=%s",
+          "trade upserted (update) id=%s account_id=%s ref_id=%s status=%s",
           str(row.id),
           event.account_id,
           event.ref_source_id,
@@ -221,7 +221,7 @@ class SqlAlchemyTradeRepository:
       if event.account_leverage is None:
         log.error(
           "upsert_by_position_event: cannot create Trade for "
-          "account_id=%s ticket=%s without account_leverage",
+          "account_id=%s ref_id=%s without account_leverage",
           event.account_id,
           event.ref_source_id,
         )
@@ -253,7 +253,7 @@ class SqlAlchemyTradeRepository:
       await session.flush()
       await session.refresh(new_row)
       log.debug(
-        "trade upserted (insert) id=%s account_id=%s ticket=%s status=%s",
+        "trade upserted (insert) id=%s account_id=%s ref_id=%s status=%s",
         str(new_row.id),
         event.account_id,
         event.ref_source_id,

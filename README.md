@@ -448,8 +448,8 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `account_leverage` | Integer | Account leverage at time of trade |
 | `account_balance_init` | Float | Account balance before trade |
 | `account_balance` | Float | Account balance after trade |
-| `ticket` | BigInteger | Broker-assigned order ticket number |
-| `magic` | String(255) | EA magic number for order identification |
+| `ref_id` | String(255) | Worker's source position reference id |
+| `strategy_code` | String(255) | Strategy code that originated the signal |
 | `comment` | String(255) | Trade comment |
 | `strategy` | String(50) | Strategy that originated the signal |
 | `symbol` | String(50) | Trading symbol |
