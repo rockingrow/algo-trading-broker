@@ -7,7 +7,7 @@
   "symbol": "XAUUSD",
   "ref_id": null,
   "comment": "LONG XAUUSD — rejected: AutoTrading disabled by client",
-  "strategy_code": "LONG|4b70fd03-946a-4716-b35d-b1229c90f1e2",
+  "strategy_code": "",
   "action": "LONG",
   "price": 2334.50,
   "quantity": 0.10,

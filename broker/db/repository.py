@@ -207,6 +207,8 @@ class SqlAlchemyTradeRepository:
           row.comment = event.comment
         if event.account_balance is not None:
           row.account_balance = event.account_balance
+        if event.gateway_return_code is not None:
+          row.gateway_return_code = event.gateway_return_code
         await session.flush()
         await session.refresh(row)
         log.debug(
@@ -235,8 +237,9 @@ class SqlAlchemyTradeRepository:
         account_balance=event.account_balance,
         ref_id=event.ref_source_id,
         comment=event.comment,
-        strategy_code=event.strategy_code or f"{event.action}|{event.signal_id or event.ref_source_id}",
+        gateway_return_code=event.gateway_return_code,
         strategy=event.strategy,
+        strategy_code=event.strategy_code or "",
         symbol=event.symbol,
         action=event.action.upper(),
         price=price,

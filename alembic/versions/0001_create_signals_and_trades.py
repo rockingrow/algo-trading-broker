@@ -118,6 +118,8 @@ def upgrade() -> None:
             is_running   BOOLEAN           NOT NULL DEFAULT FALSE,
             risk_percent DOUBLE PRECISION  NOT NULL DEFAULT 0.0,
 
+            gateway_return_code INTEGER,
+
             status        tradestatusenum NOT NULL,
             reject_reason VARCHAR(255)
         );
@@ -127,8 +129,12 @@ def upgrade() -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_account_ref_id
             ON trades (account_id, ref_id);
     """)
-  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_account_id    ON trades (account_id);")
-  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy_code ON trades (strategy_code);")
+  op.execute(
+    "CREATE INDEX IF NOT EXISTS idx_trades_account_id    ON trades (account_id);"
+  )
+  op.execute(
+    "CREATE INDEX IF NOT EXISTS idx_trades_strategy_code ON trades (strategy_code);"
+  )
   op.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades (symbol);")
 
   op.execute("DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;")
