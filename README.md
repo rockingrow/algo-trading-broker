@@ -84,7 +84,7 @@ graph TD
         W2A[Signal Handler] --> W2B[(SQLite)]
         W2B -. "NATS TRADE event" .-> NATS
     end
-    subgraph WN["Worker — Crypto (TBD)"]
+    subgraph WN["Worker — Crypto"]
         WNA[Signal Handler] --> WNB[(SQLite)]
         WNB -. "NATS TRADE event" .-> NATS
     end
@@ -448,10 +448,11 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `account_leverage` | Integer | Account leverage at time of trade |
 | `account_balance_init` | Float | Account balance before trade |
 | `account_balance` | Float | Account balance after trade |
-| `ticket` | BigInteger | Broker-assigned order ticket number |
-| `magic` | String(255) | EA magic number for order identification |
+| `ref_id` | String(255) | Worker's source position reference id (original entry; shared by all child executions) |
 | `comment` | String(255) | Trade comment |
+| `gateway_return_code` | Integer | Return code from the exchange gateway (nullable) |
 | `strategy` | String(50) | Strategy that originated the signal |
+| `strategy_code` | String(255) | Strategy code is the mapping between strategy and number (defined by Worker) |
 | `symbol` | String(50) | Trading symbol |
 | `action` | Enum | LONG, SHORT, TP1, TP2, R_SL, SL, FLAT |
 | `price` | Float | Execution price |

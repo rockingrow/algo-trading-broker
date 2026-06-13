@@ -103,9 +103,9 @@ def upgrade() -> None:
             account_balance_init DOUBLE PRECISION,
             account_balance      DOUBLE PRECISION,
 
-            ticket  BIGINT,
-            comment VARCHAR(255),
-            magic   VARCHAR(255) NOT NULL,
+            ref_id VARCHAR(255),
+            comment       VARCHAR(255),
+            strategy_code VARCHAR(255) NOT NULL,
 
             strategy     VARCHAR(50)       NOT NULL DEFAULT 'gold',
             symbol       VARCHAR(50)       NOT NULL,
@@ -118,17 +118,23 @@ def upgrade() -> None:
             is_running   BOOLEAN           NOT NULL DEFAULT FALSE,
             risk_percent DOUBLE PRECISION  NOT NULL DEFAULT 0.0,
 
+            gateway_return_code INTEGER,
+
             status        tradestatusenum NOT NULL,
             reject_reason VARCHAR(255)
         );
     """)
 
   op.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_account_ticket
-            ON trades (account_id, ticket);
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_account_ref_id
+            ON trades (account_id, ref_id);
     """)
-  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades (account_id);")
-  op.execute("CREATE INDEX IF NOT EXISTS idx_trades_magic      ON trades (magic);")
+  op.execute(
+    "CREATE INDEX IF NOT EXISTS idx_trades_account_id    ON trades (account_id);"
+  )
+  op.execute(
+    "CREATE INDEX IF NOT EXISTS idx_trades_strategy_code ON trades (strategy_code);"
+  )
   op.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol     ON trades (symbol);")
 
   op.execute("DROP TRIGGER IF EXISTS trg_update_trades_updated_at ON trades;")
