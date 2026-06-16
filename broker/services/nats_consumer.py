@@ -64,10 +64,10 @@ class TradeEventConsumer:
       return
 
     log.info(
-      "TRADE event=%s account_id=%s source_ticket=%s status=%s",
+      "TRADE event=%s account_id=%s ref_id=%s status=%s",
       event.event,
       event.account_id,
-      event.source_ticket,
+      event.ref_source_id,
       event.status,
     )
     try:

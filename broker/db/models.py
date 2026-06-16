@@ -12,7 +12,6 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import (
-  BigInteger,
   Boolean,
   DateTime,
   Enum,
@@ -95,7 +94,7 @@ class Trade(Base):
 
   __tablename__ = "trades"
   __table_args__ = (
-    UniqueConstraint("account_id", "ticket", name="uq_trades_account_ticket"),
+    UniqueConstraint("account_id", "ref_id", name="uq_trades_account_ref_id"),
   )
 
   # Trading Account info
@@ -104,13 +103,14 @@ class Trade(Base):
   account_balance_init: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
 
-  # Broker-specific fields
-  ticket: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
-  comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
-  magic: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+  # Strategy
+  strategy: Mapped[str] = mapped_column(String(50), nullable=False)
+  strategy_code: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+
+  # Trade
+  ref_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
   # Trade details
-  strategy: Mapped[str] = mapped_column(String(50), nullable=False)
   symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   action: Mapped[SignalActionEnum] = mapped_column(
     Enum(SignalActionEnum), nullable=False
@@ -124,6 +124,8 @@ class Trade(Base):
   risk_percent: Mapped[float] = mapped_column(
     Numeric(10, 4), nullable=False, default=0.0
   )
+  comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
+  gateway_return_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
   # Status
   status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)
@@ -131,7 +133,7 @@ class Trade(Base):
 
   def __repr__(self) -> str:
     return (
-      f"<Trade id={self.id} account_id={self.account_id} ticket={self.ticket} "
+      f"<Trade id={self.id} account_id={self.account_id} ref_id={self.ref_id} "
       f"action={self.action} symbol={self.symbol}>"
     )
 

@@ -147,7 +147,8 @@ class SqlAlchemyTradeRepository:
     now = datetime.now(timezone.utc)
 
     if row is not None:
-      row.account_name = event.account_name
+      if event.account_name is not None:
+        row.account_name = event.account_name
       row.market_type = MarketTypeEnum(event.market_type)
       if event.account_balance is not None:
         row.account_balance = event.account_balance
@@ -166,7 +167,7 @@ class SqlAlchemyTradeRepository:
 
   async def upsert_by_position_event(self, event: PositionEvent) -> Trade | None:
     """Apply a PositionEvent received from the worker (via NATS TRADE) to the
-    broker's `trades` table. Performs an upsert keyed by (account_id, ticket):
+    broker's `trades` table. Performs an upsert keyed by (account_id, ref_id):
     updates the row if it exists, otherwise inserts a new one. Idempotent."""
     trade_status = self._policy.to_trade_status(event.status)
     if trade_status is None:
@@ -182,7 +183,7 @@ class SqlAlchemyTradeRepository:
       result = await session.execute(
         select(Trade).where(
           Trade.account_id == event.account_id,
-          Trade.ticket == event.source_ticket,
+          Trade.ref_id == event.ref_source_id,
         )
       )
       row: Optional[Trade] = result.scalars().first()
@@ -191,11 +192,11 @@ class SqlAlchemyTradeRepository:
         if self._policy.is_downgrade(trade_status, row.status):
           log.warning(
             "upsert_by_position_event: ignoring status downgrade %s → %s "
-            "for account_id=%s ticket=%s",
+            "for account_id=%s ref_id=%s",
             row.status,
             trade_status,
             event.account_id,
-            event.source_ticket,
+            event.ref_source_id,
           )
           return row
         row.status = trade_status
@@ -206,13 +207,15 @@ class SqlAlchemyTradeRepository:
           row.comment = event.comment
         if event.account_balance is not None:
           row.account_balance = event.account_balance
+        if event.gateway_return_code is not None:
+          row.gateway_return_code = event.gateway_return_code
         await session.flush()
         await session.refresh(row)
         log.debug(
-          "trade upserted (update) id=%s account_id=%s ticket=%s status=%s",
+          "trade upserted (update) id=%s account_id=%s ref_id=%s status=%s",
           str(row.id),
           event.account_id,
-          event.source_ticket,
+          event.ref_source_id,
           trade_status,
         )
         return row
@@ -220,9 +223,9 @@ class SqlAlchemyTradeRepository:
       if event.account_leverage is None:
         log.error(
           "upsert_by_position_event: cannot create Trade for "
-          "account_id=%s ticket=%s without account_leverage",
+          "account_id=%s ref_id=%s without account_leverage",
           event.account_id,
-          event.source_ticket,
+          event.ref_source_id,
         )
         return None
 
@@ -232,10 +235,11 @@ class SqlAlchemyTradeRepository:
         account_leverage=event.account_leverage,
         account_balance_init=event.account_balance,
         account_balance=event.account_balance,
-        ticket=event.source_ticket,
+        ref_id=event.ref_source_id,
         comment=event.comment,
-        magic=event.magic or f"{event.action}|{event.signal_id or event.source_ticket}",
+        gateway_return_code=event.gateway_return_code,
         strategy=event.strategy,
+        strategy_code=event.strategy_code or "",
         symbol=event.symbol,
         action=event.action.upper(),
         price=price,
@@ -252,10 +256,10 @@ class SqlAlchemyTradeRepository:
       await session.flush()
       await session.refresh(new_row)
       log.debug(
-        "trade upserted (insert) id=%s account_id=%s ticket=%s status=%s",
+        "trade upserted (insert) id=%s account_id=%s ref_id=%s status=%s",
         str(new_row.id),
         event.account_id,
-        event.source_ticket,
+        event.ref_source_id,
         trade_status,
       )
       return new_row
