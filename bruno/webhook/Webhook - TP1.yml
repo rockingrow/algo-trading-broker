@@ -12,7 +12,7 @@ http:
       {
         "strategy": "{{process.env.strategy}}",
         "token": "{{webhook_token}}",
-        "symbol": "OANDA:{{process.env.symbol}}",
+        "symbol": "{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-22 03:50:00",
         "position": {

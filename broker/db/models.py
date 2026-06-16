@@ -99,9 +99,11 @@ class Trade(Base):
 
   # Trading Account info
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-  account_leverage: Mapped[int] = mapped_column(Integer, nullable=False)
-  account_balance_init: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
-  account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
+  account_leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+  account_balance_init: Mapped[float | None] = mapped_column(
+    Numeric(20, 8), nullable=True
+  )
+  account_balance: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
 
   # Strategy
   strategy: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -122,7 +124,7 @@ class Trade(Base):
   tp2: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
   is_running: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
   risk_percent: Mapped[float] = mapped_column(
-    Numeric(10, 4), nullable=False, default=0.0
+    Numeric(10, 4), nullable=True, default=0.0
   )
   comment: Mapped[str | None] = mapped_column(String(255), nullable=True)
   gateway_return_code: Mapped[int | None] = mapped_column(Integer, nullable=True)

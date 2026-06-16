@@ -16,7 +16,9 @@ from broker.settings import settings  # noqa: E402
 config = context.config
 
 if config.config_file_name is not None:
-  fileConfig(config.config_file_name)
+  # disable_existing_loggers=False so running migrations in-process (init_db on
+  # app startup) doesn't silence the broker's already-configured loggers.
+  fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

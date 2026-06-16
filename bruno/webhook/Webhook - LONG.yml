@@ -12,16 +12,16 @@ http:
       {
         "strategy": "{{process.env.strategy}}",
         "token": "{{webhook_token}}",
-        "symbol": "OANDA:{{process.env.symbol}}",
+        "symbol": "{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-10 22:55:00",
         "position": {
           "action": "LONG",
-          "price": 63000.5,
+          "price": 66000.5,
           "quantity": 6.0000,
-          "sl": 62000,
-          "tp1": 63500.00,
-          "tp2": 64000.00
+          "sl": 65500,
+          "tp1": 66400.00,
+          "tp2": 66500.00
         },
         "indicators": {},
         "inputs": {}
