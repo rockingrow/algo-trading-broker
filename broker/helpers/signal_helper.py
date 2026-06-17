@@ -8,6 +8,7 @@ from broker.schemas.webhook_schema import WebhookPayload
 from broker.schemas.publisher_schema import TradingSignal
 from broker.logger import get_logger
 from broker.schemas.core import SignalActionEnum
+from broker.helpers import emoji_constants as em
 
 log = get_logger(__name__)
 
@@ -46,13 +47,13 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
 
 
 _ACTION_EMOJI: dict[SignalActionEnum, str] = {
-  SignalActionEnum.LONG: "🟢",
-  SignalActionEnum.SHORT: "🔴",
-  SignalActionEnum.TP1: "🎯",
-  SignalActionEnum.TP2: "🚀",
-  SignalActionEnum.R_SL: "🛡️",
-  SignalActionEnum.SL: "❌",
-  SignalActionEnum.FLAT: "🏳️",
+  SignalActionEnum.LONG: em.LONG,
+  SignalActionEnum.SHORT: em.SHORT,
+  SignalActionEnum.TP1: em.TP1,
+  SignalActionEnum.TP2: em.TP2,
+  SignalActionEnum.R_SL: em.R_SL,
+  SignalActionEnum.SL: em.SL,
+  SignalActionEnum.FLAT: em.FLAT,
 }
 
 
@@ -61,4 +62,4 @@ def action_to_emoji(action: SignalActionEnum) -> str:
   Convert a SignalActionEnum to a Telegram emoji. Adding a new action only
   requires extending ``_ACTION_EMOJI`` — no control-flow changes.
   """
-  return _ACTION_EMOJI.get(action, "📡")
+  return _ACTION_EMOJI.get(action, em.DEFAULT_SIGNAL)
