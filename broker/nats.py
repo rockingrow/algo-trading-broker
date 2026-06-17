@@ -15,6 +15,7 @@ from typing import Optional
 import nats as nats_lib
 from nats.aio.client import Client as NATSClient
 
+from broker.helpers import emoji_constants as em
 from broker.interfaces import Notifier
 from broker.logger import get_logger
 from broker.schemas.publisher_schema import PublishTopicEnum
@@ -77,17 +78,17 @@ class NatsClient:
   async def _on_disconnected(self) -> None:
     log.warning("NATS disconnected")
     await self._notify(
-      "🔴 <b>NATS Disconnected</b>\n"
-      f"📤 Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
-      f"📥 Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
+      f"{em.NATS_DISCONNECTED} <b>NATS Disconnected</b>\n"
+      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
+      f"{em.LISTEN} Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
     )
 
   async def _on_reconnected(self) -> None:
     log.info("NATS reconnected to %s", settings.nats_url)
     await self._notify(
-      "🔌 <b>NATS Reconnected</b>\n"
-      f"📤 Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
-      f"📥 Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
+      f"{em.NATS_RECONNECTED} <b>NATS Reconnected</b>\n"
+      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
+      f"{em.LISTEN} Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
     )
 
   async def _on_closed(self) -> None:

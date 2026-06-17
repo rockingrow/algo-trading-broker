@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.0.3] — 2026-06-17
+
+### Changed
+
+- **Centralized emoji constants** — All Telegram notification emoji are now defined as named constants in `broker/helpers/emoji_constants.py` via the `emoji` library, replacing hardcoded Unicode literals scattered across multiple files.
+
+### Added
+
+- `emoji>=2.0.0` production dependency.
+
+---
+
 ## [v1.0.2] — 2026-06-16
 
 ### Breaking Changes
