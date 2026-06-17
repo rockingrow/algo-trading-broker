@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from broker.db.engine import close_db, init_db
 from broker.db.repository import SqlAlchemyTradeRepository
+from broker.helpers import emoji_constants as em
 from broker.logger import get_logger
 from broker.nats import nats_client
 from broker.openapi import fastapi_kwargs
@@ -37,17 +38,18 @@ async def lifespan(app: FastAPI):
 
   # Notification: Startup
   await notifier.send_message(
-    f"🟢 <b>Broker Node Started</b>\n"
-    f"🔌 NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy)\n"
-    f"🔌 NATS Listening: <code>{nats_client.LISTEN_SUBJECT.value}</code>\n"
-    f"🌐 Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
+    f"{em.BROKER_STARTED} <b>Broker Node Started</b>\n"
+    f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy)\n"
+    f"{em.PLUG} NATS Listening: <code>{nats_client.LISTEN_SUBJECT.value}</code>\n"
+    f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
 
   yield
 
   # Notification: Shutdown
   await notifier.send_message(
-    f"🛑 <b>Broker Node Stopped</b>\n🌐 Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
+    f"{em.BROKER_STOPPED} <b>Broker Node Stopped</b>\n"
+    f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
 
   await consumer.stop()

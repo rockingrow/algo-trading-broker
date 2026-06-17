@@ -7,6 +7,7 @@ formatting between the FLAT and the normal-signal branches.
 from __future__ import annotations
 
 from broker.constants import SIGNAL_BLOCKED
+from broker.helpers import emoji_constants as em
 from broker.helpers.signal_helper import action_to_emoji
 from broker.helpers.timeframe_helper import format_timeframe
 from broker.schemas.webhook_schema import WebhookPayload
@@ -66,7 +67,7 @@ def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False)
 def format_blocked_message(payload: WebhookPayload) -> str:
   """Telegram body sent when signal processing is disabled."""
   return (
-    f"🚫 <b>Broker signal blocked</b>\n"
+    f"{em.BLOCKED} <b>Broker signal blocked</b>\n"
     f"Symbol: <b>{payload.symbol}</b>\n"
     f"Reason: Signal processing is temporarily disabled "
     f"(<code>{SIGNAL_BLOCKED}</code> != 1)"

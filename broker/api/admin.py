@@ -7,6 +7,7 @@ from broker.constants import (
   SIGNAL_BLOCKED,
   SILENT_SIGNAL,
 )
+from broker.helpers import emoji_constants as em
 from broker.providers import get_admin_notifier, get_publisher, get_setting_repository
 from broker.interfaces import Notifier, SettingRepository, SignalPublisher
 from broker.schemas.admin_schema import (
@@ -53,7 +54,7 @@ def get_admin_router() -> APIRouter:
     log.info("SIGNAL_BLOCKED toggled: %s -> %s", current, new_value)
 
     await notifier.send_message(
-      f"⚙️ <b>Broker setting changed</b>\n"
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
       f"Setting: <code>{SIGNAL_BLOCKED}</code>\n"
       f"Signal blocked: <b>{state_label}</b>\n"
     )
@@ -90,7 +91,7 @@ def get_admin_router() -> APIRouter:
     log.info("SILENT_SIGNAL toggled: %s -> %s", current, new_value)
 
     await notifier.send_message(
-      f"⚙️ <b>Broker setting changed</b>\n"
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
       f"Setting: <code>{SILENT_SIGNAL}</code>\n"
       f"Silent signal: <b>{state_label}</b>\n"
     )
@@ -127,7 +128,7 @@ def get_admin_router() -> APIRouter:
     log.info("NOTIFICATION_INCLUDE_SIGNAL_RAW toggled: %s -> %s", current, new_value)
 
     await notifier.send_message(
-      f"⚙️ <b>Broker setting changed</b>\n"
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
       f"Setting: <code>{NOTIFICATION_INCLUDE_SIGNAL_RAW}</code>\n"
       f"Include signal raw: <b>{state_label}</b>\n"
     )
@@ -167,7 +168,7 @@ def get_admin_router() -> APIRouter:
     scope = ", ".join(p for p in scope_parts if p) or "ALL"
     log.info("FLAT published scope=%s", scope)
 
-    await notifier.send_message(f"🛡️ <b>[ADMIN]FLAT</b>\nScope: <code>{scope}</code>\n")
+    await notifier.send_message(f"{em.ADMIN_FLAT} <b>[ADMIN]FLAT</b>\nScope: <code>{scope}</code>\n")
 
     return AdminResponse(action="FLAT", scope=scope)
 
