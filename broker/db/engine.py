@@ -2,19 +2,15 @@
 broker/db/engine.py
 ────────────────────
 Async SQLAlchemy engine + session factory.
-Runs Alembic migrations on startup via a thread pool (Alembic uses asyncio.run
-internally, which requires a fresh event loop in a separate thread).
+Alembic migrations are run by docker-entrypoint.sh before the app starts,
+so this module only creates the engine and session factory.
 """
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import AsyncIterator
 
-from alembic import command
-from alembic.config import Config
 from sqlalchemy.ext.asyncio import (
   AsyncEngine,
   AsyncSession,
@@ -27,19 +23,12 @@ from broker.logger import get_logger
 
 log = get_logger(__name__)
 
-_ALEMBIC_INI = Path(__file__).parent.parent.parent / "alembic.ini"
-
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
-def _run_alembic_upgrade() -> None:
-  cfg = Config(str(_ALEMBIC_INI))
-  command.upgrade(cfg, "head")
-
-
 async def init_db() -> None:
-  """Create the async engine, session factory, and run Alembic migrations."""
+  """Create the async engine and session factory."""
   global _engine, _session_factory
 
   log.info(
@@ -63,11 +52,7 @@ async def init_db() -> None:
     expire_on_commit=False,
   )
 
-  # Alembic calls asyncio.run() inside env.py, which requires a thread with no
-  # running event loop — asyncio.to_thread provides exactly that.
-  await asyncio.to_thread(_run_alembic_upgrade)
-
-  log.info("PostgreSQL migrations complete.")
+  log.info("PostgreSQL engine initialized.")
 
 
 async def close_db() -> None:
