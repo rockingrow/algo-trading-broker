@@ -99,7 +99,7 @@ class Trade(Base):
 
   # Trading Account info
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-  account_leverage: Mapped[int] = mapped_column(Integer, nullable=False)
+  account_leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
   account_balance_init: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
 

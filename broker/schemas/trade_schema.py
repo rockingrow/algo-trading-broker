@@ -31,7 +31,7 @@ class TradeResponse(BaseModel):
 
   id: uuid.UUID
   account_id: str
-  account_leverage: int
+  account_leverage: Optional[int]
   account_balance_init: Optional[float]
   account_balance: Optional[float]
   ref_id: Optional[str]

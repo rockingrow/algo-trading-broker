@@ -168,7 +168,9 @@ def get_admin_router() -> APIRouter:
     scope = ", ".join(p for p in scope_parts if p) or "ALL"
     log.info("FLAT published scope=%s", scope)
 
-    await notifier.send_message(f"{em.ADMIN_FLAT} <b>[ADMIN]FLAT</b>\nScope: <code>{scope}</code>\n")
+    await notifier.send_message(
+      f"{em.ADMIN_FLAT} <b>[ADMIN]FLAT</b>\nScope: <code>{scope}</code>\n"
+    )
 
     return AdminResponse(action="FLAT", scope=scope)
 

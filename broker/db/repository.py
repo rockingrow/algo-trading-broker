@@ -220,15 +220,6 @@ class SqlAlchemyTradeRepository:
         )
         return row
 
-      if event.account_leverage is None:
-        log.error(
-          "upsert_by_position_event: cannot create Trade for "
-          "account_id=%s ref_id=%s without account_leverage",
-          event.account_id,
-          event.ref_source_id,
-        )
-        return None
-
       new_row = Trade(
         id=uuid.uuid4(),
         account_id=event.account_id,
