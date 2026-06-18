@@ -99,7 +99,7 @@ def upgrade() -> None:
             "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
             account_id           VARCHAR(50)  NOT NULL,
-            account_leverage     INTEGER      NOT NULL,
+            account_leverage     INTEGER,
             account_balance_init DOUBLE PRECISION,
             account_balance      DOUBLE PRECISION,
 
