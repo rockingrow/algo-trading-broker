@@ -5,7 +5,7 @@ broker/helpers/signal_helper.py — Converts raw WebhookPayload into a validated
 from __future__ import annotations
 
 from broker.schemas.webhook_schema import WebhookPayload
-from broker.schemas.publisher_schema import TradingSignal
+from broker.schemas.publisher_schema import ScalingSchema, TradingSignal
 from broker.logger import get_logger
 from broker.schemas.core import SignalActionEnum
 from broker.helpers import emoji_constants as em
@@ -25,6 +25,14 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   # Normalise symbol (e.g. OANDA:XAUUSD -> XAUUSD)
   symbol = payload.symbol.split(":")[-1].upper().strip()
 
+  # Only carry scaling information when the webhook explicitly flags a scale-in.
+  is_scale_position = bool(position.is_scale_position)
+  scaling = (
+    ScalingSchema(**position.scaling.model_dump())
+    if is_scale_position and position.scaling is not None
+    else None
+  )
+
   # Action is already validated by Pydantic
   signal = TradingSignal(
     signal_id=signal_id,
@@ -40,6 +48,8 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
     risk_percent=payload.inputs.risk_percent
     if payload.inputs is not None and payload.inputs.risk_percent is not None
     else 0.0,
+    is_scale_position=is_scale_position if is_scale_position else None,
+    scaling=scaling,
   )
 
   log.debug("Parsed signal: %s", signal.model_dump_json())

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from broker.helpers.signal_helper import action_to_emoji, parse_signal
 from broker.schemas.core import SignalActionEnum
-from broker.schemas.webhook_schema import PositionSchema, WebhookPayload
+from broker.schemas.webhook_schema import PositionSchema, ScalingSchema, WebhookPayload
 
 
 def _payload(**overrides) -> WebhookPayload:
@@ -37,3 +37,35 @@ def test_parse_signal_defaults_missing_numbers():
   assert signal.quantity == 0.0
   assert signal.is_running is False
   assert signal.risk_percent == 0.0
+
+
+def test_parse_signal_carries_scaling_when_flagged():
+  payload = _payload(
+    position=PositionSchema(
+      action=SignalActionEnum.LONG,
+      price=100.0,
+      quantity=1.0,
+      is_scale_position=True,
+      scaling=ScalingSchema(tp=110.0, sl=95.0, quantity=0.5),
+    )
+  )
+  signal = parse_signal(payload, "sig-3")
+  assert signal.is_scale_position is True
+  assert signal.scaling is not None
+  assert signal.scaling.tp == 110.0
+  assert signal.scaling.sl == 95.0
+  assert signal.scaling.quantity == 0.5
+
+
+def test_parse_signal_omits_scaling_when_not_flagged():
+  payload = _payload(
+    position=PositionSchema(
+      action=SignalActionEnum.LONG,
+      price=100.0,
+      quantity=1.0,
+      scaling=ScalingSchema(tp=110.0, sl=95.0, quantity=0.5),
+    )
+  )
+  signal = parse_signal(payload, "sig-4")
+  assert signal.is_scale_position is None
+  assert signal.scaling is None
