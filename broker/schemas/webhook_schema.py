@@ -12,6 +12,14 @@ from pydantic import BaseModel, ConfigDict
 from broker.schemas.core import SignalActionEnum
 
 
+class ScalingSchema(BaseModel):
+  """Scaling block carrying the target levels and size used when scaling an existing position."""
+
+  tp: Optional[float] = None
+  sl: Optional[float] = None
+  quantity: Optional[float] = None
+
+
 class PositionSchema(BaseModel):
   """Nested position block within a TradingView webhook, carrying action, price, size, and risk levels."""
 
@@ -22,6 +30,9 @@ class PositionSchema(BaseModel):
   tp1: Optional[float] = None
   tp2: Optional[float] = None
   is_running: Optional[bool] = None
+  is_scale_position: Optional[bool] = None
+  scale_strategy: Optional[str] = None
+  scaling: Optional[ScalingSchema] = None
 
 
 class IndicatorsSchema(BaseModel):

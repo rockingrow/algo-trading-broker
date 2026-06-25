@@ -21,7 +21,14 @@ http:
           "quantity": 2.8013,
           "sl": 4750.74,
           "tp1": 4710.77,
-          "tp2": 4700.73
+          "tp2": 4700.73,
+          "is_scale_position": true,
+          "scale_strategy": "LOW_RR_TIER",
+          "scaling": {
+            "tp": 0.5,
+            "sl": 0.5,
+            "quantity": 0.5
+          }
         },
         "indicators": {},
         "inputs": {}
