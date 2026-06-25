@@ -309,7 +309,13 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
     "sl": 1890.0,
     "tp1": 1920.0,
     "tp2": 1950.0,
-    "is_running": true
+    "is_running": true,
+    "is_scale_position": true,
+    "scaling": {
+      "tp": 1925.0,
+      "sl": 1895.0,
+      "quantity": 0.05
+    }
   },
   "indicators": {
     "wt1": 12.5,
@@ -324,6 +330,8 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 ```
 
 **Supported Actions:** `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`, `SL`, `FLAT`.
+
+**Scaling into a position:** Set `position.is_scale_position` to `true` and supply a `position.scaling` object (`tp`, `sl`, `quantity`) to signal a scale-in. These two fields are forwarded onto the NATS `SIGNAL` payload **only** when `is_scale_position` is `true`; otherwise they are omitted.
 
 ---
 
