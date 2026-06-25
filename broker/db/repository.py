@@ -112,6 +112,8 @@ class SqlAlchemySignalRepository:
       risk_percent=payload.inputs.risk_percent
       if payload.inputs is not None and payload.inputs.risk_percent is not None
       else 0.0,
+      is_scale_position=bool(pos.is_scale_position),
+      scale_strategy=pos.scale_strategy,
       indicators=json.loads(payload.indicators.model_dump_json())
       if payload.indicators is not None
       else {},

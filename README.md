@@ -309,7 +309,13 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
     "sl": 1890.0,
     "tp1": 1920.0,
     "tp2": 1950.0,
-    "is_running": true
+    "is_running": true,
+    "is_scale_position": true,
+    "scaling": {
+      "tp": 1925.0,
+      "sl": 1895.0,
+      "quantity": 0.05
+    }
   },
   "indicators": {
     "wt1": 12.5,
@@ -324,6 +330,21 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 ```
 
 **Supported Actions:** `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`, `SL`, `FLAT`.
+
+#### Position fields — `tp1`/`tp2`/`sl` vs `scaling`
+
+A TradingView strategy can contain **multiple sub-strategies** running under the same parent strategy name. Each sub-strategy may apply different risk/reward profiles to the same signal — for example, a `LOW_RR_TIER` sub-strategy is designed to catch entries more frequently but accepts a tighter TP and higher relative risk, which means the effective TP, SL, and quantity differ from the base signal values.
+
+To support this, the `position` block carries two sets of exit levels:
+
+| Field | Purpose |
+| ----- | ------- |
+| `tp1`, `tp2`, `sl` | Base levels from the **primary** strategy logic — always present. |
+| `is_scale_position` | `true` when a sub-strategy wants to **scale into** an existing open position rather than open a new one. |
+| `scale_strategy` | Name of the sub-strategy that triggered the scale-in (e.g. `LOW_RR_TIER`). Lets workers apply sub-strategy-specific position sizing or risk rules. |
+| `scaling.tp`, `scaling.sl`, `scaling.quantity` | **Override** levels and size for the scale-in leg. These replace `tp1`/`sl`/`quantity` for the additional entry — they are forwarded on the NATS `SIGNAL` payload only when `is_scale_position` is `true`. |
+
+**Example flow:** the main strategy fires a `LONG` signal with `tp1=1950, sl=1890`. At the same bar, the embedded `LOW_RR_TIER` sub-strategy decides to add to the position with a tighter target (`tp=1925`) and smaller size (`quantity=0.05`). The webhook sets `is_scale_position=true`, `scale_strategy="LOW_RR_TIER"`, and populates the `scaling` block accordingly. Workers that receive the signal can read `scale_strategy` to decide whether to apply the scale-in and by how much.
 
 ---
 
@@ -461,6 +482,8 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `sl`, `tp1`, `tp2` | Numeric(20,8) | Exit prices (nullable) |
 | `is_running` | Boolean | Strategy active state |
 | `risk_percent` | Numeric(10,4) | Risk percentage for position sizing |
+| `is_scale_position` | Boolean | Whether this signal scales into an existing position |
+| `scale_strategy` | String(50) (Nullable) | Scale-in strategy name (e.g. `add_on_pullback`) |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
 | `raw` | JSONB (Nullable) | Raw webhook payload |

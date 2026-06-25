@@ -1,6 +1,6 @@
 [project]
 name = "algo-trading-broker"
-version = "0.1.0"
+version = "1.0.5"
 description = "Decentralized trading signal broker using FastAPI and NATS"
 authors = []
 readme = "README.md"

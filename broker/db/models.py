@@ -74,6 +74,8 @@ class Signal(Base):
   risk_percent: Mapped[float] = mapped_column(
     Numeric(10, 4), nullable=False, default=0.0
   )
+  is_scale_position: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+  scale_strategy: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
   # Complex objects stored as JSONB
   indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)

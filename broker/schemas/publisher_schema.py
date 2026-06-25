@@ -21,6 +21,14 @@ class AdminActionEnum(str, Enum):
   FLAT = "FLAT"
 
 
+class ScalingSchema(BaseModel):
+  """Scaling block carrying the target levels and size used when scaling an existing position."""
+
+  tp: Optional[float] = None
+  sl: Optional[float] = None
+  quantity: Optional[float] = None
+
+
 class TradingSignal(BaseModel):
   """Normalised signal produced from a TradingView webhook payload."""
 
@@ -39,6 +47,9 @@ class TradingSignal(BaseModel):
   tp2: Optional[float] = None
   is_running: Optional[bool] = None
   risk_percent: Optional[float] = None
+  is_scale_position: Optional[bool] = None
+  scale_strategy: Optional[str] = None
+  scaling: Optional[ScalingSchema] = None
 
 
 class AdminSignal(BaseModel):
