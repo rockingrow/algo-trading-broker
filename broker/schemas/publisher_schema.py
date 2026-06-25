@@ -48,6 +48,7 @@ class TradingSignal(BaseModel):
   is_running: Optional[bool] = None
   risk_percent: Optional[float] = None
   is_scale_position: Optional[bool] = None
+  scale_strategy: Optional[str] = None
   scaling: Optional[ScalingSchema] = None
 
 

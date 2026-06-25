@@ -69,3 +69,33 @@ def test_parse_signal_omits_scaling_when_not_flagged():
   signal = parse_signal(payload, "sig-4")
   assert signal.is_scale_position is None
   assert signal.scaling is None
+
+
+def test_parse_signal_carries_scale_strategy_when_flagged():
+  payload = _payload(
+    position=PositionSchema(
+      action=SignalActionEnum.LONG,
+      price=100.0,
+      quantity=1.0,
+      is_scale_position=True,
+      scale_strategy="add_on_pullback",
+      scaling=ScalingSchema(tp=110.0, sl=95.0, quantity=0.5),
+    )
+  )
+  signal = parse_signal(payload, "sig-5")
+  assert signal.is_scale_position is True
+  assert signal.scale_strategy == "add_on_pullback"
+
+
+def test_parse_signal_omits_scale_strategy_when_not_flagged():
+  payload = _payload(
+    position=PositionSchema(
+      action=SignalActionEnum.LONG,
+      price=100.0,
+      quantity=1.0,
+      scale_strategy="add_on_pullback",
+    )
+  )
+  signal = parse_signal(payload, "sig-6")
+  assert signal.is_scale_position is None
+  assert signal.scale_strategy is None

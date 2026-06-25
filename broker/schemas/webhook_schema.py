@@ -31,6 +31,7 @@ class PositionSchema(BaseModel):
   tp2: Optional[float] = None
   is_running: Optional[bool] = None
   is_scale_position: Optional[bool] = None
+  scale_strategy: Optional[str] = None
   scaling: Optional[ScalingSchema] = None
 
 
