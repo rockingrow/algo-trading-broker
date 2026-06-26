@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-06-26
+
+### Added
+
+- **Project audit (`AUDIT.md`)** — A full code-quality audit documenting correctness and security risks (webhook secret persisted in `signals.raw`, silent `TRADE` event loss on validation/DB errors, worker example payloads drifting from the `PositionEvent` schema, duplicate `AdminSignal.model_config` discarding `use_enum_values`, the mis-seeded `prevent_signal`/`signal_blocked` setting, missing NATS queue group, and read-then-write upsert races) alongside design-pattern enhancements (JetStream durability, atomic `ON CONFLICT` upserts, transactional outbox, unit-of-work sessions, settings caching, readiness probes, and test-coverage gaps). Documentation only — no application behaviour changes.
+
 ## [1.0.5] - 2026-06-25
 
 ### Added
@@ -90,7 +96,8 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
-[Unreleased]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.5...dev
+[Unreleased]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.6...dev
+[1.0.6]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.2...v1.0.3
