@@ -18,7 +18,9 @@ http:
         "position": {
           "action": "SL",
           "price": 4564.50,
-          "quantity": 2.8013
+          "quantity": 2.8013,
+          "tp1_percent": 30.0,
+          "move_sl_to_be": false
         },
         "indicators": {},
         "inputs": {}

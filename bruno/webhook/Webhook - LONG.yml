@@ -22,7 +22,9 @@ http:
           "sl": 62000,
           "tp1": 63500.00,
           "tp2": 64000.00,
-          "is_scale_position": true,
+          "tp1_percent": 50.0,
+          "move_sl_to_be": false,
+          "is_scale_position": false,
           "scale_strategy": "LOW_RR_TIER",
           "scaling": {
             "tp": 0.5,

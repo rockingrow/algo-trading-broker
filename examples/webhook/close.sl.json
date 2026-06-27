@@ -7,7 +7,9 @@
     "action": "SL",
     "price": 2330.00,
     "quantity": 6.0000,
-    "is_running": false
+    "is_running": false,
+    "tp1_percent": 30.0,
+    "move_sl_to_be": false
   },
   "indicators": {
     "wt1": -75.00,

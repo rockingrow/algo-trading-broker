@@ -48,6 +48,32 @@ def _format_raw_section(payload: WebhookPayload) -> str:
   return ("\n" + "\n".join(parts)) if parts else ""
 
 
+def _format_position_flags_section(payload: WebhookPayload) -> str:
+  """Section showing optional position state flags, wrapped in dashes."""
+  pos = payload.position
+  lines: list[str] = []
+
+  def _flag(v: bool) -> str:
+    return f"{em.FLAG_ON}" if v else f"{em.FLAG_OFF}"
+
+  if pos.tp1_percent is not None:
+    lines.append(f"TP1%: {_flag(True)} {pos.tp1_percent}%")
+  if pos.move_sl_to_be is not None:
+    lines.append(f"Move SL to BE: {_flag(pos.move_sl_to_be)}")
+  if pos.is_running is not None:
+    lines.append(f"Is Running: {_flag(pos.is_running)}")
+  if pos.is_scale_position is not None:
+    lines.append(
+      f"Scale Position: {_flag(pos.is_scale_position)} {pos.scale_strategy if pos.scale_strategy is not None else ''}"
+    )
+
+  if not lines:
+    return ""
+
+  divider = "-----------"
+  return f"{divider}\n" + "\n".join(lines) + f"\n{divider}\n"
+
+
 def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False) -> str:
   """Telegram body for a normal entry / target / stop signal."""
   pos = payload.position
@@ -61,7 +87,9 @@ def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False)
     f"TP2: <code>{pos.tp2}</code>\n"
     f"Time: {payload.timestamp.strftime(_TIME_FMT)}\n"
   )
-  return base + (_format_raw_section(payload) if include_raw else "")
+  flags = _format_position_flags_section(payload)
+  raw = _format_raw_section(payload) if include_raw else ""
+  return base + (f"\n{flags}" if flags else "") + raw
 
 
 def format_blocked_message(payload: WebhookPayload) -> str:
