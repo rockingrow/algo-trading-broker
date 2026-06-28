@@ -109,9 +109,16 @@ class SqlAlchemySignalRepository:
       tp1=pos.tp1,
       tp2=pos.tp2,
       is_running=pos.is_running if pos.is_running is not None else False,
-      risk_percent=payload.inputs.risk_percent
-      if payload.inputs is not None and payload.inputs.risk_percent is not None
-      else 0.0,
+      # Mirror parse_signal's precedence: position-level risk_percent wins,
+      # then inputs.risk_percent, else 0.0. Keeping these in sync ensures the
+      # persisted audit row matches the signal that was actually published.
+      risk_percent=pos.risk_percent
+      if pos.risk_percent is not None
+      else (
+        payload.inputs.risk_percent
+        if payload.inputs is not None and payload.inputs.risk_percent is not None
+        else 0.0
+      ),
       is_scale_position=bool(pos.is_scale_position),
       scale_strategy=pos.scale_strategy,
       indicators=json.loads(payload.indicators.model_dump_json())
