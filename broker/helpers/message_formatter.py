@@ -77,12 +77,24 @@ def _format_position_flags_section(payload: WebhookPayload) -> str:
 def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False) -> str:
   """Telegram body for a normal entry / target / stop signal."""
   pos = payload.position
+  risk_percent = (
+    pos.risk_percent
+    if pos.risk_percent is not None
+    else (
+      payload.inputs.risk_percent
+      if payload.inputs is not None and payload.inputs.risk_percent is not None
+      else None
+    )
+  )
+  risk_str = (
+    f" | Risk: <code>{risk_percent}%</code>" if risk_percent is not None else ""
+  )
   base = (
     f"{_header(payload)}"
     f"Strategy: <b>{payload.strategy}</b>\n"
     f"Action: <b>{pos.action.value}</b>\n"
     f"Price: <code>{pos.price}</code>\n"
-    f"Quantity: <code>{pos.quantity}</code>\n"
+    f"Quantity: <code>{pos.quantity}</code>{risk_str}\n"
     f"SL: <code>{pos.sl}</code> | TP1: <code>{pos.tp1}</code> | "
     f"TP2: <code>{pos.tp2}</code>\n"
     f"Time: {payload.timestamp.strftime(_TIME_FMT)}\n"

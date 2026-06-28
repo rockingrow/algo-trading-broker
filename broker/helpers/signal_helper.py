@@ -47,9 +47,13 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
     tp1_percent=position.tp1_percent,
     move_sl_to_be=position.move_sl_to_be,
     is_running=position.is_running if position.is_running is not None else False,
-    risk_percent=payload.inputs.risk_percent
-    if payload.inputs is not None and payload.inputs.risk_percent is not None
-    else 0.0,
+    risk_percent=position.risk_percent
+    if position.risk_percent is not None
+    else (
+      payload.inputs.risk_percent
+      if payload.inputs is not None and payload.inputs.risk_percent is not None
+      else 0.0
+    ),
     is_scale_position=is_scale_position,
     scale_strategy=position.scale_strategy if is_scale_position else None,
     scaling=scaling,
