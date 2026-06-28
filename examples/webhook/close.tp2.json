@@ -7,7 +7,9 @@
     "action": "TP2",
     "price": 2340.00,
     "quantity": 4.2000,
-    "is_running": false
+    "is_running": false,
+    "tp1_percent": 30.0,
+    "move_sl_to_be": true
   },
   "indicators": {
     "wt1": -45.00,

@@ -9,7 +9,9 @@
     "quantity": 6.0000,
     "sl": 2329.50,
     "tp1": 2340.00,
-    "tp2": 2345.00
+    "tp2": 2345.00,
+    "tp1_percent": 30.0,
+    "move_sl_to_be": true
   },
   "indicators": {
     "wt1": -65.50,

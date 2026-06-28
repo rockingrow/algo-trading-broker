@@ -45,6 +45,8 @@ class TradingSignal(BaseModel):
   sl: Optional[float] = None
   tp1: Optional[float] = None
   tp2: Optional[float] = None
+  tp1_percent: Optional[float] = None
+  move_sl_to_be: Optional[bool] = None
   is_running: Optional[bool] = None
   risk_percent: Optional[float] = None
   is_scale_position: Optional[bool] = None

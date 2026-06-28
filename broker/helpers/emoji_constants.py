@@ -33,3 +33,7 @@ LISTEN: str = emoji.emojize(":inbox_tray:")  # 📥
 GEAR: str = emoji.emojize(":gear:")  # ⚙️
 ADMIN_FLAT: str = emoji.emojize(":shield:")  # 🛡️
 BLOCKED: str = emoji.emojize(":prohibited:")  # 🚫
+
+# ── Position flags ────────────────────────────────────────────────────────────
+FLAG_ON: str = emoji.emojize(":green_circle:")  # 🟢
+FLAG_OFF: str = emoji.emojize(":red_circle:")  # 🔴

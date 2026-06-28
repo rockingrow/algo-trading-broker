@@ -7,7 +7,9 @@
     "action": "R_SL",
     "price": 2350.00,
     "quantity": 4.2000,
-    "is_running": false
+    "is_running": false,
+    "tp1_percent": 30.0,
+    "move_sl_to_be": false
   },
   "indicators": {
     "wt1": 30.00,

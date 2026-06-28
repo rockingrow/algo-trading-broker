@@ -19,7 +19,9 @@ http:
           "action": "TP2",
           "price": 4703.50,
           "quantity": 2.2,
-          "is_running": false
+          "is_running": false,
+          "tp1_percent": 30.0,
+          "move_sl_to_be": false
         },
         "indicators": {},
         "inputs": {}

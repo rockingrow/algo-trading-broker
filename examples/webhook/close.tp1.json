@@ -7,7 +7,9 @@
     "action": "TP1",
     "price": 2345.00,
     "quantity": 1.8000,
-    "is_running": true
+    "is_running": true,
+    "tp1_percent": 30.0,
+    "move_sl_to_be": true
   },
   "indicators": {
     "wt1": 20.10,
