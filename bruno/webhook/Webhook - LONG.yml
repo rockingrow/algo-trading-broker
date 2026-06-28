@@ -22,6 +22,7 @@ http:
           "sl": 62000,
           "tp1": 63500.00,
           "tp2": 64000.00,
+          "risk_percent": 3.0,
           "tp1_percent": 50.0,
           "move_sl_to_be": false,
           "is_scale_position": false,
