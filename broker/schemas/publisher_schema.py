@@ -57,17 +57,10 @@ class TradingSignal(BaseModel):
 class AdminSignal(BaseModel):
   """Admin signal published to the ADMIN topic."""
 
-  model_config = ConfigDict(use_enum_values=True)
-
-  action: AdminActionEnum
-  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-  strategy: Optional[str] = None
-  symbol: Optional[str] = None
-  account_id: Optional[str] = None
-
-  model_config = {
-    "from_attributes": True,
-    "json_schema_extra": {
+  model_config = ConfigDict(
+    use_enum_values=True,
+    from_attributes=True,
+    json_schema_extra={
       "example": {
         "action": "FLAT",
         "timestamp": "2026-06-02T08:00:00+00:00",
@@ -76,4 +69,10 @@ class AdminSignal(BaseModel):
         "account_id": "123456",
       }
     },
-  }
+  )
+
+  action: AdminActionEnum
+  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+  strategy: Optional[str] = None
+  symbol: Optional[str] = None
+  account_id: Optional[str] = None
