@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from broker.schemas.core import SignalActionEnum
 
@@ -118,4 +118,4 @@ class WebhookPayload(BaseModel):
   position: PositionSchema
   indicators: Optional[IndicatorsSchema] = None
   inputs: Optional[InputsSchema] = None
-  token: str
+  token: str = Field(..., repr=False, exclude=True)
