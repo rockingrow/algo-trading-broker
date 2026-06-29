@@ -1,3 +1,4 @@
+import uuid
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -14,6 +15,13 @@ class SettingValueResponse(BaseModel):
 
   setting: str
   value: str
+
+
+class RotateTokenResponse(BaseModel):
+  """Result of rotating an account's Telegram link token."""
+
+  account_id: str
+  telegram_link_token: uuid.UUID
 
 
 class AdminResponse(BaseModel):

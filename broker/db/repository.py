@@ -114,6 +114,110 @@ class SqlAlchemyAccountRepository:
       log.exception("Failed to fetch accounts for market=%s: %s", market, exc)
       return []
 
+  async def get_by_telegram_user_id(self, telegram_user_id: int) -> Account | None:
+    """Return the account bound to a Telegram user, or None if unbound."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(Account.telegram_user_id == telegram_user_id)
+        )
+        return result.scalars().first()
+    except Exception as exc:
+      log.exception(
+        "Failed to fetch account for telegram_user_id=%s: %s",
+        telegram_user_id,
+        exc,
+      )
+      return None
+
+  async def link_telegram(
+    self, token: uuid.UUID, telegram_user_id: int
+  ) -> Account | None:
+    """Bind ``telegram_user_id`` to the account identified by ``token``.
+
+    A Telegram user maps to at most one account, so any prior binding for the
+    same ``telegram_user_id`` is released first (latest claim wins). Returns the
+    linked account, or None if the token does not match any account.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(Account.telegram_link_token == token)
+        )
+        account: Optional[Account] = result.scalars().first()
+        if account is None:
+          return None
+
+        # Release the Telegram user from any other account before re-binding,
+        # otherwise the unique constraint on telegram_user_id would conflict.
+        others = await session.execute(
+          select(Account).where(
+            Account.telegram_user_id == telegram_user_id,
+            Account.id != account.id,
+          )
+        )
+        for other in others.scalars().all():
+          other.telegram_user_id = None
+        await session.flush()
+
+        account.telegram_user_id = telegram_user_id
+        await session.flush()
+        await session.refresh(account)
+        log.info(
+          "Linked telegram_user_id=%s to account_id=%s",
+          telegram_user_id,
+          account.account_id,
+        )
+        return account
+    except Exception as exc:
+      log.exception(
+        "Failed to link telegram_user_id=%s with token=%s: %s",
+        telegram_user_id,
+        token,
+        exc,
+      )
+      return None
+
+  async def unlink_telegram(self, telegram_user_id: int) -> bool:
+    """Clear the Telegram binding for a user. Returns True if a row changed."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(Account.telegram_user_id == telegram_user_id)
+        )
+        account: Optional[Account] = result.scalars().first()
+        if account is None:
+          return False
+        account.telegram_user_id = None
+        log.info("Unlinked telegram_user_id=%s", telegram_user_id)
+        return True
+    except Exception as exc:
+      log.exception("Failed to unlink telegram_user_id=%s: %s", telegram_user_id, exc)
+      return False
+
+  async def rotate_link_token(self, account_id: str) -> uuid.UUID | None:
+    """Issue a fresh link token for an account (revokes the old one).
+
+    Returns the new token, or None if the account does not exist.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(Account.account_id == account_id)
+        )
+        account: Optional[Account] = result.scalars().first()
+        if account is None:
+          return None
+        new_token = uuid.uuid4()
+        account.telegram_link_token = new_token
+        log.info("Rotated link token for account_id=%s", account_id)
+        return new_token
+    except Exception as exc:
+      log.exception(
+        "Failed to rotate link token for account_id=%s: %s", account_id, exc
+      )
+      return None
+
 
 class SqlAlchemySettingRepository:
   """Reads and upserts rows in the ``broker_settings`` table."""

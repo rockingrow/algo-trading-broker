@@ -537,3 +537,80 @@ async def test_upsert_gateway_swallows_db_error(monkeypatch):
   await SqlAlchemyAccountRepository().upsert_gateway(
     "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
   )
+
+
+# ── AccountRepository telegram binding ──────────────────────────────
+
+
+import uuid  # noqa: E402
+
+
+async def test_link_telegram_binds_user(monkeypatch):
+  token = uuid.uuid4()
+  account = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_link_token=token
+  )
+  # 1st execute: lookup by token → account; 2nd: other accounts with this tg id → none
+  session = FakeSession(results=[[account], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(token, 555)
+  assert result is account
+  assert account.telegram_user_id == 555
+
+
+async def test_link_telegram_releases_previous_account(monkeypatch):
+  token = uuid.uuid4()
+  target = Account(
+    account_id="acc-2", market_type=MarketTypeEnum.FOREX, telegram_link_token=token
+  )
+  previous = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+  )
+  session = FakeSession(results=[[target], [previous]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(token, 555)
+  assert result is target
+  assert target.telegram_user_id == 555
+  assert previous.telegram_user_id is None  # latest claim wins
+
+
+async def test_link_telegram_invalid_token_returns_none(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(uuid.uuid4(), 555)
+  assert result is None
+
+
+async def test_unlink_telegram(monkeypatch):
+  account = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+  )
+  session = FakeSession(results=[[account]])
+  _patch_session(monkeypatch, session)
+
+  ok = await SqlAlchemyAccountRepository().unlink_telegram(555)
+  assert ok is True
+  assert account.telegram_user_id is None
+
+
+async def test_unlink_telegram_no_account(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyAccountRepository().unlink_telegram(555) is False
+
+
+async def test_rotate_link_token_issues_new_token(monkeypatch):
+  old = uuid.uuid4()
+  account = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_link_token=old
+  )
+  session = FakeSession(results=[[account]])
+  _patch_session(monkeypatch, session)
+
+  new_token = await SqlAlchemyAccountRepository().rotate_link_token("acc-1")
+  assert new_token is not None
+  assert new_token != old
+  assert account.telegram_link_token == new_token
