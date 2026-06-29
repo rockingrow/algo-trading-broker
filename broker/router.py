@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from broker.api.api import get_api_router
 from broker.api.admin import get_admin_router
+from broker.api.telegram import get_telegram_router
 from broker.api.webhook import get_webhook_router
 
 
@@ -11,6 +12,7 @@ def get_core_router() -> APIRouter:
 
   # Include all sub-routers
   router.include_router(get_api_router(), prefix="/v1")
+  router.include_router(get_telegram_router(), prefix="/v1/telegram")
   router.include_router(get_admin_router(), prefix="/admin")
   router.include_router(get_webhook_router(), prefix="/secret")
 

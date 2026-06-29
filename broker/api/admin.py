@@ -8,10 +8,21 @@ from broker.constants import (
   SILENT_SIGNAL,
 )
 from broker.helpers import emoji_constants as em
-from broker.providers import get_admin_notifier, get_publisher, get_setting_repository
-from broker.interfaces import Notifier, SettingRepository, SignalPublisher
+from broker.providers import (
+  get_account_repository,
+  get_admin_notifier,
+  get_publisher,
+  get_setting_repository,
+)
+from broker.interfaces import (
+  AccountRepository,
+  Notifier,
+  SettingRepository,
+  SignalPublisher,
+)
 from broker.schemas.admin_schema import (
   AdminResponse,
+  RotateTokenResponse,
   SettingToggleResponse,
   FlatRequest,
 )
@@ -173,5 +184,31 @@ def get_admin_router() -> APIRouter:
     )
 
     return AdminResponse(action="FLAT", scope=scope)
+
+  @router.post(
+    "/accounts/{account_id}/link-token/rotate",
+    tags=["accounts"],
+    summary="Rotate an account's Telegram link token",
+    description=(
+      "Issue a fresh telegram_link_token for the account (revoking the old "
+      "one). Hand the new token to the end-user so they can re-link the bot."
+    ),
+    responses={
+      **AUTH_RESPONSES,
+      404: {"description": "Account not found."},
+    },
+  )
+  async def rotate_link_token(
+    account_id: str,
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> RotateTokenResponse:
+    new_token = await account_repo.rotate_link_token(account_id)
+    if new_token is None:
+      raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Account not found",
+      )
+    log.info("Link token rotated for account_id=%s", account_id)
+    return RotateTokenResponse(account_id=account_id, telegram_link_token=new_token)
 
   return router
