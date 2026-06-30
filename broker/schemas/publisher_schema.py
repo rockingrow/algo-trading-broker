@@ -13,12 +13,24 @@ class PublishTopicEnum(str, Enum):
   SIGNAL = "SIGNAL"
   ADMIN = "ADMIN"
   TRADE = "TRADE"
+  SYSTEM = "SYSTEM"
 
 
 class AdminActionEnum(str, Enum):
   """Admin actions that can be published to the ADMIN topic."""
 
   FLAT = "FLAT"
+
+
+class SystemActionEnum(str, Enum):
+  """System actions exchanged on the SYSTEM topic between broker and workers."""
+
+  # Outgoing (broker → worker)
+  CRYPTO_LEVERAGE_INIT = "CRYPTO_LEVERAGE_INIT"
+
+  # Incoming (worker → broker): published by a worker right after it connects
+  # to NATS to announce its presence and request initial configuration.
+  WORKER_CONNECTED = "WORKER_CONNECTED"
 
 
 class ScalingSchema(BaseModel):
@@ -76,3 +88,34 @@ class AdminSignal(BaseModel):
   strategy: Optional[str] = None
   symbol: Optional[str] = None
   account_id: Optional[str] = None
+
+
+class SystemSignal(BaseModel):
+  """System signal exchanged on the SYSTEM topic.
+
+  ``account_id`` carries the worker identifier in the ``<market>-<account_id>``
+  format (e.g. ``MT5-12345678``, ``BINANCE-7654321``). For
+  ``CRYPTO_LEVERAGE_INIT`` the broker also fills ``symbols`` (allowed crypto
+  symbols) and ``default_leverage`` (max leverage) from BrokerSetting.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "CRYPTO_LEVERAGE_INIT",
+        "account_id": "BINANCE-7654321",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "symbols": ["BTC", "ETH"],
+        "default_leverage": 10,
+      }
+    },
+  )
+
+  action: SystemActionEnum
+  account_id: str = Field(
+    ..., description="Worker identifier in the format <market>-<account_id>."
+  )
+  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+  symbols: Optional[list[str]] = None
+  default_leverage: Optional[int] = None
