@@ -5,6 +5,7 @@ from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminActionEnum,
   PublishTopicEnum,
+  SystemActionEnum,
   TradingSignal,
 )
 from broker.services.nats_publisher import NatsPublisher
@@ -89,3 +90,21 @@ async def test_publish_admin_signal_to_admin_subject():
   # use_enum_values=True means the action is serialised as its string value.
   assert body["action"] == "FLAT"
   assert body["account_id"] == "acc-1"
+
+
+async def test_publish_system_signal_to_system_subject():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_signal(
+    action=SystemActionEnum.CRYPTO_LEVERAGE_INIT,
+    account_id="CRYPTO-BINANCE-7654321",
+    symbols=["BTC", "ETH"],
+    default_leverage=10,
+  )
+
+  subject, body = conn.nc.published[0]
+  assert subject == PublishTopicEnum.SYSTEM.value
+  assert body["action"] == "CRYPTO_LEVERAGE_INIT"
+  assert body["account_id"] == "CRYPTO-BINANCE-7654321"
+  assert body["symbols"] == ["BTC", "ETH"]
+  assert body["default_leverage"] == 10

@@ -14,7 +14,12 @@ from datetime import datetime
 from broker.logger import get_logger
 from broker.nats import NatsClient, nats_client
 from broker.schemas.core import SignalActionEnum
-from broker.schemas.publisher_schema import AdminSignal, PublishTopicEnum, TradingSignal
+from broker.schemas.publisher_schema import (
+  AdminSignal,
+  PublishTopicEnum,
+  SystemCryptoLeverageInitSignal,
+  TradingSignal,
+)
 
 log = get_logger(__name__)
 
@@ -65,4 +70,17 @@ class NatsPublisher:
       signal.strategy,
       signal.symbol,
       signal.account_id,
+    )
+
+  async def publish_system_signal(self, **kwargs) -> None:
+    """Broadcast a CRYPTO_LEVERAGE_INIT system signal on the SYSTEM subject."""
+    signal = SystemCryptoLeverageInitSignal(**kwargs)
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(PublishTopicEnum.SYSTEM.value, payload)
+    log.info(
+      "Published [SYSTEM] action=%s account_id=%s symbols=%s default_leverage=%s",
+      signal.action,
+      signal.account_id,
+      signal.symbols,
+      signal.default_leverage,
     )

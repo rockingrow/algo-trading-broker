@@ -4,7 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from broker.schemas.core import SignalActionEnum
+from broker.schemas.core import MarketEnum, SignalActionEnum
 
 
 class PublishTopicEnum(str, Enum):
@@ -13,12 +13,24 @@ class PublishTopicEnum(str, Enum):
   SIGNAL = "SIGNAL"
   ADMIN = "ADMIN"
   TRADE = "TRADE"
+  SYSTEM = "SYSTEM"
 
 
 class AdminActionEnum(str, Enum):
   """Admin actions that can be published to the ADMIN topic."""
 
   FLAT = "FLAT"
+
+
+class SystemActionEnum(str, Enum):
+  """System actions exchanged on the SYSTEM topic between broker and workers."""
+
+  # Outgoing (broker → worker)
+  CRYPTO_LEVERAGE_INIT = "CRYPTO_LEVERAGE_INIT"
+
+  # Incoming (worker → broker): published by a worker right after it connects
+  # to NATS to announce its presence and request initial configuration.
+  WORKER_CONNECTED = "WORKER_CONNECTED"
 
 
 class ScalingSchema(BaseModel):
@@ -30,7 +42,14 @@ class ScalingSchema(BaseModel):
 
 
 class TradingSignal(BaseModel):
-  """Normalised signal produced from a TradingView webhook payload."""
+  """Normalised signal produced from a TradingView webhook payload.
+
+  Published on the strategy subject for workers to act on. ``action`` selects
+  the trade operation (entry, partial-close target, stop-loss, flatten) while
+  ``symbol``, ``price`` and ``quantity`` describe the instrument and size. The
+  optional fields carry stop-loss / take-profit levels, risk sizing and the
+  ``scaling`` block used when adding to an existing position.
+  """
 
   model_config = ConfigDict(use_enum_values=True)
 
@@ -76,3 +95,73 @@ class AdminSignal(BaseModel):
   strategy: Optional[str] = None
   symbol: Optional[str] = None
   account_id: Optional[str] = None
+
+
+class SystemSignal(BaseModel):
+  """Base for signals exchanged on the SYSTEM topic between broker and workers.
+
+  Holds the fields common to every SYSTEM message; concrete actions subclass
+  this and add their own payload. ``account_id`` carries the worker identifier
+  in the ``<market>-<gateway>-<account_id>`` format (e.g.
+  ``FOREX-MT5-12345678``, ``CRYPTO-BINANCE-7654321``).
+  """
+
+  model_config = ConfigDict(use_enum_values=True)
+
+  action: SystemActionEnum
+  account_id: str = Field(
+    ...,
+    description="Worker identifier in the format <market>-<gateway>-<account_id>.",
+  )
+  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SystemCryptoLeverageInitSignal(SystemSignal):
+  """Outbound CRYPTO_LEVERAGE_INIT signal the broker pushes to a crypto worker.
+
+  ``symbols`` (allowed crypto symbols) and ``default_leverage`` (max leverage)
+  are loaded from BrokerSetting so the worker can apply that configuration.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "CRYPTO_LEVERAGE_INIT",
+        "account_id": "CRYPTO-BINANCE-7654321",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "symbols": ["BTC", "ETH"],
+        "default_leverage": 10,
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.CRYPTO_LEVERAGE_INIT
+  symbols: Optional[list[str]] = None
+  default_leverage: Optional[int] = None
+
+
+class SystemWorkerConnectedSignal(SystemSignal):
+  """Inbound WORKER_CONNECTED event a worker publishes on connect (worker → broker).
+
+  ``account_id``, ``market`` and ``gateway`` are all required so the broker knows
+  which worker connected and which market/gateway it serves before deciding what
+  initial configuration to push back.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "WORKER_CONNECTED",
+        "account_id": "CRYPTO-BINANCE-7654321",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "market": "CRYPTO",
+        "gateway": "BINANCE",
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED
+  market: MarketEnum = Field(..., description="Market the worker serves.")
+  gateway: str = Field(..., description="Gateway/broker the worker uses.")
