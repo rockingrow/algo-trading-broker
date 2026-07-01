@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.6] - 2026-06-27
+## [1.0.6] - Unreleased
 
 ### Added
 
@@ -19,6 +19,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Display on notification these fields.
 - **`position.risk_percent`** read from position and show to notifcation.
    Previously, field is read from input object.
+- **`SYSTEM` NATS subject** — New subject shared by broker and workers.
+  Publishes `CRYPTO_LEVERAGE_INIT` (broker → worker) and consumes
+  `WORKER_CONNECTED` announcements (worker → broker). Introduces
+  `SystemActionEnum` and `SystemSignal` schemas, plus
+  `NatsPublisher.publish_system_signal` and the matching
+  `SignalPublisher.publish_system_signal` protocol entry.
+- **`SystemEventConsumer`** — Subscribes to `SYSTEM`, reacts to a worker's
+  `WORKER_CONNECTED` announcement (identified by `account_id` in
+  `<market>-<account_id>` format), loads the two crypto BrokerSetting rows
+  below, and publishes back a `CRYPTO_LEVERAGE_INIT` `SystemSignal`. The
+  broker's own outgoing `CRYPTO_LEVERAGE_INIT` messages are filtered out by
+  action so the loop terminates on the worker.
+- **`crypto_allowed_symbol` broker setting** — Seeded to `"BTC,ETH"` via
+  Alembic migration `c1a2b3d4e5f6`. Comma-separated list of crypto symbols
+  advertised to workers.
+- **`crypto_max_leverage` broker setting** — Seeded to `"10"` via Alembic
+  migration `d2b3c4e5f6a7`. Default leverage advertised to workers.
+- Startup / reconnect Telegram notifications now list every subscribed
+  subject (both `TRADE` and `SYSTEM`).
+
+### Changed
+
+- **`WORKER_CONNECTED` now requires `market` and `gateway`** — The inbound
+  `SYSTEM` schema is split into `SystemCryptoLeverageInitSignal` (outbound)
+  and `SystemWorkerConnectedSignal` (inbound), the latter adding required
+  `market` (`MarketEnum`) and `gateway` fields alongside `account_id`.
+  Messages missing any of the three are rejected by validation and logged
+  instead of raising. The `account_id` format changes from
+  `<market>-<account_id>` to `<market>-<gateway>-<account_id>` (e.g.
+  `CRYPTO-BINANCE-7654321`) across schemas, examples, and tests.
+- **`CRYPTO_LEVERAGE_INIT` gated by market** — `SystemEventConsumer` only
+  publishes the leverage-init response when `market == CRYPTO`; other
+  markets' `WORKER_CONNECTED` announcements are logged and otherwise
+  ignored.
+- `SystemEventConsumer` now peeks at the `action` field before validating,
+  so its own echoed `CRYPTO_LEVERAGE_INIT` messages no longer log a
+  validation error.
 
 ## [1.0.5] - 2026-06-25
 
@@ -105,6 +142,8 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
+[1.0.8]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.7...v1.0.8
+[1.0.7]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.3...v1.0.4
