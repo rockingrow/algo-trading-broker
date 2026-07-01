@@ -42,12 +42,18 @@ class FakeMsg:
     self.data = data
 
 
-def _worker_connected_payload(account_id: str = "BINANCE-7654321") -> bytes:
+def _worker_connected_payload(
+  account_id: str = "CRYPTO-BINANCE-7654321",
+  market: str = "CRYPTO",
+  gateway: str = "BINANCE",
+) -> bytes:
   return json.dumps(
     {
       "action": "WORKER_CONNECTED",
       "account_id": account_id,
       "timestamp": "2026-06-30T00:00:00+00:00",
+      "market": market,
+      "gateway": gateway,
     }
   ).encode()
 
@@ -75,7 +81,7 @@ async def test_worker_connected_publishes_crypto_leverage_init():
   assert len(publisher.calls) == 1
   call = publisher.calls[0]
   assert call["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
-  assert call["account_id"] == "BINANCE-7654321"
+  assert call["account_id"] == "CRYPTO-BINANCE-7654321"
   assert call["symbols"] == ["BTC", "ETH"]
   assert call["default_leverage"] == 10
 
@@ -85,7 +91,7 @@ async def test_crypto_leverage_init_is_ignored():
   payload = json.dumps(
     {
       "action": "CRYPTO_LEVERAGE_INIT",
-      "account_id": "BINANCE-7654321",
+      "account_id": "CRYPTO-BINANCE-7654321",
       "timestamp": "2026-06-30T00:00:00+00:00",
       "symbols": ["BTC", "ETH"],
       "default_leverage": 10,
@@ -105,6 +111,66 @@ async def test_invalid_schema_is_swallowed():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(
     FakeMsg(json.dumps({"action": "WORKER_CONNECTED"}).encode())
+  )
+  assert publisher.calls == []
+
+
+async def test_worker_connected_missing_account_id_is_rejected():
+  consumer, _repo, publisher = _make_consumer()
+  await consumer.handle_subject_system(
+    FakeMsg(
+      json.dumps(
+        {
+          "action": "WORKER_CONNECTED",
+          "market": "CRYPTO",
+          "gateway": "BINANCE",
+        }
+      ).encode()
+    )
+  )
+  assert publisher.calls == []
+
+
+async def test_worker_connected_missing_market_is_rejected():
+  consumer, _repo, publisher = _make_consumer()
+  await consumer.handle_subject_system(
+    FakeMsg(
+      json.dumps(
+        {
+          "action": "WORKER_CONNECTED",
+          "account_id": "CRYPTO-BINANCE-7654321",
+          "gateway": "BINANCE",
+        }
+      ).encode()
+    )
+  )
+  assert publisher.calls == []
+
+
+async def test_worker_connected_missing_gateway_is_rejected():
+  consumer, _repo, publisher = _make_consumer()
+  await consumer.handle_subject_system(
+    FakeMsg(
+      json.dumps(
+        {
+          "action": "WORKER_CONNECTED",
+          "account_id": "CRYPTO-BINANCE-7654321",
+          "market": "CRYPTO",
+        }
+      ).encode()
+    )
+  )
+  assert publisher.calls == []
+
+
+async def test_non_crypto_market_does_not_publish():
+  consumer, _repo, publisher = _make_consumer()
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-12345678", market="FOREX", gateway="MT5"
+      )
+    )
   )
   assert publisher.calls == []
 

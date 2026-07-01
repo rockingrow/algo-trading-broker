@@ -2,14 +2,16 @@
 broker/services/nats_system_consumer.py — Inbound side of the SYSTEM subject.
 
 Subscribes to the SYSTEM subject and reacts to ``WORKER_CONNECTED`` messages
-published by workers right after they successfully connect to NATS. The
-worker's identifier is carried in the ``account_id`` field in the
-``<market>-<account_id>`` format (e.g. ``BINANCE-7654321``).
+published by workers right after they successfully connect to NATS. Each event
+must carry ``account_id`` (the worker identifier in
+``<market>-<gateway>-<account_id>`` format, e.g. ``CRYPTO-BINANCE-7654321``),
+``market`` and ``gateway``; messages missing
+any of these are rejected by ``SystemWorkerConnectedSignal`` validation.
 
-For each ``WORKER_CONNECTED`` event the broker loads the
+When a crypto worker connects (``market == CRYPTO``) the broker loads the
 ``crypto_allowed_symbol`` and ``crypto_max_leverage`` BrokerSetting rows and
-publishes back a ``CRYPTO_LEVERAGE_INIT`` SystemSignal on the SYSTEM subject
-so the worker can apply that configuration.
+publishes back a ``CRYPTO_LEVERAGE_INIT`` signal on the SYSTEM subject so the
+worker can apply that configuration. Non-crypto markets are ignored.
 
 The broker also publishes ``CRYPTO_LEVERAGE_INIT`` on the SYSTEM subject, so
 the consumer filters by action to ignore its own outgoing messages.
@@ -26,10 +28,11 @@ from pydantic import ValidationError
 from broker.interfaces import SettingRepository, SignalPublisher
 from broker.logger import get_logger
 from broker.nats import NatsClient, nats_client
+from broker.schemas.core import MarketEnum
 from broker.schemas.publisher_schema import (
   PublishTopicEnum,
   SystemActionEnum,
-  SystemSignal,
+  SystemWorkerConnectedSignal,
 )
 
 log = get_logger(__name__)
@@ -75,20 +78,33 @@ class SystemEventConsumer:
     raw = msg.data.decode()
     try:
       data = json.loads(raw)
-      event = SystemSignal(**data)
     except json.JSONDecodeError as exc:
       log.error("SYSTEM listener: malformed JSON: %s | raw=%s", exc, raw)
       return
-    except ValidationError as exc:
-      log.error("SYSTEM listener: invalid SystemSignal: %s | raw=%s", exc, raw)
-      return
 
-    if event.action != SystemActionEnum.WORKER_CONNECTED.value:
+    if data.get("action") != SystemActionEnum.WORKER_CONNECTED.value:
       # Ignore our own outgoing messages (CRYPTO_LEVERAGE_INIT) and unknown
-      # actions; the broker only reacts to worker connect announcements.
+      # actions; the broker only reacts to worker connect announcements. Peeking
+      # at the action first avoids logging validation errors for those.
       return
 
-    log.info("SYSTEM WORKER_CONNECTED account_id=%s", event.account_id)
+    try:
+      event = SystemWorkerConnectedSignal(**data)
+    except ValidationError as exc:
+      log.error("SYSTEM listener: invalid WORKER_CONNECTED: %s | raw=%s", exc, raw)
+      return
+
+    log.info(
+      "SYSTEM WORKER_CONNECTED account_id=%s market=%s gateway=%s",
+      event.account_id,
+      event.market,
+      event.gateway,
+    )
+
+    # Only crypto workers need leverage configuration pushed back on connect.
+    if event.market != MarketEnum.CRYPTO.value:
+      return
+
     await self._send_crypto_leverage_init(event.account_id)
 
   async def _send_crypto_leverage_init(self, account_id: str) -> None:
@@ -113,8 +129,7 @@ class SystemEventConsumer:
       default_leverage = int(leverage_raw)
     except ValueError:
       log.error(
-        "SYSTEM CRYPTO_LEVERAGE_INIT skipped account_id=%s: "
-        "%s is not an int: %r",
+        "SYSTEM CRYPTO_LEVERAGE_INIT skipped account_id=%s: %s is not an int: %r",
         account_id,
         CRYPTO_MAX_LEVERAGE_KEY,
         leverage_raw,

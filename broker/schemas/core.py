@@ -11,3 +11,16 @@ class SignalActionEnum(str, Enum):
   R_SL = "R_SL"
   SL = "SL"
   FLAT = "FLAT"
+
+
+class MarketEnum(str, Enum):
+  CRYPTO = "CRYPTO"
+  FOREX = "FOREX"
+
+
+class ForexGatewayEnum(str, Enum):
+  MT5 = "MT5"
+
+
+class CryptoGatewayEnum(str, Enum):
+  BINANCE = "BINANCE"

@@ -4,7 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from broker.schemas.core import SignalActionEnum
+from broker.schemas.core import MarketEnum, SignalActionEnum
 
 
 class PublishTopicEnum(str, Enum):
@@ -42,7 +42,14 @@ class ScalingSchema(BaseModel):
 
 
 class TradingSignal(BaseModel):
-  """Normalised signal produced from a TradingView webhook payload."""
+  """Normalised signal produced from a TradingView webhook payload.
+
+  Published on the strategy subject for workers to act on. ``action`` selects
+  the trade operation (entry, partial-close target, stop-loss, flatten) while
+  ``symbol``, ``price`` and ``quantity`` describe the instrument and size. The
+  optional fields carry stop-loss / take-profit levels, risk sizing and the
+  ``scaling`` block used when adding to an existing position.
+  """
 
   model_config = ConfigDict(use_enum_values=True)
 
@@ -91,12 +98,29 @@ class AdminSignal(BaseModel):
 
 
 class SystemSignal(BaseModel):
-  """System signal exchanged on the SYSTEM topic.
+  """Base for signals exchanged on the SYSTEM topic between broker and workers.
 
-  ``account_id`` carries the worker identifier in the ``<market>-<account_id>``
-  format (e.g. ``MT5-12345678``, ``BINANCE-7654321``). For
-  ``CRYPTO_LEVERAGE_INIT`` the broker also fills ``symbols`` (allowed crypto
-  symbols) and ``default_leverage`` (max leverage) from BrokerSetting.
+  Holds the fields common to every SYSTEM message; concrete actions subclass
+  this and add their own payload. ``account_id`` carries the worker identifier
+  in the ``<market>-<gateway>-<account_id>`` format (e.g.
+  ``FOREX-MT5-12345678``, ``CRYPTO-BINANCE-7654321``).
+  """
+
+  model_config = ConfigDict(use_enum_values=True)
+
+  action: SystemActionEnum
+  account_id: str = Field(
+    ...,
+    description="Worker identifier in the format <market>-<gateway>-<account_id>.",
+  )
+  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SystemCryptoLeverageInitSignal(SystemSignal):
+  """Outbound CRYPTO_LEVERAGE_INIT signal the broker pushes to a crypto worker.
+
+  ``symbols`` (allowed crypto symbols) and ``default_leverage`` (max leverage)
+  are loaded from BrokerSetting so the worker can apply that configuration.
   """
 
   model_config = ConfigDict(
@@ -104,7 +128,7 @@ class SystemSignal(BaseModel):
     json_schema_extra={
       "example": {
         "action": "CRYPTO_LEVERAGE_INIT",
-        "account_id": "BINANCE-7654321",
+        "account_id": "CRYPTO-BINANCE-7654321",
         "timestamp": "2026-06-30T00:00:00+00:00",
         "symbols": ["BTC", "ETH"],
         "default_leverage": 10,
@@ -112,10 +136,32 @@ class SystemSignal(BaseModel):
     },
   )
 
-  action: SystemActionEnum
-  account_id: str = Field(
-    ..., description="Worker identifier in the format <market>-<account_id>."
-  )
-  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+  action: SystemActionEnum = SystemActionEnum.CRYPTO_LEVERAGE_INIT
   symbols: Optional[list[str]] = None
   default_leverage: Optional[int] = None
+
+
+class SystemWorkerConnectedSignal(SystemSignal):
+  """Inbound WORKER_CONNECTED event a worker publishes on connect (worker → broker).
+
+  ``account_id``, ``market`` and ``gateway`` are all required so the broker knows
+  which worker connected and which market/gateway it serves before deciding what
+  initial configuration to push back.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "WORKER_CONNECTED",
+        "account_id": "CRYPTO-BINANCE-7654321",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "market": "CRYPTO",
+        "gateway": "BINANCE",
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED
+  market: MarketEnum = Field(..., description="Market the worker serves.")
+  gateway: str = Field(..., description="Gateway/broker the worker uses.")

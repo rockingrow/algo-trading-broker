@@ -17,7 +17,7 @@ from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminSignal,
   PublishTopicEnum,
-  SystemSignal,
+  SystemCryptoLeverageInitSignal,
   TradingSignal,
 )
 
@@ -73,8 +73,8 @@ class NatsPublisher:
     )
 
   async def publish_system_signal(self, **kwargs) -> None:
-    """Broadcast a system signal on the SYSTEM subject."""
-    signal = SystemSignal(**kwargs)
+    """Broadcast a CRYPTO_LEVERAGE_INIT system signal on the SYSTEM subject."""
+    signal = SystemCryptoLeverageInitSignal(**kwargs)
     payload = signal.model_dump_json().encode()
     await self._conn.nc.publish(PublishTopicEnum.SYSTEM.value, payload)
     log.info(
