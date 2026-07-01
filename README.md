@@ -135,9 +135,37 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | --------- | ------- | ------- |
 | Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
 | Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
+| Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` sent back after a worker announces itself |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
+| Subscribe (workers → broker) | `SYSTEM` | `WORKER_CONNECTED` announcements published by a worker right after it connects (payload carries `account_id` in `<market>-<account_id>` format) |
 
 Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
+
+### `SYSTEM` handshake
+
+When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject:
+
+```json
+{
+  "action": "WORKER_CONNECTED",
+  "account_id": "BINANCE-7654321",
+  "timestamp": "2026-06-30T00:00:00+00:00"
+}
+```
+
+The broker reacts by loading the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows and publishing a `CRYPTO_LEVERAGE_INIT` message back on `SYSTEM`:
+
+```json
+{
+  "action": "CRYPTO_LEVERAGE_INIT",
+  "account_id": "BINANCE-7654321",
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "symbols": ["BTC", "ETH"],
+  "default_leverage": 10
+}
+```
+
+The broker filters its own `CRYPTO_LEVERAGE_INIT` messages so the loop terminates on the worker.
 
 ---
 
@@ -543,6 +571,8 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `signal_blocked` | `"0"` | Pause signal forwarding to workers |
 | `silent_signal` | `"0"` | Mute Telegram signal notifications |
 | `notification_include_signal_raw` | `"0"` | Append indicators/inputs to notifications |
+| `crypto_allowed_symbol` | `"BTC,ETH"` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
+| `crypto_max_leverage` | `"10"` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 
 ---
 
