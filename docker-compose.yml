@@ -80,6 +80,36 @@ services:
     networks:
       - trading_net
 
+  # ─────────────────────────────────────────────────────────────────
+  # BOT — Telegram bot (self-service for end users; HTTP client of broker)
+  # ─────────────────────────────────────────────────────────────────
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./bot/app
+          target: /app/app
+        - action: rebuild
+          path: ./bot/pyproject.toml
+    image: algo-trading-bot:latest
+    container_name: algo_trading_bot
+    restart: always
+    depends_on:
+      broker:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      # Reach the broker over the internal docker network (no public port needed).
+      BOT_BROKER_BASE_URL: "http://broker:${WEBHOOK_PORT:-8080}"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+
 volumes:
   postgres_data:
 

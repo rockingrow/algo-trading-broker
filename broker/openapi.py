@@ -46,6 +46,13 @@ OPENAPI_TAGS: List[Dict[str, Any]] = [
     "description": "Runtime broker toggles (e.g. block signals). **Requires `X-API-KEY`.**",
   },
   {
+    "name": "telegram",
+    "description": (
+      "Endpoints consumed by the Telegram bot service: link/unlink users, list "
+      "their trades, and issue FLAT/PREVENT commands. **Requires `X-API-KEY`.**"
+    ),
+  },
+  {
     "name": "system",
     "description": "Health and liveness probes. Public, no auth required.",
   },

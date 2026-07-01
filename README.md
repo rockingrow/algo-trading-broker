@@ -114,6 +114,8 @@ algo-trading-broker/
 │   ├── constants.py     # Broker setting keys
 │   ├── logger.py        # Logging configuration
 │   └── settings.py      # Pydantic settings loaded from .env
+├── bot/                 # Telegram bot service (aiogram v3) — see bot/README.md
+│   └── app/             # handlers, services, middlewares, keyboards, formatters
 ├── alembic/             # Alembic migration environment and version scripts
 ├── bruno/               # Bruno API client collections
 ├── examples/            # Example webhook / NATS / worker JSON payloads
@@ -310,6 +312,13 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/silent-signal` | `X-API-KEY` |
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
+| `POST /admin/accounts/{account_id}/link-token/rotate` | `X-API-KEY` |
+| `POST /v1/telegram/link` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/trades` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/commands/flat` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/commands/prevent` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/unlink` | `X-API-KEY` |
 
 ---
 
@@ -495,6 +504,39 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 
 ---
 
+## 🤖 Telegram Bot
+
+An interactive end-user bot lives in [`bot/`](bot/README.md) (built with **aiogram v3**).
+It is a **thin HTTP client** of the broker — it never touches PostgreSQL or NATS
+directly, calling the `/v1/telegram/*` endpoints with the broker `X-API-KEY`.
+
+**Onboarding / auth flow**
+
+1. Every `accounts` row carries a unique `telegram_link_token` (UUID). An admin
+   reads it from `GET /v1/accounts` (or rotates it via
+   `POST /admin/accounts/{account_id}/link-token/rotate`) and hands it to the user.
+2. The user sends `/start` to the bot and pastes the token. The bot calls
+   `POST /v1/telegram/link`, which binds their `telegram_user_id` to the account
+   (the "session"). One Telegram user maps to at most one account.
+3. Linked users can then query trades (`/trades`) and issue control commands.
+
+**Control commands** publish `ADMIN`-subject directives via the broker:
+
+| Command | Admin action | Notes |
+| ------- | ------------ | ----- |
+| `/flat` | `FLAT` | Close positions for the user's `account_id`. |
+| `/prevent` | `BLOCK_ENTRIES` | Block new entries (worker must honor it). |
+| `/allow` | `ALLOW_ENTRIES` | Re-enable new entries. |
+
+> `BLOCK_ENTRIES` / `ALLOW_ENTRIES` are scoped by `account_id` in the `AdminSignal`
+> payload. Enforcement is the **worker's** responsibility — worker code lives
+> outside this repo, so the bot/broker only publish the directive.
+
+Run it with the stack: `docker compose up -d bot`. See [`bot/README.md`](bot/README.md)
+for configuration and local development.
+
+---
+
 ## 🗄️ PostgreSQL Schema
 
 ### `signals` table
@@ -555,6 +597,8 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `account_balance` | Numeric(20,8) | Most recent account balance (nullable) |
 | `market_type` | Enum | `FOREX` or `CRYPTO` |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
+| `telegram_user_id` | BigInteger (Nullable) | Linked Telegram user (unique) |
+| `telegram_link_token` | UUID (Nullable) | Token handed to the user to link the bot (unique) |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 

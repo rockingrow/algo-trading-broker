@@ -12,6 +12,7 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import (
+  BigInteger,
   Boolean,
   DateTime,
   Enum,
@@ -160,6 +161,19 @@ class Account(Base):
 
   last_activity_at: Mapped[datetime | None] = mapped_column(
     DateTime(timezone=True), nullable=True
+  )
+
+  # Telegram bot binding
+  # ``telegram_link_token`` is the UUID handed to the end-user (out of band) so
+  # they can claim the account from the Telegram bot. It is separate from the
+  # primary key so it can be rotated/revoked without touching ``id``.
+  # ``telegram_user_id`` is the Telegram user that claimed this account; unique
+  # so a single Telegram user maps to at most one account.
+  telegram_user_id: Mapped[int | None] = mapped_column(
+    BigInteger, nullable=True, unique=True, index=True
+  )
+  telegram_link_token: Mapped[uuid.UUID | None] = mapped_column(
+    UUID(as_uuid=True), nullable=True, unique=True, index=True, default=uuid.uuid4
   )
 
   def __repr__(self) -> str:

@@ -30,6 +30,10 @@ class AccountResponse(BaseModel):
   account_balance: Optional[float]
   market_type: MarketTypeEnum
   last_activity_at: Optional[datetime]
+  # Telegram binding. ``telegram_link_token`` is exposed here only because this
+  # endpoint is X-API-KEY protected (admin) — admins hand it to end-users.
+  telegram_user_id: Optional[int] = None
+  telegram_link_token: Optional[uuid.UUID] = None
   createdAt: datetime
   updatedAt: datetime
 
@@ -43,6 +47,8 @@ class AccountResponse(BaseModel):
         "account_balance": 10250.75,
         "market_type": "FOREX",
         "last_activity_at": "2026-06-02T09:30:00Z",
+        "telegram_user_id": None,
+        "telegram_link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
         "createdAt": "2026-01-15T08:00:00Z",
         "updatedAt": "2026-06-02T09:30:00Z",
       }

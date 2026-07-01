@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Protocol, runtime_checkable
 
 from broker.db.models import Account, Trade
@@ -28,6 +29,16 @@ class AccountRepository(Protocol):
   """Reads trading accounts known to the broker."""
 
   async def get_all(self) -> list[Account]: ...
+
+  async def get_by_telegram_user_id(self, telegram_user_id: int) -> Account | None: ...
+
+  async def link_telegram(
+    self, token: uuid.UUID, telegram_user_id: int
+  ) -> Account | None: ...
+
+  async def unlink_telegram(self, telegram_user_id: int) -> bool: ...
+
+  async def rotate_link_token(self, account_id: str) -> uuid.UUID | None: ...
 
 
 @runtime_checkable
