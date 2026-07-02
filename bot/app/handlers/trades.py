@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.config import settings
 from app.formatters import messages
+from app.helpers import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClient
 
@@ -43,7 +44,8 @@ async def cb_trades_page(call: CallbackQuery, broker: BrokerClient) -> None:
     await call.answer("Lỗi tải dữ liệu", show_alert=True)
     return
 
-  await call.message.edit_text(
+  await safe_edit_text(
+    call.message,
     messages.format_trades(payload),
     reply_markup=inline.trades_pagination(payload.get("page", {})),
   )

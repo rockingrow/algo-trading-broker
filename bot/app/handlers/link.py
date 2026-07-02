@@ -45,3 +45,13 @@ async def receive_token(
     + "\n\n"
     + messages.COMMANDS_HINT
   )
+
+
+# Non-text messages (ảnh, sticker…) while onboarding: nhắc gửi UUID dạng text.
+# Commands (text starting with "/") are excluded here so they fall through to
+# their own handlers.
+@router.message(LinkAccount.waiting_for_token, ~F.text)
+async def prompt_text_token(message: Message) -> None:
+  await message.answer(
+    "⚠️ Vui lòng gửi mã <b>UUID</b> dưới dạng văn bản (không phải ảnh/sticker)."
+  )

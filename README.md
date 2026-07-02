@@ -281,6 +281,7 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/block-signal` | `X-API-KEY` |
 | `POST /admin/settings/silent-signal` | `X-API-KEY` |
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
+| `GET /admin/settings` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
 | `POST /admin/accounts/{account_id}/link-token/rotate` | `X-API-KEY` |
 | `POST /v1/telegram/link` | `X-API-KEY` |
@@ -476,9 +477,15 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 
 ## 🤖 Telegram Bot
 
-An interactive end-user bot lives in [`bot/`](bot/README.md) (built with **aiogram v3**).
-It is a **thin HTTP client** of the broker — it never touches PostgreSQL or NATS
-directly, calling the `/v1/telegram/*` endpoints with the broker `X-API-KEY`.
+An interactive bot lives in [`bot/`](bot/README.md) (built with **aiogram v3**),
+serving **two roles** from one process — endusers and admins. It is a **thin HTTP
+client** of the broker — it never touches PostgreSQL or NATS directly, calling
+broker endpoints with the broker `X-API-KEY`.
+
+Command menus are role-aware (Telegram command **scopes**) and re-initialised on
+every startup: endusers get the default menu; each id in `TELEGRAM_ADMIN_IDS`
+gets an extended admin menu (`/accounts`, `/atrades`, `/aflat`, `/rotate`,
+`/settings`).
 
 **Onboarding / auth flow**
 

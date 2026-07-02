@@ -122,3 +122,83 @@ async def test_server_error_returns_none():
   client = _client(handler)
   assert await client.get_account(7) is None
   await client.aclose()
+
+
+# ── admin methods ───────────────────────────────────────────────────
+
+
+async def test_admin_list_accounts():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    return httpx.Response(200, json=[{"account_id": "acc-1"}])
+
+  client = _client(handler)
+  res = await client.admin_list_accounts()
+  assert res[0]["account_id"] == "acc-1"
+  assert captured["path"] == "/v1/accounts"
+  await client.aclose()
+
+
+async def test_admin_list_trades_path_and_params():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["params"] = dict(request.url.params)
+    return httpx.Response(200, json={"data": [], "page": {}})
+
+  client = _client(handler)
+  await client.admin_list_trades("acc-1", limit=7, offset=14)
+  assert captured["path"] == "/v1/acc-1/trades"
+  assert captured["params"] == {"limit": "7", "offset": "14"}
+  await client.aclose()
+
+
+async def test_admin_flat_default_body():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["body"] = request.content.decode()
+    return httpx.Response(200, json={"action": "FLAT", "scope": "ALL"})
+
+  client = _client(handler)
+  res = await client.admin_flat()
+  assert res["scope"] == "ALL"
+  assert captured["path"] == "/admin/flat"
+  assert '"account_id":null' in captured["body"].replace(" ", "")
+  await client.aclose()
+
+
+async def test_admin_rotate_settings_toggle_paths():
+  seen = []
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    seen.append(request.url.path)
+    return httpx.Response(200, json={"account_id": "acc-1", "telegram_link_token": "t"})
+
+  client = _client(handler)
+  await client.admin_rotate_token("acc-1")
+  await client.admin_get_settings()
+  await client.admin_toggle_setting("block-signal")
+  assert seen == [
+    "/admin/accounts/acc-1/link-token/rotate",
+    "/admin/settings",
+    "/admin/settings/block-signal",
+  ]
+  await client.aclose()
+
+
+async def test_admin_prefix_applied():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    return httpx.Response(200, json=[])
+
+  client = _client(handler, api_prefix="sec")
+  await client.admin_list_accounts()
+  assert captured["path"] == "/sec/v1/accounts"
+  await client.aclose()

@@ -2,10 +2,14 @@
 app/services/broker_client.py — Thin async client over the Broker HTTP API.
 
 The bot never touches the database or NATS directly; everything goes through
-the broker's ``/v1/telegram/*`` endpoints, authenticated with ``X-API-KEY``.
-A single shared ``httpx.AsyncClient`` is created at startup and closed on
-shutdown. Methods return parsed JSON (dict) on success, or ``None`` when the
-resource is missing / the call fails — handlers decide what to tell the user.
+broker HTTP endpoints, authenticated with ``X-API-KEY``. A single shared
+``httpx.AsyncClient`` is created at startup and closed on shutdown. Methods
+return parsed JSON (dict/list) on success, or ``None`` when the resource is
+missing / the call fails — handlers decide what to tell the user.
+
+Enduser methods hit ``/v1/telegram/*``; admin methods reuse the broker's
+existing management endpoints (``/v1/accounts``, ``/v1/{id}/trades``,
+``/admin/*``).
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ log = get_logger(__name__)
 
 
 class BrokerClient:
-  """Async wrapper around the broker's Telegram API surface."""
+  """Async wrapper around the broker API surface the bot needs."""
 
   def __init__(
     self,
@@ -46,63 +50,62 @@ class BrokerClient:
       self._closed = True
       await self._client.aclose()
 
-  def _path(self, suffix: str) -> str:
-    return f"{self._prefix}/v1/telegram{suffix}"
+  def _url(self, path: str) -> str:
+    """Prepend the optional broker API prefix to an absolute broker path."""
+    return f"{self._prefix}{path}"
 
   async def _request(
-    self, method: str, suffix: str, **kwargs: Any
+    self, method: str, path: str, **kwargs: Any
   ) -> Optional[httpx.Response]:
     try:
-      resp = await self._client.request(method, self._path(suffix), **kwargs)
+      resp = await self._client.request(method, self._url(path), **kwargs)
     except httpx.HTTPError as exc:
-      log.error("Broker request %s %s failed: %s", method, suffix, exc)
+      log.error("Broker request %s %s failed: %s", method, path, exc)
       return None
     if resp.status_code == 404:
       return resp  # let caller distinguish "not found" from transport errors
     if resp.status_code >= 400:
       log.error(
-        "Broker %s %s returned %s: %s",
-        method,
-        suffix,
-        resp.status_code,
-        resp.text,
+        "Broker %s %s returned %s: %s", method, path, resp.status_code, resp.text
       )
       return None
     return resp
 
-  async def link(self, token: str, telegram_user_id: int) -> Optional[dict[str, Any]]:
-    """Bind a Telegram user to an account via its link token.
-
-    Returns the linked account summary, or None if the token is invalid.
-    """
-    resp = await self._request(
-      "POST",
-      "/link",
-      json={"token": token, "telegram_user_id": telegram_user_id},
-    )
+  @staticmethod
+  def _json_or_none(resp: Optional[httpx.Response]) -> Optional[Any]:
     if resp is None or resp.status_code == 404:
       return None
     return resp.json()
+
+  # ── Enduser (/v1/telegram/*) ──────────────────────────────────────
+
+  async def link(self, token: str, telegram_user_id: int) -> Optional[dict[str, Any]]:
+    """Bind a Telegram user to an account via its link token (None if invalid)."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        "/v1/telegram/link",
+        json={"token": token, "telegram_user_id": telegram_user_id},
+      )
+    )
 
   async def get_account(self, telegram_user_id: int) -> Optional[dict[str, Any]]:
     """Return the account bound to a Telegram user, or None if unbound."""
-    resp = await self._request("GET", f"/{telegram_user_id}")
-    if resp is None or resp.status_code == 404:
-      return None
-    return resp.json()
+    return self._json_or_none(
+      await self._request("GET", f"/v1/telegram/{telegram_user_id}")
+    )
 
   async def list_trades(
     self, telegram_user_id: int, limit: int = 5, offset: int = 0
   ) -> Optional[dict[str, Any]]:
     """Return a page of trades for the user's account."""
-    resp = await self._request(
-      "GET",
-      f"/{telegram_user_id}/trades",
-      params={"limit": limit, "offset": offset},
+    return self._json_or_none(
+      await self._request(
+        "GET",
+        f"/v1/telegram/{telegram_user_id}/trades",
+        params={"limit": limit, "offset": offset},
+      )
     )
-    if resp is None or resp.status_code == 404:
-      return None
-    return resp.json()
 
   async def flat(
     self,
@@ -111,29 +114,74 @@ class BrokerClient:
     strategy: Optional[str] = None,
   ) -> Optional[dict[str, Any]]:
     """Close positions for the user's account."""
-    resp = await self._request(
-      "POST",
-      f"/{telegram_user_id}/commands/flat",
-      json={"symbol": symbol, "strategy": strategy},
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        f"/v1/telegram/{telegram_user_id}/commands/flat",
+        json={"symbol": symbol, "strategy": strategy},
+      )
     )
-    if resp is None or resp.status_code == 404:
-      return None
-    return resp.json()
 
   async def prevent(
     self, telegram_user_id: int, enabled: bool = True
   ) -> Optional[dict[str, Any]]:
     """Block (enabled=True) or allow (enabled=False) new entries."""
-    resp = await self._request(
-      "POST",
-      f"/{telegram_user_id}/commands/prevent",
-      json={"enabled": enabled},
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        f"/v1/telegram/{telegram_user_id}/commands/prevent",
+        json={"enabled": enabled},
+      )
     )
-    if resp is None or resp.status_code == 404:
-      return None
-    return resp.json()
 
   async def unlink(self, telegram_user_id: int) -> bool:
     """Clear the user's account binding. Returns True on success."""
-    resp = await self._request("POST", f"/{telegram_user_id}/unlink")
+    resp = await self._request("POST", f"/v1/telegram/{telegram_user_id}/unlink")
     return resp is not None and resp.status_code < 400
+
+  # ── Admin (reuses broker management endpoints) ────────────────────
+
+  async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
+    """All trading accounts (includes telegram_link_token + link status)."""
+    return self._json_or_none(await self._request("GET", "/v1/accounts"))
+
+  async def admin_list_trades(
+    self, account_id: str, limit: int = 5, offset: int = 0
+  ) -> Optional[dict[str, Any]]:
+    """Trades for any account (admin — not scoped to the caller)."""
+    return self._json_or_none(
+      await self._request(
+        "GET",
+        f"/v1/{account_id}/trades",
+        params={"limit": limit, "offset": offset},
+      )
+    )
+
+  async def admin_flat(
+    self,
+    strategy: Optional[str] = None,
+    symbol: Optional[str] = None,
+    account_id: Optional[str] = None,
+  ) -> Optional[dict[str, Any]]:
+    """Publish a FLAT directive (all fields None = flat everything)."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        "/admin/flat",
+        json={"strategy": strategy, "symbol": symbol, "account_id": account_id},
+      )
+    )
+
+  async def admin_rotate_token(self, account_id: str) -> Optional[dict[str, Any]]:
+    """Rotate an account's Telegram link token; returns the new token."""
+    return self._json_or_none(
+      await self._request("POST", f"/admin/accounts/{account_id}/link-token/rotate")
+    )
+
+  async def admin_get_settings(self) -> Optional[list[dict[str, Any]]]:
+    """Current state of the broker toggle settings."""
+    return self._json_or_none(await self._request("GET", "/admin/settings"))
+
+  async def admin_toggle_setting(self, slug: str) -> Optional[dict[str, Any]]:
+    """Toggle a broker setting (slug: block-signal, silent-signal, include-signal-raw)."""
+    return self._json_or_none(await self._request("POST", f"/admin/settings/{slug}"))

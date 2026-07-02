@@ -317,6 +317,25 @@ def test_toggle_include_signal_raw(ctx):
   assert resp.json()["value"] == "1"
 
 
+# ── Admin settings (read) ──────────────────────────────────────────
+
+
+def test_get_settings_defaults_disabled(ctx):
+  resp = ctx["client"].get("/admin/settings", headers={"X-API-KEY": API_KEY})
+  assert resp.status_code == 200
+  body = resp.json()
+  assert len(body) == 3
+  assert all(item["value"] == "0" and item["state"] == "DISABLED" for item in body)
+
+
+def test_get_settings_reflects_enabled(ctx):
+  ctx["setting_repo"].values[SIGNAL_BLOCKED] = "1"
+  resp = ctx["client"].get("/admin/settings", headers={"X-API-KEY": API_KEY})
+  blocked = next(i for i in resp.json() if i["setting"] == SIGNAL_BLOCKED)
+  assert blocked["value"] == "1"
+  assert blocked["state"] == "ENABLED"
+
+
 # ── Admin flat ──────────────────────────────────────────────────────
 
 

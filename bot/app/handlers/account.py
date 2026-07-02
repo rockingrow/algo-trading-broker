@@ -11,6 +11,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app.formatters import messages
+from app.helpers import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClient
 
@@ -33,15 +34,16 @@ async def cmd_unlink(message: Message, account: dict[str, Any]) -> None:
 @router.callback_query(F.data == "unlink:confirm")
 async def cb_unlink(call: CallbackQuery, broker: BrokerClient) -> None:
   ok = await broker.unlink(call.from_user.id)
-  await call.message.edit_text(
+  await safe_edit_text(
+    call.message,
     "✅ Đã hủy liên kết. Gõ /start để liên kết lại."
     if ok
-    else "❌ Hủy liên kết thất bại. Thử lại sau."
+    else "❌ Hủy liên kết thất bại. Thử lại sau.",
   )
   await call.answer()
 
 
 @router.callback_query(F.data == "unlink:cancel")
 async def cb_unlink_cancel(call: CallbackQuery) -> None:
-  await call.message.edit_text("Đã hủy.")
+  await safe_edit_text(call.message, "Đã hủy.")
   await call.answer()
