@@ -91,6 +91,43 @@ async def test_duplicate_messages_are_deduplicated(sent):
   assert len(sent) == 1
 
 
+async def test_worker_uses_dedicated_log_chat_id(monkeypatch):
+  """When TELEGRAM_LOG_CHAT_ID is set, the worker must target that chat."""
+  from broker.services import telegram_log_handler as mod
+
+  monkeypatch.setattr(mod.settings, "TELEGRAM_LOG_CHAT_ID", "999", raising=False)
+  monkeypatch.setattr(mod.settings, "TELEGRAM_CHAT_ID", "111", raising=False)
+
+  captured: list[str | None] = []
+
+  original_init = notification_service.TelegramNotification.__init__
+
+  def spy_init(self, chat_id=None, setting_repository=None):
+    captured.append(chat_id)
+    original_init(self, chat_id=chat_id, setting_repository=setting_repository)
+
+  monkeypatch.setattr(
+    notification_service.TelegramNotification, "__init__", spy_init
+  )
+
+  async def fake_send(self, message_text: str) -> None:
+    pass
+
+  monkeypatch.setattr(
+    notification_service.TelegramNotification, "send_message", fake_send
+  )
+
+  handler = TelegramLogHandler()
+  handler.start(asyncio.get_running_loop())
+  logger = _make_logger("test.telegram.dedicated", handler)
+
+  logger.error("route me to the private chat")
+  await _settle(handler)
+  await handler.stop()
+
+  assert "999" in captured  # dedicated chat, not the management fallback
+
+
 async def test_emit_before_start_is_dropped_silently(sent):
   handler = TelegramLogHandler()  # never started — no bound loop
   logger = _make_logger("test.telegram.nostart", handler)

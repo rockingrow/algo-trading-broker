@@ -129,7 +129,8 @@ class TelegramLogHandler(logging.Handler):
     from broker.services.notification_service import TelegramNotification
 
     assert self._queue is not None
-    notifier = TelegramNotification(chat_id=settings.TELEGRAM_CHAT_ID)
+    chat_id = settings.TELEGRAM_LOG_CHAT_ID or settings.TELEGRAM_CHAT_ID
+    notifier = TelegramNotification(chat_id=chat_id)
     while True:
       message = await self._queue.get()
       try:

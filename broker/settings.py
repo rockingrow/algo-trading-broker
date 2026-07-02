@@ -71,6 +71,9 @@ class Settings(BaseSettings):
   # level or above are forwarded to the management chat (TELEGRAM_CHAT_ID).
   TELEGRAM_LOG_ERRORS_ENABLED: bool = False
   TELEGRAM_LOG_DEDUP_WINDOW: int = 60  # seconds — suppress identical messages
+  # Private chat that receives forwarded ERROR logs. Falls back to
+  # TELEGRAM_CHAT_ID when left empty for backwards compatibility.
+  TELEGRAM_LOG_CHAT_ID: str = ""
 
   @property
   def postgres_dsn(self) -> str:
