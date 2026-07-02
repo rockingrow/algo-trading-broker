@@ -14,6 +14,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app.formatters import messages
+from app.helpers import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClient
 
@@ -60,13 +61,13 @@ async def cb_confirm(call: CallbackQuery, broker: BrokerClient) -> None:
     result = await broker.prevent(tg_id, enabled=False)
 
   if result is None:
-    await call.message.edit_text("❌ Lệnh thất bại. Thử lại sau.")
+    await safe_edit_text(call.message, "❌ Lệnh thất bại. Thử lại sau.")
   else:
-    await call.message.edit_text(messages.format_command_result(result))
+    await safe_edit_text(call.message, messages.format_command_result(result))
   await call.answer()
 
 
 @router.callback_query(F.data.in_({"flat:cancel", "prevent:cancel", "allow:cancel"}))
 async def cb_cancel(call: CallbackQuery) -> None:
-  await call.message.edit_text("Đã hủy.")
+  await safe_edit_text(call.message, "Đã hủy.")
   await call.answer()

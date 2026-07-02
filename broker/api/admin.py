@@ -132,6 +132,25 @@ async def _push_crypto_leverage_init(
 def get_admin_router() -> APIRouter:
   router = APIRouter(dependencies=[Depends(ensure_api_key)])
 
+  @router.get(
+    "/settings",
+    tags=["settings"],
+    summary="Read broker toggle settings",
+    response_model=list[SettingToggleResponse],
+    responses=AUTH_RESPONSES,
+  )
+  async def get_settings(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> list[SettingToggleResponse]:
+    """Return the current state of the runtime broker toggles (unset = '0')."""
+    keys = (SIGNAL_BLOCKED, SILENT_SIGNAL, NOTIFICATION_INCLUDE_SIGNAL_RAW)
+    results: list[SettingToggleResponse] = []
+    for key in keys:
+      value = await setting_repo.get(key) or "0"
+      state_label = "ENABLED" if value == "1" else "DISABLED"
+      results.append(SettingToggleResponse(setting=key, value=value, state=state_label))
+    return results
+
   @router.post(
     "/settings/block-signal",
     tags=["settings"],

@@ -15,8 +15,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
 
+from app.commands import setup_bot_commands
 from app.config import settings
 from app.handlers import get_routers
 from app.logger import get_logger
@@ -24,17 +24,6 @@ from app.middlewares.deps import DepsMiddleware
 from app.services.broker_client import BrokerClient
 
 log = get_logger("bot")
-
-_COMMANDS = [
-  BotCommand(command="start", description="Liên kết tài khoản"),
-  BotCommand(command="trades", description="Giao dịch gần đây"),
-  BotCommand(command="flat", description="Đóng toàn bộ vị thế"),
-  BotCommand(command="prevent", description="Chặn vào lệnh mới"),
-  BotCommand(command="allow", description="Cho phép vào lệnh mới"),
-  BotCommand(command="status", description="Thông tin tài khoản"),
-  BotCommand(command="unlink", description="Hủy liên kết"),
-  BotCommand(command="help", description="Trợ giúp"),
-]
 
 
 async def main() -> None:
@@ -55,8 +44,13 @@ async def main() -> None:
     dp.include_router(router)
 
   async def on_startup() -> None:
-    log.info("Bot starting — broker base_url=%s", settings.BOT_BROKER_BASE_URL)
-    await bot.set_my_commands(_COMMANDS)
+    admin_ids = settings.admin_ids
+    log.info(
+      "Bot starting — broker base_url=%s, admins=%d",
+      settings.BOT_BROKER_BASE_URL,
+      len(admin_ids),
+    )
+    await setup_bot_commands(bot, admin_ids)
 
   async def on_shutdown() -> None:
     log.info("Bot shutting down — closing resources")

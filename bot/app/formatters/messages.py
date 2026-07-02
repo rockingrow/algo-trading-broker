@@ -99,3 +99,56 @@ def format_command_result(result: dict[str, Any]) -> str:
     f"Phạm vi: <code>{scope}</code>\n\n"
     "<i>Lệnh đã được phát tới worker qua broker.</i>"
   )
+
+
+# ── Admin ───────────────────────────────────────────────────────────
+
+# setting key (from broker) → (nhãn hiển thị, slug endpoint toggle).
+# Single source shared with keyboards.settings_keyboard.
+SETTING_META: dict[str, tuple[str, str]] = {
+  "signal_blocked": ("Chặn tín hiệu", "block-signal"),
+  "silent_signal": ("Tắt thông báo", "silent-signal"),
+  "notification_include_signal_raw": ("Kèm raw trong thông báo", "include-signal-raw"),
+}
+
+
+def format_accounts_admin(accounts: list[dict[str, Any]]) -> str:
+  if not accounts:
+    return "📭 Chưa có tài khoản nào."
+  lines = [f"<b>📂 Tài khoản</b> ({len(accounts)})", ""]
+  for a in accounts:
+    linked = "✅" if a.get("telegram_user_id") else "—"
+    lines.append(
+      f"{linked} <b>{_esc(a.get('account_name'))}</b> "
+      f"<code>{_esc(a.get('account_id'))}</code>\n"
+      f"   số dư {_fmt_num(a.get('account_balance'))} · {_esc(a.get('market_type'))}"
+    )
+    token = a.get("telegram_link_token")
+    if token:
+      # Ẩn trong spoiler, bọc code để tap-copy đưa cho enduser.
+      lines.append(f"   token: <tg-spoiler><code>{_esc(token)}</code></tg-spoiler>")
+  return "\n".join(lines)
+
+
+def format_admin_trades(account_id: str, payload: dict[str, Any]) -> str:
+  return f"<b>Tài khoản</b> <code>{_esc(account_id)}</code>\n\n" + format_trades(
+    payload
+  )
+
+
+def format_settings(states: list[dict[str, Any]]) -> str:
+  lines = ["<b>⚙️ Cài đặt broker</b>", ""]
+  for s in states:
+    label = SETTING_META.get(str(s.get("setting")), (str(s.get("setting")), ""))[0]
+    on = str(s.get("state")) == "ENABLED"
+    lines.append(f"{'🟢' if on else '⚪️'} {_esc(label)}: <b>{_esc(s.get('state'))}</b>")
+  lines.append("\n<i>Bấm nút bên dưới để bật/tắt.</i>")
+  return "\n".join(lines)
+
+
+def format_rotate_result(result: dict[str, Any]) -> str:
+  return (
+    f"🔑 Link token mới cho <code>{_esc(result.get('account_id'))}</code>:\n"
+    f"<tg-spoiler><code>{_esc(result.get('telegram_link_token'))}</code></tg-spoiler>\n\n"
+    "<i>Token cũ đã bị thu hồi. Gửi token mới này cho enduser.</i>"
+  )

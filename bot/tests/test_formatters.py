@@ -57,3 +57,57 @@ def test_format_command_result():
   out = messages.format_command_result({"action": "FLAT", "scope": "account=acc-1"})
   assert "FLAT" in out
   assert "account=acc-1" in out
+
+
+# ── admin formatters ────────────────────────────────────────────────
+
+
+def test_format_accounts_admin():
+  out = messages.format_accounts_admin(
+    [
+      {
+        "account_name": "Main",
+        "account_id": "acc-1",
+        "account_balance": 100.0,
+        "market_type": "FOREX",
+        "telegram_user_id": 5,
+        "telegram_link_token": "tok-123",
+      },
+      {
+        "account_name": None,
+        "account_id": "acc-2",
+        "market_type": "CRYPTO",
+        "telegram_user_id": None,
+        "telegram_link_token": "tok-456",
+      },
+    ]
+  )
+  assert "acc-1" in out and "acc-2" in out
+  assert "✅" in out  # linked
+  assert "—" in out  # unlinked
+  assert "tok-123" in out
+  assert "tg-spoiler" in out
+
+
+def test_format_accounts_admin_empty():
+  assert "Chưa có tài khoản" in messages.format_accounts_admin([])
+
+
+def test_format_settings():
+  out = messages.format_settings(
+    [
+      {"setting": "signal_blocked", "value": "1", "state": "ENABLED"},
+      {"setting": "silent_signal", "value": "0", "state": "DISABLED"},
+    ]
+  )
+  assert "Chặn tín hiệu" in out
+  assert "ENABLED" in out and "DISABLED" in out
+
+
+def test_format_rotate_result():
+  out = messages.format_rotate_result(
+    {"account_id": "acc-1", "telegram_link_token": "new-tok"}
+  )
+  assert "new-tok" in out
+  assert "acc-1" in out
+  assert "thu hồi" in out
