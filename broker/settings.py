@@ -66,6 +66,15 @@ class Settings(BaseSettings):
   TELEGRAM_CHAT_ID: str = ""  # management: NATS events, service start/stop
   TELEGRAM_CHAT_CHANNEL_ID: str = ""  # signals: NATS published trades
 
+  # ── Telegram error-log hook ──────────────────────────────────────
+  # When enabled (and TELEGRAM_ENABLED is true), log records at ERROR
+  # level or above are forwarded to the management chat (TELEGRAM_CHAT_ID).
+  TELEGRAM_LOG_ERRORS_ENABLED: bool = False
+  TELEGRAM_LOG_DEDUP_WINDOW: int = 60  # seconds — suppress identical messages
+  # Private chat that receives forwarded ERROR logs. Falls back to
+  # TELEGRAM_CHAT_ID when left empty for backwards compatibility.
+  TELEGRAM_LOG_CHAT_ID: str = ""
+
   @property
   def postgres_dsn(self) -> str:
     return (
