@@ -12,9 +12,8 @@ from broker.logger import get_logger
 from broker.nats import nats_client
 from broker.openapi import fastapi_kwargs
 from broker.router import get_core_router
-from broker.services.nats_consumer import TradeEventConsumer
 from broker.services.nats_publisher import NatsPublisher
-from broker.services.nats_system_consumer import SystemEventConsumer
+from broker.services.nats_service import SystemEventConsumer, TradeEventConsumer
 from broker.services.notification_service import TelegramNotification
 from broker.settings import settings
 
@@ -28,7 +27,7 @@ async def lifespan(app: FastAPI):
   # Start the background worker that forwards ERROR logs to Telegram. Cheap and
   # idempotent when the feature is disabled (no records ever reach the handler).
   if settings.TELEGRAM_ENABLED and settings.TELEGRAM_LOG_ERRORS_ENABLED:
-    from broker.services.telegram_log_handler import telegram_log_handler
+    from broker.services.notification_service import telegram_log_handler
 
     telegram_log_handler.start(asyncio.get_running_loop())
 
@@ -73,7 +72,7 @@ async def lifespan(app: FastAPI):
   await close_db()
 
   if settings.TELEGRAM_ENABLED and settings.TELEGRAM_LOG_ERRORS_ENABLED:
-    from broker.services.telegram_log_handler import telegram_log_handler
+    from broker.services.notification_service import telegram_log_handler
 
     await telegram_log_handler.stop()
 

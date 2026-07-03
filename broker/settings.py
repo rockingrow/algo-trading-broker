@@ -71,9 +71,11 @@ class Settings(BaseSettings):
   # level or above are forwarded to the management chat (TELEGRAM_CHAT_ID).
   TELEGRAM_LOG_ERRORS_ENABLED: bool = False
   TELEGRAM_LOG_DEDUP_WINDOW: int = 60  # seconds — suppress identical messages
-  # Private chat that receives forwarded ERROR logs. Falls back to
-  # TELEGRAM_CHAT_ID when left empty for backwards compatibility.
+  # Dedicated bot/chat that receives forwarded ERROR logs, kept separate from
+  # the main bot so a Telegram outage/ban on one never affects the other.
+  # Both fall back to TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID when left empty.
   TELEGRAM_LOG_CHAT_ID: str = ""
+  TELEGRAM_LOG_BOT_TOKEN: str = ""
 
   @property
   def postgres_dsn(self) -> str:

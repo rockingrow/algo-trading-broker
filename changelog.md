@@ -38,9 +38,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration `d2b3c4e5f6a7`. Default leverage advertised to workers.
 - Startup / reconnect Telegram notifications now list every subscribed
   subject (both `TRADE` and `SYSTEM`).
+- **Telegram error-log forwarding** — When `TELEGRAM_ENABLED` and
+  `TELEGRAM_LOG_ERRORS_ENABLED` are both set, log records at `ERROR` level or
+  above are forwarded to a Telegram chat. `TelegramLogHandler` (a
+  `logging.Handler`) hands each record to the event loop and a background
+  worker — started and stopped in the app lifespan — performs the async send,
+  so `emit` never blocks the event loop or raises. Three safeguards keep it
+  production-safe: a filter drops records emitted by the send path itself (no
+  feedback loop), identical messages are suppressed within
+  `TELEGRAM_LOG_DEDUP_WINDOW` seconds (no spam), and the queue is bounded,
+  dropping records under an error storm rather than growing unbounded.
+- **Dedicated log bot/chat** — `TELEGRAM_LOG_BOT_TOKEN` and
+  `TELEGRAM_LOG_CHAT_ID` route forwarded error logs through a bot and private
+  chat kept separate from the main signal bot, so an outage or ban on one never
+  affects the other. Both fall back to `TELEGRAM_BOT_TOKEN` /
+  `TELEGRAM_CHAT_ID` when left empty.
+- `ERROR_ALERT` (🚨) emoji constant prefixing each forwarded error log.
 
 ### Changed
 
+- **Service module consolidation** — `nats_consumer.py` and
+  `nats_system_consumer.py` are merged into a single `nats_service.py`
+  (exporting `TradeEventConsumer` and `SystemEventConsumer`), and the Telegram
+  error-log handler moves from `telegram_log_handler.py` into
+  `notification_service.py` alongside the other Telegram channels.
 - **`WORKER_CONNECTED` now requires `market` and `gateway`** — The inbound
   `SYSTEM` schema is split into `SystemCryptoLeverageInitSignal` (outbound)
   and `SystemWorkerConnectedSignal` (inbound), the latter adding required

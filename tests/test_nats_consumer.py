@@ -1,7 +1,7 @@
 import json
 
 from broker.schemas.trade_event_schema import PositionEvent
-from broker.services.nats_consumer import TradeEventConsumer
+from broker.services.nats_service import TradeEventConsumer
 
 
 class FakeTradeRepo:

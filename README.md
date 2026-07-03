@@ -54,7 +54,7 @@ make dev
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
 - **Signal Gating**: A `SIGNAL_BLOCKED` broker setting can pause signal forwarding without restarting the server.
-- **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals.
+- **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals, plus optional forwarding of `ERROR`-level logs to a dedicated Telegram chat.
 - **Developer Friendly**: Includes Makefile, Bruno API collections, Alembic CLI helpers, a pytest suite, and Ruff for linting.
 
 ---
@@ -104,7 +104,7 @@ algo-trading-broker/
 │   ├── interfaces/      # Protocols for DI (DB, notifier, publisher)
 │   ├── schemas/         # Pydantic schemas (webhook, publisher, subscriber, trade, account, admin)
 │   ├── security/        # Auth guard (ensure_api_key — X-API-KEY)
-│   ├── services/        # nats_publisher, nats_consumer, notification, signal_processing
+│   ├── services/        # nats_publisher, nats_service, notification, signal_processing
 │   ├── app.py           # FastAPI application factory
 │   ├── main.py          # Entrypoint (uvicorn runner)
 │   ├── router.py        # Aggregates sub-routers under /v1, /admin, /secret
@@ -219,6 +219,12 @@ TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
 TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
+
+# Forward log records at ERROR level or above to Telegram.
+TELEGRAM_LOG_ERRORS_ENABLED=false
+TELEGRAM_LOG_DEDUP_WINDOW=60   # seconds — suppress identical messages
+TELEGRAM_LOG_BOT_TOKEN=        # dedicated log bot (falls back to TELEGRAM_BOT_TOKEN)
+TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_CHAT_ID)
 ```
 
 ---

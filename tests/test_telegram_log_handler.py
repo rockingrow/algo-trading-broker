@@ -1,4 +1,4 @@
-"""Tests for the Telegram error-log hook (broker.services.telegram_log_handler)."""
+"""Tests for the Telegram error-log hook (broker.services.notification_service)."""
 
 import asyncio
 import logging
@@ -6,7 +6,7 @@ import logging
 import pytest
 
 import broker.services.notification_service as notification_service
-from broker.services.telegram_log_handler import TelegramLogHandler
+from broker.services.notification_service import TelegramLogHandler
 
 
 @pytest.fixture
@@ -93,7 +93,7 @@ async def test_duplicate_messages_are_deduplicated(sent):
 
 async def test_worker_uses_dedicated_log_chat_id(monkeypatch):
   """When TELEGRAM_LOG_CHAT_ID is set, the worker must target that chat."""
-  from broker.services import telegram_log_handler as mod
+  from broker.services import notification_service as mod
 
   monkeypatch.setattr(mod.settings, "TELEGRAM_LOG_CHAT_ID", "999", raising=False)
   monkeypatch.setattr(mod.settings, "TELEGRAM_CHAT_ID", "111", raising=False)
@@ -102,13 +102,13 @@ async def test_worker_uses_dedicated_log_chat_id(monkeypatch):
 
   original_init = notification_service.TelegramNotification.__init__
 
-  def spy_init(self, chat_id=None, setting_repository=None):
+  def spy_init(self, chat_id=None, bot_token=None, setting_repository=None):
     captured.append(chat_id)
-    original_init(self, chat_id=chat_id, setting_repository=setting_repository)
+    original_init(
+      self, chat_id=chat_id, bot_token=bot_token, setting_repository=setting_repository
+    )
 
-  monkeypatch.setattr(
-    notification_service.TelegramNotification, "__init__", spy_init
-  )
+  monkeypatch.setattr(notification_service.TelegramNotification, "__init__", spy_init)
 
   async def fake_send(self, message_text: str) -> None:
     pass
@@ -126,6 +126,82 @@ async def test_worker_uses_dedicated_log_chat_id(monkeypatch):
   await handler.stop()
 
   assert "999" in captured  # dedicated chat, not the management fallback
+
+
+async def test_worker_uses_dedicated_log_bot_token(monkeypatch):
+  """When TELEGRAM_LOG_BOT_TOKEN is set, the worker must send via that bot."""
+  from broker.services import notification_service as mod
+
+  monkeypatch.setattr(
+    mod.settings, "TELEGRAM_LOG_BOT_TOKEN", "log-bot-tok", raising=False
+  )
+  monkeypatch.setattr(mod.settings, "TELEGRAM_BOT_TOKEN", "main-bot-tok", raising=False)
+
+  captured: list[str | None] = []
+
+  original_init = notification_service.TelegramNotification.__init__
+
+  def spy_init(self, chat_id=None, bot_token=None, setting_repository=None):
+    captured.append(bot_token)
+    original_init(
+      self, chat_id=chat_id, bot_token=bot_token, setting_repository=setting_repository
+    )
+
+  monkeypatch.setattr(notification_service.TelegramNotification, "__init__", spy_init)
+
+  async def fake_send(self, message_text: str) -> None:
+    pass
+
+  monkeypatch.setattr(
+    notification_service.TelegramNotification, "send_message", fake_send
+  )
+
+  handler = TelegramLogHandler()
+  handler.start(asyncio.get_running_loop())
+  logger = _make_logger("test.telegram.dedicated_bot", handler)
+
+  logger.error("send me via the dedicated bot")
+  await _settle(handler)
+  await handler.stop()
+
+  assert "log-bot-tok" in captured  # dedicated bot, not the shared main bot
+
+
+async def test_worker_falls_back_to_shared_bot_token(monkeypatch):
+  """When TELEGRAM_LOG_BOT_TOKEN is empty, the worker must reuse the shared bot."""
+  from broker.services import notification_service as mod
+
+  monkeypatch.setattr(mod.settings, "TELEGRAM_LOG_BOT_TOKEN", "", raising=False)
+  monkeypatch.setattr(mod.settings, "TELEGRAM_BOT_TOKEN", "main-bot-tok", raising=False)
+
+  captured: list[str | None] = []
+
+  original_init = notification_service.TelegramNotification.__init__
+
+  def spy_init(self, chat_id=None, bot_token=None, setting_repository=None):
+    captured.append(bot_token)
+    original_init(
+      self, chat_id=chat_id, bot_token=bot_token, setting_repository=setting_repository
+    )
+
+  monkeypatch.setattr(notification_service.TelegramNotification, "__init__", spy_init)
+
+  async def fake_send(self, message_text: str) -> None:
+    pass
+
+  monkeypatch.setattr(
+    notification_service.TelegramNotification, "send_message", fake_send
+  )
+
+  handler = TelegramLogHandler()
+  handler.start(asyncio.get_running_loop())
+  logger = _make_logger("test.telegram.fallback_bot", handler)
+
+  logger.error("send me via the shared bot")
+  await _settle(handler)
+  await handler.stop()
+
+  assert "main-bot-tok" in captured
 
 
 async def test_emit_before_start_is_dropped_silently(sent):

@@ -1,7 +1,7 @@
 import json
 
 from broker.schemas.publisher_schema import PublishTopicEnum, SystemActionEnum
-from broker.services.nats_system_consumer import (
+from broker.services.nats_service import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
   SystemEventConsumer,

@@ -5,7 +5,7 @@ Owns the raw NATSClient lifecycle: connect, drain, close, and the
 disconnected/reconnected/error callbacks. It depends only on the ``Notifier``
 abstraction for lifecycle alerts (injected via ``set_notifier``), not on any
 concrete channel. Domain logic (publish, subscribe) lives in
-``broker/services/nats_publisher.py`` and ``broker/services/nats_consumer.py``.
+``broker/services/nats_publisher.py`` and ``broker/services/nats_service.py``.
 """
 
 from __future__ import annotations
