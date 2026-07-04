@@ -1,0 +1,26 @@
+info:
+  name: Crypto Allowed Symbols
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{url}}/admin/settings/crypto-allowed-symbol"
+  body:
+    type: json
+    data: |-
+      {
+        "symbols": [
+          "BTC",
+          "ETH",
+          "BNB",
+          "ADA"
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
