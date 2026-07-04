@@ -11,8 +11,10 @@ from broker.services.nats_service import (
 class FakeSettingRepo:
   def __init__(self, values: dict[str, str | None] | None = None):
     self._values = values or {}
+    self.get_calls: list[str] = []
 
   async def get(self, key: str) -> str | None:
+    self.get_calls.append(key)
     return self._values.get(key)
 
   async def set(self, key: str, value: str) -> bool:
@@ -346,6 +348,62 @@ async def test_publish_failure_is_swallowed():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(), reply="_INBOX.x")
   )
+
+
+# ── Crypto settings cache (absorbs reconnect-storm bursts) ─────────────────
+
+
+async def test_second_handshake_within_ttl_reuses_cached_settings():
+  consumer, repo, publisher = _make_consumer()
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  # Both handshakes got a reply, but the DB was only read once per key.
+  assert len(publisher.calls) == 2
+  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
+  assert repo.get_calls.count(CRYPTO_MAX_LEVERAGE_KEY) == 1
+
+
+async def test_cache_miss_fetches_both_settings():
+  consumer, repo, _publisher = _make_consumer()
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert repo.get_calls == [CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY]
+
+
+async def test_cache_expires_after_ttl(monkeypatch):
+  consumer, repo, publisher = _make_consumer()
+  clock = {"now": 1_000.0}
+  monkeypatch.setattr(
+    "broker.services.nats_service.time.monotonic", lambda: clock["now"]
+  )
+
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
+
+  # Still within the TTL window: no re-fetch.
+  clock["now"] += 1.0
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
+
+  # Past the TTL: the next handshake re-reads the settings.
+  clock["now"] += 30.0
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 2
+  assert len(publisher.calls) == 3
+
+
+async def test_missing_settings_are_also_cached():
+  # A "not configured" read is cached too so a reconnect storm during an
+  # ongoing misconfiguration doesn't hammer the DB either.
+  consumer, repo, publisher = _make_consumer(
+    settings={CRYPTO_ALLOWED_SYMBOL_KEY: None, CRYPTO_MAX_LEVERAGE_KEY: None}
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
+  assert publisher.calls == []
 
 
 class FakeSubscription:

@@ -94,6 +94,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WORKER_CONNECTED` arrives via request/reply the response is sent to that
   worker's reply inbox instead of fanning out on the shared `SYSTEM` subject.
   Fire-and-forget announcements still broadcast on `SYSTEM` unchanged.
+- **Crypto settings read concurrently and cached briefly** — nats-py runs one
+  task per subscription and awaits each callback to completion before
+  pulling the next message, so a reconnect storm serializes
+  `WORKER_CONNECTED` handshakes on `SYSTEM` rather than running them in
+  parallel. `SystemEventConsumer._get_crypto_settings` now fetches
+  `crypto_allowed_symbol` and `crypto_max_leverage` with `asyncio.gather`
+  instead of two sequential round trips, and caches the result (hit or miss)
+  for `CRYPTO_SETTINGS_CACHE_TTL_SECONDS` (30s) so a burst of simultaneous
+  reconnects reads the DB once instead of once per worker.
 
 ## [1.0.5] - 2026-06-25
 

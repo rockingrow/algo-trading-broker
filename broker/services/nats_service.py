@@ -39,11 +39,20 @@ messages:
   The broker's own outgoing SYSTEM messages are filtered by action so it
   never reacts to them (replies go to private inboxes and are never received
   here).
+
+  nats-py processes one subscription's messages one at a time (a single task
+  awaits each callback to completion before pulling the next message off the
+  queue), so a reconnect storm serializes its WORKER_CONNECTED handshakes
+  rather than running them concurrently. The two crypto BrokerSetting reads
+  are cached briefly (``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``) so that burst
+  doesn't turn into one DB round trip pair per worker.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Optional
 
 from nats.aio.subscription import Subscription
@@ -64,6 +73,16 @@ log = get_logger(__name__)
 
 CRYPTO_ALLOWED_SYMBOL_KEY = "crypto_allowed_symbol"
 CRYPTO_MAX_LEVERAGE_KEY = "crypto_max_leverage"
+
+# nats-py runs one asyncio task per subscription, pulling messages off an
+# internal queue and awaiting the callback to completion before pulling the
+# next one — WORKER_CONNECTED handshakes on SYSTEM are therefore processed
+# one at a time, not concurrently. A reconnect storm (NATS/broker restart)
+# can queue up dozens of these back-to-back, so caching the two crypto
+# settings briefly keeps that burst from re-reading the DB on every single
+# handshake. These settings have no admin-facing update endpoint today, so a
+# short TTL is a safe trade-off between freshness and load.
+CRYPTO_SETTINGS_CACHE_TTL_SECONDS = 30.0
 
 
 class TradeEventConsumer:
@@ -135,6 +154,8 @@ class SystemEventConsumer:
     self._publisher = publisher
     self._conn = connection or nats_client
     self._sub: Optional[Subscription] = None
+    self._crypto_settings_cache: tuple[Optional[str], Optional[str]] | None = None
+    self._crypto_settings_cached_at: float = 0.0
 
   async def start(self) -> None:
     """Subscribe to the SYSTEM subject using the shared NATS connection."""
@@ -222,8 +243,7 @@ class SystemEventConsumer:
     SYSTEM subject. Missing or invalid settings produce an error reply so a
     requesting worker is not left waiting.
     """
-    symbols_raw = await self._settings.get(CRYPTO_ALLOWED_SYMBOL_KEY)
-    leverage_raw = await self._settings.get(CRYPTO_MAX_LEVERAGE_KEY)
+    symbols_raw, leverage_raw = await self._get_crypto_settings()
 
     if symbols_raw is None or leverage_raw is None:
       log.warning(
@@ -270,6 +290,32 @@ class SystemEventConsumer:
         account_id,
         exc,
       )
+
+  async def _get_crypto_settings(self) -> tuple[Optional[str], Optional[str]]:
+    """Return (symbols_raw, leverage_raw), reusing a cached read for up to
+    ``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``.
+
+    On a cache miss, both settings are fetched concurrently via
+    ``asyncio.gather`` instead of two sequential round trips. Both hits and
+    misses are cached (there is no admin endpoint that updates these settings
+    today, so treating "not configured" as cacheable too keeps the fix
+    simple); worst case an operator who just fixed the DB row waits up to the
+    TTL for it to take effect on the next handshake.
+    """
+    now = time.monotonic()
+    if (
+      self._crypto_settings_cache is not None
+      and now - self._crypto_settings_cached_at < CRYPTO_SETTINGS_CACHE_TTL_SECONDS
+    ):
+      return self._crypto_settings_cache
+
+    symbols_raw, leverage_raw = await asyncio.gather(
+      self._settings.get(CRYPTO_ALLOWED_SYMBOL_KEY),
+      self._settings.get(CRYPTO_MAX_LEVERAGE_KEY),
+    )
+    self._crypto_settings_cache = (symbols_raw, leverage_raw)
+    self._crypto_settings_cached_at = now
+    return self._crypto_settings_cache
 
   async def _reply_ack(self, reply_to: str, account_id: str) -> None:
     """Acknowledge a handshake that needs no configuration. No-op when there is
