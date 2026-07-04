@@ -17,9 +17,12 @@ http:
         "timestamp": "2026-04-22 03:50:00",
         "position": {
           "action": "TP1",
-          "price": 4669.50,
+          "price": 60100.50,
           "quantity": 0.01,
-          "is_running": true
+          "risk_percent": 3.0,
+          "is_running": true,
+          "tp1_percent": 70.0,
+          "move_sl_to_be": false
         },
         "indicators": {},
         "inputs": {}

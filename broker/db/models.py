@@ -17,6 +17,7 @@ from sqlalchemy import (
   Enum,
   Numeric,
   String,
+  Text,
   func,
   Integer,
   UniqueConstraint,
@@ -74,7 +75,9 @@ class Signal(Base):
   risk_percent: Mapped[float] = mapped_column(
     Numeric(10, 4), nullable=False, default=0.0
   )
-  is_scale_position: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+  is_scale_position: Mapped[bool] = mapped_column(
+    Boolean, nullable=False, default=False
+  )
   scale_strategy: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
   # Complex objects stored as JSONB
@@ -173,7 +176,7 @@ class BrokerSetting(Base):
   __table_args__ = (UniqueConstraint("key", name="uq_broker_settings_key"),)
 
   key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-  value: Mapped[str] = mapped_column(String(255), nullable=False)
+  value: Mapped[str] = mapped_column(Text, nullable=False)
 
   def __repr__(self) -> str:
     return f"<BrokerSetting id={self.id} key={self.key} value={self.value}>"

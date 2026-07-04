@@ -57,4 +57,25 @@ def get_logger(name: str) -> logging.Logger:
     logger.addHandler(file_handler)
     logger.propagate = False
 
+  _maybe_attach_telegram_handler(logger)
+
   return logger
+
+
+def _maybe_attach_telegram_handler(logger: logging.Logger) -> None:
+  """Attach the shared Telegram error handler when enabled in settings.
+
+  Imported lazily to avoid a circular import (``notification_service`` imports
+  this module). Skipped while ``notification_service`` is still initializing —
+  its own logger is filtered from forwarding anyway."""
+  if not (settings.TELEGRAM_ENABLED and settings.TELEGRAM_LOG_ERRORS_ENABLED):
+    return
+
+  from broker.services import notification_service
+
+  handler = getattr(notification_service, "telegram_log_handler", None)
+  if handler is None:
+    return
+
+  if handler not in logger.handlers:
+    logger.addHandler(handler)

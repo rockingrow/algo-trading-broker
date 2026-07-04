@@ -1,3 +1,5 @@
 SIGNAL_BLOCKED = "signal_blocked"
 SILENT_SIGNAL = "silent_signal"
 NOTIFICATION_INCLUDE_SIGNAL_RAW = "notification_include_signal_raw"
+CRYPTO_ALLOWED_SYMBOL_KEY = "crypto_allowed_symbol"
+CRYPTO_MAX_LEVERAGE_KEY = "crypto_max_leverage"

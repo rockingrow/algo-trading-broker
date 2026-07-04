@@ -26,7 +26,7 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   symbol = payload.symbol.split(":")[-1].upper().strip()
 
   # Only carry scaling information when the webhook explicitly flags a scale-in.
-  is_scale_position = bool(position.is_scale_position)
+  is_scale_position = position.is_scale_position
   scaling = (
     ScalingSchema(**position.scaling.model_dump())
     if is_scale_position and position.scaling is not None
@@ -44,11 +44,17 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
     sl=position.sl,
     tp1=position.tp1,
     tp2=position.tp2,
+    tp1_percent=position.tp1_percent,
+    move_sl_to_be=position.move_sl_to_be,
     is_running=position.is_running if position.is_running is not None else False,
-    risk_percent=payload.inputs.risk_percent
-    if payload.inputs is not None and payload.inputs.risk_percent is not None
-    else 0.0,
-    is_scale_position=is_scale_position if is_scale_position else None,
+    risk_percent=position.risk_percent
+    if position.risk_percent is not None
+    else (
+      payload.inputs.risk_percent
+      if payload.inputs is not None and payload.inputs.risk_percent is not None
+      else 0.0
+    ),
+    is_scale_position=is_scale_position,
     scale_strategy=position.scale_strategy if is_scale_position else None,
     scaling=scaling,
   )

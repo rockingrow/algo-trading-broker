@@ -63,6 +63,23 @@ class SqlAlchemySettingRepository:
       log.exception("Failed to read broker setting key=%s: %s", key, exc)
       return None
 
+  async def get_many(self, keys: list[str]) -> dict[str, str]:
+    """Return {key: value} for every *keys* found in a single round trip;
+    keys with no row are omitted (callers distinguish "missing" via absence).
+
+    A single query also makes the read atomic under Postgres MVCC — every key
+    reflects the same snapshot, unlike issuing one `get()` per key.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BrokerSetting).where(BrokerSetting.key.in_(keys))
+        )
+        return {row.key: row.value for row in result.scalars().all()}
+    except Exception as exc:
+      log.exception("Failed to read broker settings keys=%s: %s", keys, exc)
+      return {}
+
   async def set(self, key: str, value: str) -> bool:
     """Upsert a broker_settings row. Returns True on success, False on error."""
     try:
@@ -109,9 +126,16 @@ class SqlAlchemySignalRepository:
       tp1=pos.tp1,
       tp2=pos.tp2,
       is_running=pos.is_running if pos.is_running is not None else False,
-      risk_percent=payload.inputs.risk_percent
-      if payload.inputs is not None and payload.inputs.risk_percent is not None
-      else 0.0,
+      # Mirror parse_signal's precedence: position-level risk_percent wins,
+      # then inputs.risk_percent, else 0.0. Keeping these in sync ensures the
+      # persisted audit row matches the signal that was actually published.
+      risk_percent=pos.risk_percent
+      if pos.risk_percent is not None
+      else (
+        payload.inputs.risk_percent
+        if payload.inputs is not None and payload.inputs.risk_percent is not None
+        else 0.0
+      ),
       is_scale_position=bool(pos.is_scale_position),
       scale_strategy=pos.scale_strategy,
       indicators=json.loads(payload.indicators.model_dump_json())

@@ -5,7 +5,7 @@ Owns the raw NATSClient lifecycle: connect, drain, close, and the
 disconnected/reconnected/error callbacks. It depends only on the ``Notifier``
 abstraction for lifecycle alerts (injected via ``set_notifier``), not on any
 concrete channel. Domain logic (publish, subscribe) lives in
-``broker/services/nats_publisher.py`` and ``broker/services/nats_consumer.py``.
+``broker/services/nats_publisher.py`` and ``broker/services/nats_service.py``.
 """
 
 from __future__ import annotations
@@ -27,8 +27,9 @@ log = get_logger(__name__)
 class NatsClient:
   """Manages the NATS connection and its lifecycle callbacks."""
 
-  PUBLISH_SUBJECTS = [PublishTopicEnum.ADMIN]
+  PUBLISH_SUBJECTS = [PublishTopicEnum.ADMIN, PublishTopicEnum.SYSTEM]
   LISTEN_SUBJECT = PublishTopicEnum.TRADE
+  LISTEN_SUBJECTS = [PublishTopicEnum.TRADE, PublishTopicEnum.SYSTEM]
 
   def __init__(self, notifier: Optional[Notifier] = None) -> None:
     self._nc: Optional[NATSClient] = None
@@ -44,6 +45,9 @@ class NatsClient:
 
   def subjects_line(self) -> str:
     return " | ".join(s.value for s in self.PUBLISH_SUBJECTS)
+
+  def listen_subjects_line(self) -> str:
+    return " | ".join(s.value for s in self.LISTEN_SUBJECTS)
 
   async def _notify(self, message: str) -> None:
     if self._notifier is not None:
@@ -80,7 +84,7 @@ class NatsClient:
     await self._notify(
       f"{em.NATS_DISCONNECTED} <b>NATS Disconnected</b>\n"
       f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
-      f"{em.LISTEN} Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
+      f"{em.LISTEN} Listening: <code>{self.listen_subjects_line()}</code>"
     )
 
   async def _on_reconnected(self) -> None:
@@ -88,7 +92,7 @@ class NatsClient:
     await self._notify(
       f"{em.NATS_RECONNECTED} <b>NATS Reconnected</b>\n"
       f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
-      f"{em.LISTEN} Listening: <code>{self.LISTEN_SUBJECT.value}</code>"
+      f"{em.LISTEN} Listening: <code>{self.listen_subjects_line()}</code>"
     )
 
   async def _on_closed(self) -> None:

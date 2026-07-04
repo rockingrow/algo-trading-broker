@@ -17,8 +17,9 @@ http:
         "timestamp": "2026-04-22 04:30:00",
         "position": {
           "action": "TP2",
-          "price": 4703.50,
+          "price": 60100,
           "quantity": 2.2,
+          "risk_percent": 3.0,
           "is_running": false
         },
         "indicators": {},

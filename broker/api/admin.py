@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from broker.constants import (
+  CRYPTO_ALLOWED_SYMBOL_KEY,
+  CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_INCLUDE_SIGNAL_RAW,
   SIGNAL_BLOCKED,
   SILENT_SIGNAL,
@@ -12,7 +14,10 @@ from broker.providers import get_admin_notifier, get_publisher, get_setting_repo
 from broker.interfaces import Notifier, SettingRepository, SignalPublisher
 from broker.schemas.admin_schema import (
   AdminResponse,
+  CryptoAllowedSymbolRequest,
+  CryptoMaxLeverageRequest,
   SettingToggleResponse,
+  SettingValueResponse,
   FlatRequest,
 )
 from broker.schemas.publisher_schema import AdminActionEnum
@@ -136,6 +141,81 @@ def get_admin_router() -> APIRouter:
     return SettingToggleResponse(
       setting=NOTIFICATION_INCLUDE_SIGNAL_RAW, value=new_value, state=state_label
     )
+
+  @router.post(
+    "/settings/crypto-allowed-symbol",
+    tags=["settings"],
+    summary="Set the crypto allowed-symbol list",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_crypto_allowed_symbol(
+    body: CryptoAllowedSymbolRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingValueResponse:
+    """Set CRYPTO_ALLOWED_SYMBOL_KEY, pushed to crypto workers via SYSTEM
+    CRYPTO_LEVERAGE_INIT on their next connect."""
+    symbols = list(dict.fromkeys(s.strip().upper() for s in body.symbols if s.strip()))
+    if not symbols:
+      raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail="symbols must contain at least one non-empty value",
+      )
+    value = ",".join(symbols)
+
+    ok = await setting_repo.set(CRYPTO_ALLOWED_SYMBOL_KEY, value)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broker setting",
+      )
+
+    log.info("%s updated -> %s", CRYPTO_ALLOWED_SYMBOL_KEY, value)
+    await notifier.send_message(
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
+      f"Setting: <code>{CRYPTO_ALLOWED_SYMBOL_KEY}</code>\n"
+      f"Symbols: <b>{value}</b>\n"
+    )
+
+    return SettingValueResponse(setting=CRYPTO_ALLOWED_SYMBOL_KEY, value=value)
+
+  @router.post(
+    "/settings/crypto-max-leverage",
+    tags=["settings"],
+    summary="Set the default crypto leverage",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_crypto_max_leverage(
+    body: CryptoMaxLeverageRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingValueResponse:
+    """Set CRYPTO_MAX_LEVERAGE_KEY, pushed to crypto workers via SYSTEM
+    CRYPTO_LEVERAGE_INIT on their next connect. Must be a positive integer
+    (enforced by CryptoMaxLeverageRequest)."""
+    value = str(body.default_leverage)
+
+    ok = await setting_repo.set(CRYPTO_MAX_LEVERAGE_KEY, value)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broker setting",
+      )
+
+    log.info("%s updated -> %s", CRYPTO_MAX_LEVERAGE_KEY, value)
+    await notifier.send_message(
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
+      f"Setting: <code>{CRYPTO_MAX_LEVERAGE_KEY}</code>\n"
+      f"Default leverage: <b>{value}</b>\n"
+    )
+
+    return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
 
   @router.post(
     "/flat",

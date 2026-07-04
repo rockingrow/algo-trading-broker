@@ -29,7 +29,14 @@ NATS_RECONNECTED: str = emoji.emojize(":electric_plug:")  # 🔌
 PUBLISH: str = emoji.emojize(":outbox_tray:")  # 📤
 LISTEN: str = emoji.emojize(":inbox_tray:")  # 📥
 
+# ── Error / log alerts ────────────────────────────────────────────────────────
+ERROR_ALERT: str = emoji.emojize(":police_car_light:")  # 🚨
+
 # ── Admin / settings ─────────────────────────────────────────────────────────
 GEAR: str = emoji.emojize(":gear:")  # ⚙️
 ADMIN_FLAT: str = emoji.emojize(":shield:")  # 🛡️
 BLOCKED: str = emoji.emojize(":prohibited:")  # 🚫
+
+# ── Position flags ────────────────────────────────────────────────────────────
+FLAG_ON: str = emoji.emojize(":green_circle:")  # 🟢
+FLAG_OFF: str = emoji.emojize(":red_circle:")  # 🔴

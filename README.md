@@ -54,7 +54,7 @@ make dev
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
 - **Signal Gating**: A `SIGNAL_BLOCKED` broker setting can pause signal forwarding without restarting the server.
-- **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals.
+- **Notifications**: Optional Telegram alerts for broker lifecycle events and published signals, plus optional forwarding of `ERROR`-level logs to a dedicated Telegram chat.
 - **Developer Friendly**: Includes Makefile, Bruno API collections, Alembic CLI helpers, a pytest suite, and Ruff for linting.
 
 ---
@@ -104,7 +104,7 @@ algo-trading-broker/
 │   ├── interfaces/      # Protocols for DI (DB, notifier, publisher)
 │   ├── schemas/         # Pydantic schemas (webhook, publisher, subscriber, trade, account, admin)
 │   ├── security/        # Auth guard (ensure_api_key — X-API-KEY)
-│   ├── services/        # nats_publisher, nats_consumer, notification, signal_processing
+│   ├── services/        # nats_publisher, nats_service, notification, signal_processing
 │   ├── app.py           # FastAPI application factory
 │   ├── main.py          # Entrypoint (uvicorn runner)
 │   ├── router.py        # Aggregates sub-routers under /v1, /admin, /secret
@@ -135,9 +135,71 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | --------- | ------- | ------- |
 | Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
 | Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
+| Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` sent back after a worker announces itself |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
+| Subscribe (workers → broker) | `SYSTEM` | `WORKER_CONNECTED` announcements published by a worker right after it connects (payload carries `account_id` in `<market>-<gateway>-<account_id>` format, plus `market` and `gateway`) |
 
 Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
+
+### `SYSTEM` handshake
+
+When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation:
+
+```json
+{
+  "action": "WORKER_CONNECTED",
+  "account_id": "CRYPTO-BINANCE-7654321",
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "market": "CRYPTO",
+  "gateway": "BINANCE"
+}
+```
+
+#### Request/reply (recommended)
+
+Workers should announce themselves with **NATS request/reply** (`nc.request(...)`) rather than a fire-and-forget publish. The broker replies **directly on the request's inbox** with the outcome of the handshake, so:
+
+- the reply reaches only the worker that asked (no fan-out to every `SYSTEM` subscriber), and
+- the worker's `request` **always resolves** — on success, on a no-op, or on an error — instead of hanging.
+
+Because the reply is worker-driven, a worker that connects while the broker is **down or restarting** simply **times out and retries**; the handshake is idempotent, so retries are safe. This closes the delivery gap of plain fire-and-forget pub/sub, where a `WORKER_CONNECTED` published before the broker's subscription was active would be lost silently.
+
+The broker answers with one of three actions:
+
+| Situation | Reply action | Payload |
+| --------- | ------------ | ------- |
+| Crypto worker, settings loaded | `CRYPTO_LEVERAGE_INIT` | `symbols`, `default_leverage` |
+| Non-crypto worker | `WORKER_CONNECTED_ACK` | — (nothing to configure) |
+| Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
+
+For a crypto worker, the broker loads the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows and replies with `CRYPTO_LEVERAGE_INIT`:
+
+```json
+{
+  "action": "CRYPTO_LEVERAGE_INIT",
+  "account_id": "CRYPTO-BINANCE-7654321",
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "symbols": ["BTC", "ETH"],
+  "default_leverage": 10
+}
+```
+
+If the crypto settings are missing or invalid, the worker gets an explicit error it can log or retry on, instead of silently receiving nothing:
+
+```json
+{
+  "action": "WORKER_CONNECTED_ERROR",
+  "account_id": "CRYPTO-BINANCE-7654321",
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "reason": "crypto settings not configured"
+}
+```
+
+#### Fire-and-forget (backward compatible)
+
+A worker may still `publish` `WORKER_CONNECTED` without a reply inbox. In that case the broker broadcasts `CRYPTO_LEVERAGE_INIT` on the shared `SYSTEM` subject for crypto workers (workers filter by `account_id`); non-crypto and error outcomes can only be logged, not signalled back. Request/reply is preferred precisely because it removes those blind spots.
+
+The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `WORKER_CONNECTED_ACK`, `WORKER_CONNECTED_ERROR`) by `action`, so it never reacts to its own messages.
 
 ---
 
@@ -189,6 +251,12 @@ TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
 TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
+
+# Forward log records at ERROR level or above to Telegram.
+TELEGRAM_LOG_ERRORS_ENABLED=false
+TELEGRAM_LOG_DEDUP_WINDOW=60   # seconds — suppress identical messages
+TELEGRAM_LOG_BOT_TOKEN=        # dedicated log bot (falls back to TELEGRAM_BOT_TOKEN)
+TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_CHAT_ID)
 ```
 
 ---
@@ -279,6 +347,8 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/block-signal` | `X-API-KEY` |
 | `POST /admin/settings/silent-signal` | `X-API-KEY` |
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
+| `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
+| `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
 
 ---
@@ -447,6 +517,38 @@ Toggles the `NOTIFICATION_INCLUDE_SIGNAL_RAW` setting. When enabled (`"1"`), Tel
 
 ---
 
+### POST `/admin/settings/crypto-allowed-symbol`
+
+Sets the `crypto_allowed_symbol` broker setting pushed to crypto workers via `SYSTEM.CRYPTO_LEVERAGE_INIT`. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "symbols": ["BTC", "ETH"]
+}
+```
+
+Symbols are upper-cased, trimmed, and de-duplicated before being stored as a comma-separated string. At least one non-empty symbol is required (`422` otherwise). Because `SystemEventConsumer` caches this setting for up to 30s (see the `SYSTEM` handshake section above), a worker connecting immediately after this call may still receive the previous value.
+
+---
+
+### POST `/admin/settings/crypto-max-leverage`
+
+Sets the `crypto_max_leverage` broker setting pushed to crypto workers via `SYSTEM.CRYPTO_LEVERAGE_INIT`. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "default_leverage": 10
+}
+```
+
+`default_leverage` must be a positive integer (`422` otherwise). Subject to the same up-to-30s cache as `crypto-allowed-symbol`.
+
+---
+
 ### POST `/admin/flat`
 
 Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
@@ -534,15 +636,17 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | ------- | ------------ | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `key` | String(255) | Setting key (see known keys below) |
-| `value` | String(255) | Setting value (`"0"` / `"1"` for flags) |
+| `value` | Text | Setting value (`"0"` / `"1"` for flags) |
 
 **Known setting keys:**
 
-| Key | Default | Description |
-| --- | ------- | ----------- |
-| `signal_blocked` | `"0"` | Pause signal forwarding to workers |
-| `silent_signal` | `"0"` | Mute Telegram signal notifications |
-| `notification_include_signal_raw` | `"0"` | Append indicators/inputs to notifications |
+| Key | Default | Admin endpoint | Description |
+| --- | ------- | --------------- | ----------- |
+| `signal_blocked` | `"0"` | `POST /admin/settings/block-signal` | Pause signal forwarding to workers |
+| `silent_signal` | `"0"` | `POST /admin/settings/silent-signal` | Mute Telegram signal notifications |
+| `notification_include_signal_raw` | `"0"` | `POST /admin/settings/include-signal-raw` | Append indicators/inputs to notifications |
+| `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
+| `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 
 ---
 
