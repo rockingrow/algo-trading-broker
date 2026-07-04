@@ -64,7 +64,7 @@ def upgrade() -> None:
     op.create_table(
       "broker_settings",
       sa.Column("key", sa.String(length=255), nullable=False),
-      sa.Column("value", sa.String(length=255), nullable=False),
+      sa.Column("value", sa.Text(), nullable=False),
       sa.Column("id", sa.UUID(), nullable=False),
       sa.Column(
         "createdAt",

@@ -14,7 +14,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from broker.constants import SIGNAL_BLOCKED
+from broker.constants import (
+  CRYPTO_ALLOWED_SYMBOL_KEY,
+  CRYPTO_MAX_LEVERAGE_KEY,
+  SIGNAL_BLOCKED,
+)
 from broker.db.models import Account, Trade
 from broker.providers import (
   get_account_repository,
@@ -315,6 +319,93 @@ def test_toggle_include_signal_raw(ctx):
   )
   assert resp.status_code == 200
   assert resp.json()["value"] == "1"
+
+
+# ── Admin settings — crypto ─────────────────────────────────────────
+
+
+def test_set_crypto_allowed_symbol(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["btc", " eth ", "btc"]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == CRYPTO_ALLOWED_SYMBOL_KEY
+  # Normalised: upper-cased, trimmed, de-duplicated, order preserved.
+  assert body["value"] == "BTC,ETH"
+  assert ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] == "BTC,ETH"
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_crypto_allowed_symbol_rejects_empty_list(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": []},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_crypto_allowed_symbol_rejects_blank_only_symbols(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["  ", ""]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_crypto_allowed_symbol_persist_failure_returns_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["BTC"]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 500
+
+
+def test_set_crypto_max_leverage(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-max-leverage",
+    json={"default_leverage": 20},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == CRYPTO_MAX_LEVERAGE_KEY
+  assert body["value"] == "20"
+  assert ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] == "20"
+
+
+def test_set_crypto_max_leverage_rejects_zero(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-max-leverage",
+    json={"default_leverage": 0},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_crypto_max_leverage_rejects_negative(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-max-leverage",
+    json={"default_leverage": -10},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_crypto_max_leverage_persist_failure_returns_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-max-leverage",
+    json={"default_leverage": 10},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 500
 
 
 # ── Admin flat ──────────────────────────────────────────────────────

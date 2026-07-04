@@ -14,8 +14,9 @@ from datetime import datetime, timezone
 
 
 from broker.db import repository as repo_mod
-from broker.db.models import Account, Trade
+from broker.db.models import Account, BrokerSetting, Trade
 from broker.db.repository import (
+  SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
   SqlAlchemyTradeRepository,
 )
@@ -290,3 +291,37 @@ async def test_count_by_account_returns_zero_on_error(monkeypatch):
   _patch_session(monkeypatch, BoomSession(results=[]))
   result = await SqlAlchemyTradeRepository().count_by_account("acc-1")
   assert result == 0
+
+
+# ── SettingRepository.get_many ───────────────────────────────────────
+
+
+def _setting(key: str, value: str) -> BrokerSetting:
+  return BrokerSetting(key=key, value=value)
+
+
+async def test_get_many_returns_found_keys(monkeypatch):
+  session = FakeSession(results=[[_setting("a", "1"), _setting("b", "2")]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemySettingRepository().get_many(["a", "b"])
+  assert result == {"a": "1", "b": "2"}
+
+
+async def test_get_many_omits_missing_keys(monkeypatch):
+  # Only "a" has a row; the query legitimately returns just that one.
+  session = FakeSession(results=[[_setting("a", "1")]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemySettingRepository().get_many(["a", "b"])
+  assert result == {"a": "1"}
+
+
+async def test_get_many_returns_empty_dict_on_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+  result = await SqlAlchemySettingRepository().get_many(["a", "b"])
+  assert result == {}

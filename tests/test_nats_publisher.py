@@ -108,3 +108,45 @@ async def test_publish_system_signal_to_system_subject():
   assert body["account_id"] == "CRYPTO-BINANCE-7654321"
   assert body["symbols"] == ["BTC", "ETH"]
   assert body["default_leverage"] == 10
+
+
+async def test_publish_system_signal_to_reply_inbox():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_signal(
+    action=SystemActionEnum.CRYPTO_LEVERAGE_INIT,
+    account_id="CRYPTO-BINANCE-7654321",
+    symbols=["BTC"],
+    default_leverage=5,
+    subject="_INBOX.reply",
+  )
+
+  subject, body = conn.nc.published[0]
+  # A reply inbox is targeted directly instead of the shared SYSTEM subject.
+  assert subject == "_INBOX.reply"
+  assert body["action"] == "CRYPTO_LEVERAGE_INIT"
+
+
+async def test_publish_system_ack():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_ack(subject="_INBOX.ack", account_id="FOREX-MT5-1")
+
+  subject, body = conn.nc.published[0]
+  assert subject == "_INBOX.ack"
+  assert body["action"] == "WORKER_CONNECTED_ACK"
+  assert body["account_id"] == "FOREX-MT5-1"
+
+
+async def test_publish_system_error():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_error(
+    subject="_INBOX.err", account_id=None, reason="crypto settings not configured"
+  )
+
+  subject, body = conn.nc.published[0]
+  assert subject == "_INBOX.err"
+  assert body["action"] == "WORKER_CONNECTED_ERROR"
+  assert body["account_id"] is None
+  assert body["reason"] == "crypto settings not configured"
