@@ -16,13 +16,29 @@ messages:
   ``CRYPTO-BINANCE-7654321``), ``market`` and ``gateway``; messages missing
   any of these are rejected by ``SystemWorkerConnectedSignal`` validation.
 
-  When a crypto worker connects (``market == CRYPTO``) the broker loads the
-  ``crypto_allowed_symbol`` and ``crypto_max_leverage`` BrokerSetting rows and
-  publishes back a ``CRYPTO_LEVERAGE_INIT`` signal on the SYSTEM subject so
-  the worker can apply that configuration. Non-crypto markets are ignored.
+  Request/reply vs. fire-and-forget
+  ─────────────────────────────────
+  Workers should announce themselves with NATS ``request`` and wait for a
+  reply. When a message carries a reply inbox (``msg.reply``), the broker
+  answers *that one worker* directly with the outcome of the handshake:
 
-  The broker also publishes ``CRYPTO_LEVERAGE_INIT`` on the SYSTEM subject,
-  so the consumer filters by action to ignore its own outgoing messages.
+  * crypto worker, settings OK   → ``CRYPTO_LEVERAGE_INIT``
+  * non-crypto worker            → ``WORKER_CONNECTED_ACK``
+  * settings missing/invalid     → ``WORKER_CONNECTED_ERROR`` (with a reason)
+
+  Because every path replies, a worker's ``request`` always resolves instead
+  of silently hanging, and the worker can retry on timeout (e.g. if the
+  broker was down or restarting when it first announced). The handshake is
+  idempotent, so retries are safe.
+
+  For backward compatibility, a plain fire-and-forget ``publish`` (no reply
+  inbox) still triggers a ``CRYPTO_LEVERAGE_INIT`` broadcast on the shared
+  SYSTEM subject; in that mode failures can only be logged, not signalled
+  back to the worker.
+
+  The broker's own outgoing SYSTEM messages are filtered by action so it
+  never reacts to them (replies go to private inboxes and are never received
+  here).
 """
 
 from __future__ import annotations
@@ -137,24 +153,48 @@ class SystemEventConsumer:
     log.info("NATS system listener stopped.")
 
   async def handle_subject_system(self, msg) -> None:
-    """Handle incoming SYSTEM events from the NATS subject."""
+    """Handle an inbound SYSTEM event.
+
+    When the message carries a reply inbox (``msg.reply`` — the worker used NATS
+    ``request``) every outcome is answered on that inbox so the worker's request
+    resolves and it can retry on timeout. Without a reply inbox the broker falls
+    back to broadcasting ``CRYPTO_LEVERAGE_INIT`` on the SYSTEM subject.
+    """
     raw = msg.data.decode()
+    reply_to = getattr(msg, "reply", "") or ""
+
     try:
       data = json.loads(raw)
     except json.JSONDecodeError as exc:
       log.error("SYSTEM listener: malformed JSON: %s | raw=%s", exc, raw)
+      await self._reply_error(reply_to, None, "malformed JSON")
+      return
+
+    if not isinstance(data, dict):
+      # Valid JSON but not an object (e.g. a bare array or scalar); guard the
+      # .get() below so a stray payload can't crash the subscription callback.
+      log.error(
+        "SYSTEM listener: expected a JSON object, got %s | raw=%s",
+        type(data).__name__,
+        raw,
+      )
+      await self._reply_error(reply_to, None, "malformed JSON")
       return
 
     if data.get("action") != SystemActionEnum.WORKER_CONNECTED.value:
-      # Ignore our own outgoing messages (CRYPTO_LEVERAGE_INIT) and unknown
-      # actions; the broker only reacts to worker connect announcements. Peeking
-      # at the action first avoids logging validation errors for those.
+      # Ignore our own outgoing messages (CRYPTO_LEVERAGE_INIT and the ACK/ERROR
+      # replies) and unknown actions; the broker only reacts to worker connect
+      # announcements. Peeking at the action first avoids logging validation
+      # errors for those.
       return
 
     try:
       event = SystemWorkerConnectedSignal(**data)
     except ValidationError as exc:
       log.error("SYSTEM listener: invalid WORKER_CONNECTED: %s | raw=%s", exc, raw)
+      await self._reply_error(
+        reply_to, data.get("account_id"), "invalid WORKER_CONNECTED payload"
+      )
       return
 
     log.info(
@@ -166,12 +206,22 @@ class SystemEventConsumer:
 
     # Only crypto workers need leverage configuration pushed back on connect.
     if event.market != MarketEnum.CRYPTO.value:
+      # Acknowledge so a requesting worker's handshake resolves instead of
+      # timing out; nothing to configure for non-crypto markets.
+      await self._reply_ack(reply_to, event.account_id)
       return
 
-    await self._send_crypto_leverage_init(event.account_id)
+    await self._send_crypto_leverage_init(event.account_id, reply_to)
 
-  async def _send_crypto_leverage_init(self, account_id: str) -> None:
-    """Load crypto settings and publish CRYPTO_LEVERAGE_INIT for *account_id*."""
+  async def _send_crypto_leverage_init(
+    self, account_id: str, reply_to: str = ""
+  ) -> None:
+    """Load crypto settings and deliver CRYPTO_LEVERAGE_INIT for *account_id*.
+
+    Replies on *reply_to* when set (request/reply), otherwise broadcasts on the
+    SYSTEM subject. Missing or invalid settings produce an error reply so a
+    requesting worker is not left waiting.
+    """
     symbols_raw = await self._settings.get(CRYPTO_ALLOWED_SYMBOL_KEY)
     leverage_raw = await self._settings.get(CRYPTO_MAX_LEVERAGE_KEY)
 
@@ -185,6 +235,7 @@ class SystemEventConsumer:
         CRYPTO_MAX_LEVERAGE_KEY,
         leverage_raw,
       )
+      await self._reply_error(reply_to, account_id, "crypto settings not configured")
       return
 
     symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
@@ -197,6 +248,9 @@ class SystemEventConsumer:
         CRYPTO_MAX_LEVERAGE_KEY,
         leverage_raw,
       )
+      await self._reply_error(
+        reply_to, account_id, f"{CRYPTO_MAX_LEVERAGE_KEY} is not an integer"
+      )
       return
 
     try:
@@ -205,10 +259,42 @@ class SystemEventConsumer:
         account_id=account_id,
         symbols=symbols,
         default_leverage=default_leverage,
+        subject=reply_to or None,
       )
     except Exception as exc:
+      # NATS itself is unhappy, so we cannot reach the worker on the reply inbox
+      # either. Let the worker's request time out and retry rather than masking
+      # the failure behind a best-effort error reply that would also fail.
       log.exception(
         "Failed to publish CRYPTO_LEVERAGE_INIT for account_id=%s: %s",
         account_id,
         exc,
+      )
+
+  async def _reply_ack(self, reply_to: str, account_id: str) -> None:
+    """Acknowledge a handshake that needs no configuration. No-op when there is
+    no reply inbox (fire-and-forget publish)."""
+    if not reply_to:
+      return
+    try:
+      await self._publisher.publish_system_ack(subject=reply_to, account_id=account_id)
+    except Exception as exc:
+      log.warning(
+        "Failed to reply WORKER_CONNECTED_ACK account_id=%s: %s", account_id, exc
+      )
+
+  async def _reply_error(
+    self, reply_to: str, account_id: Optional[str], reason: str
+  ) -> None:
+    """Tell the worker its handshake could not be fulfilled. No-op when there is
+    no reply inbox (fire-and-forget publish)."""
+    if not reply_to:
+      return
+    try:
+      await self._publisher.publish_system_error(
+        subject=reply_to, account_id=account_id, reason=reason
+      )
+    except Exception as exc:
+      log.warning(
+        "Failed to reply WORKER_CONNECTED_ERROR account_id=%s: %s", account_id, exc
       )

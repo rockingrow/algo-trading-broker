@@ -28,6 +28,15 @@ class SystemActionEnum(str, Enum):
   # Outgoing (broker → worker)
   CRYPTO_LEVERAGE_INIT = "CRYPTO_LEVERAGE_INIT"
 
+  # Outgoing reply (broker → worker): acknowledges a WORKER_CONNECTED handshake
+  # that needs no further configuration (e.g. a non-crypto worker).
+  WORKER_CONNECTED_ACK = "WORKER_CONNECTED_ACK"
+
+  # Outgoing reply (broker → worker): the handshake was received but the broker
+  # could not build the initial configuration; the worker may surface the reason
+  # and/or retry.
+  WORKER_CONNECTED_ERROR = "WORKER_CONNECTED_ERROR"
+
   # Incoming (worker → broker): published by a worker right after it connects
   # to NATS to announce its presence and request initial configuration.
   WORKER_CONNECTED = "WORKER_CONNECTED"
@@ -165,3 +174,52 @@ class SystemWorkerConnectedSignal(SystemSignal):
   action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED
   market: MarketEnum = Field(..., description="Market the worker serves.")
   gateway: str = Field(..., description="Gateway/broker the worker uses.")
+
+
+class SystemWorkerConnectedAck(SystemSignal):
+  """Broker → worker reply confirming a WORKER_CONNECTED handshake that needs no
+  further configuration (e.g. a non-crypto worker).
+
+  Sent on the request's reply inbox so a worker that used NATS ``request`` gets a
+  definitive answer instead of timing out.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "WORKER_CONNECTED_ACK",
+        "account_id": "FOREX-MT5-12345678",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED_ACK
+
+
+class SystemWorkerConnectedError(SystemSignal):
+  """Broker → worker reply signalling the handshake was received but the broker
+  could not build the initial configuration (missing/invalid settings, an
+  unreadable payload, …).
+
+  Sent on the request's reply inbox so the worker can surface ``reason`` and/or
+  retry. ``account_id`` is optional because a payload may be too malformed to
+  identify the worker.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "WORKER_CONNECTED_ERROR",
+        "account_id": "CRYPTO-BINANCE-7654321",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "reason": "crypto settings not configured",
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED_ERROR
+  account_id: Optional[str] = None
+  reason: str = Field(..., description="Human-readable failure reason.")

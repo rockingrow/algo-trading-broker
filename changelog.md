@@ -54,6 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   affects the other. Both fall back to `TELEGRAM_BOT_TOKEN` /
   `TELEGRAM_CHAT_ID` when left empty.
 - `ERROR_ALERT` (🚨) emoji constant prefixing each forwarded error log.
+- **`SYSTEM` handshake request/reply** — Workers may announce themselves with
+  NATS request/reply; the broker now replies directly on the request's inbox
+  with the handshake outcome instead of only broadcasting. Adds the
+  `WORKER_CONNECTED_ACK` (non-crypto workers) and `WORKER_CONNECTED_ERROR`
+  (missing/invalid settings, carrying a `reason`) actions with matching
+  `SystemWorkerConnectedAck` / `SystemWorkerConnectedError` schemas, plus
+  `NatsPublisher.publish_system_ack` / `publish_system_error` and their
+  `SignalPublisher` protocol entries. This lets a worker that connected while
+  the broker was down time out and retry (the handshake is idempotent) rather
+  than silently missing its configuration, and gives every outcome explicit
+  feedback. Example payloads: `examples/nats/system.worker_connected_ack.json`,
+  `examples/nats/system.worker_connected_error.json`.
 
 ### Changed
 
@@ -77,6 +89,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SystemEventConsumer` now peeks at the `action` field before validating,
   so its own echoed `CRYPTO_LEVERAGE_INIT` messages no longer log a
   validation error.
+- **`CRYPTO_LEVERAGE_INIT` delivered to the requester when possible** —
+  `NatsPublisher.publish_system_signal` takes an optional `subject`; when a
+  `WORKER_CONNECTED` arrives via request/reply the response is sent to that
+  worker's reply inbox instead of fanning out on the shared `SYSTEM` subject.
+  Fire-and-forget announcements still broadcast on `SYSTEM` unchanged.
 
 ## [1.0.5] - 2026-06-25
 

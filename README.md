@@ -155,7 +155,24 @@ When a worker successfully connects to NATS, it announces itself on the `SYSTEM`
 }
 ```
 
-Only crypto workers (`market == "CRYPTO"`) get a response — other markets are logged and otherwise ignored. For a crypto worker, the broker loads the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows and publishes a `CRYPTO_LEVERAGE_INIT` message back on `SYSTEM`:
+#### Request/reply (recommended)
+
+Workers should announce themselves with **NATS request/reply** (`nc.request(...)`) rather than a fire-and-forget publish. The broker replies **directly on the request's inbox** with the outcome of the handshake, so:
+
+- the reply reaches only the worker that asked (no fan-out to every `SYSTEM` subscriber), and
+- the worker's `request` **always resolves** — on success, on a no-op, or on an error — instead of hanging.
+
+Because the reply is worker-driven, a worker that connects while the broker is **down or restarting** simply **times out and retries**; the handshake is idempotent, so retries are safe. This closes the delivery gap of plain fire-and-forget pub/sub, where a `WORKER_CONNECTED` published before the broker's subscription was active would be lost silently.
+
+The broker answers with one of three actions:
+
+| Situation | Reply action | Payload |
+| --------- | ------------ | ------- |
+| Crypto worker, settings loaded | `CRYPTO_LEVERAGE_INIT` | `symbols`, `default_leverage` |
+| Non-crypto worker | `WORKER_CONNECTED_ACK` | — (nothing to configure) |
+| Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
+
+For a crypto worker, the broker loads the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows and replies with `CRYPTO_LEVERAGE_INIT`:
 
 ```json
 {
@@ -167,7 +184,22 @@ Only crypto workers (`market == "CRYPTO"`) get a response — other markets are 
 }
 ```
 
-The broker filters its own `CRYPTO_LEVERAGE_INIT` messages by `action` so the loop terminates on the worker.
+If the crypto settings are missing or invalid, the worker gets an explicit error it can log or retry on, instead of silently receiving nothing:
+
+```json
+{
+  "action": "WORKER_CONNECTED_ERROR",
+  "account_id": "CRYPTO-BINANCE-7654321",
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "reason": "crypto settings not configured"
+}
+```
+
+#### Fire-and-forget (backward compatible)
+
+A worker may still `publish` `WORKER_CONNECTED` without a reply inbox. In that case the broker broadcasts `CRYPTO_LEVERAGE_INIT` on the shared `SYSTEM` subject for crypto workers (workers filter by `account_id`); non-crypto and error outcomes can only be logged, not signalled back. Request/reply is preferred precisely because it removes those blind spots.
+
+The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `WORKER_CONNECTED_ACK`, `WORKER_CONNECTED_ERROR`) by `action`, so it never reacts to its own messages.
 
 ---
 
