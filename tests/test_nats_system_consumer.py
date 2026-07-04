@@ -1,21 +1,23 @@
 import json
 
+from broker.constants import CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY
 from broker.schemas.publisher_schema import PublishTopicEnum, SystemActionEnum
-from broker.services.nats_service import (
-  CRYPTO_ALLOWED_SYMBOL_KEY,
-  CRYPTO_MAX_LEVERAGE_KEY,
-  SystemEventConsumer,
-)
+from broker.services.nats_service import SystemEventConsumer
 
 
 class FakeSettingRepo:
   def __init__(self, values: dict[str, str | None] | None = None):
     self._values = values or {}
     self.get_calls: list[str] = []
+    self.get_many_calls: list[list[str]] = []
 
   async def get(self, key: str) -> str | None:
     self.get_calls.append(key)
     return self._values.get(key)
+
+  async def get_many(self, keys: list[str]) -> dict[str, str]:
+    self.get_many_calls.append(list(keys))
+    return {k: v for k, v in self._values.items() if k in keys and v is not None}
 
   async def set(self, key: str, value: str) -> bool:
     self._values[key] = value
@@ -202,6 +204,34 @@ async def test_non_integer_leverage_skips_publish():
   assert publisher.calls == []
 
 
+async def test_zero_leverage_skips_publish():
+  consumer, _repo, publisher = _make_consumer(
+    settings={CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH", CRYPTO_MAX_LEVERAGE_KEY: "0"}
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert publisher.calls == []
+
+
+async def test_negative_leverage_skips_publish():
+  consumer, _repo, publisher = _make_consumer(
+    settings={CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH", CRYPTO_MAX_LEVERAGE_KEY: "-5"}
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert publisher.calls == []
+
+
+async def test_negative_leverage_with_reply_inbox_gets_error():
+  consumer, _repo, publisher = _make_consumer(
+    settings={CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH", CRYPTO_MAX_LEVERAGE_KEY: "-5"}
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.err")
+  )
+  assert publisher.calls == []
+  assert len(publisher.errors) == 1
+  assert "positive" in publisher.errors[0]["reason"]
+
+
 async def test_symbols_are_trimmed_and_filtered():
   consumer, _repo, publisher = _make_consumer(
     settings={CRYPTO_ALLOWED_SYMBOL_KEY: " BTC ,, ETH ", CRYPTO_MAX_LEVERAGE_KEY: "5"}
@@ -358,17 +388,22 @@ async def test_second_handshake_within_ttl_reuses_cached_settings():
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
 
-  # Both handshakes got a reply, but the DB was only read once per key.
+  # Both handshakes got a reply, but the DB was only queried once.
   assert len(publisher.calls) == 2
-  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
-  assert repo.get_calls.count(CRYPTO_MAX_LEVERAGE_KEY) == 1
+  assert len(repo.get_many_calls) == 1
+  # get() (the non-atomic, per-key path) must not be used at all.
+  assert repo.get_calls == []
 
 
-async def test_cache_miss_fetches_both_settings():
+async def test_cache_miss_fetches_both_settings_in_one_query():
   consumer, repo, _publisher = _make_consumer()
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
 
-  assert repo.get_calls == [CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY]
+  assert len(repo.get_many_calls) == 1
+  assert set(repo.get_many_calls[0]) == {
+    CRYPTO_ALLOWED_SYMBOL_KEY,
+    CRYPTO_MAX_LEVERAGE_KEY,
+  }
 
 
 async def test_cache_expires_after_ttl(monkeypatch):
@@ -379,17 +414,17 @@ async def test_cache_expires_after_ttl(monkeypatch):
   )
 
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
+  assert len(repo.get_many_calls) == 1
 
   # Still within the TTL window: no re-fetch.
   clock["now"] += 1.0
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
+  assert len(repo.get_many_calls) == 1
 
   # Past the TTL: the next handshake re-reads the settings.
   clock["now"] += 30.0
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 2
+  assert len(repo.get_many_calls) == 2
   assert len(publisher.calls) == 3
 
 
@@ -402,7 +437,7 @@ async def test_missing_settings_are_also_cached():
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
 
-  assert repo.get_calls.count(CRYPTO_ALLOWED_SYMBOL_KEY) == 1
+  assert len(repo.get_many_calls) == 1
   assert publisher.calls == []
 
 

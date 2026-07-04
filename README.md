@@ -347,6 +347,8 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/block-signal` | `X-API-KEY` |
 | `POST /admin/settings/silent-signal` | `X-API-KEY` |
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
+| `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
+| `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
 
 ---
@@ -515,6 +517,38 @@ Toggles the `NOTIFICATION_INCLUDE_SIGNAL_RAW` setting. When enabled (`"1"`), Tel
 
 ---
 
+### POST `/admin/settings/crypto-allowed-symbol`
+
+Sets the `crypto_allowed_symbol` broker setting pushed to crypto workers via `SYSTEM.CRYPTO_LEVERAGE_INIT`. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "symbols": ["BTC", "ETH"]
+}
+```
+
+Symbols are upper-cased, trimmed, and de-duplicated before being stored as a comma-separated string. At least one non-empty symbol is required (`422` otherwise). Because `SystemEventConsumer` caches this setting for up to 30s (see the `SYSTEM` handshake section above), a worker connecting immediately after this call may still receive the previous value.
+
+---
+
+### POST `/admin/settings/crypto-max-leverage`
+
+Sets the `crypto_max_leverage` broker setting pushed to crypto workers via `SYSTEM.CRYPTO_LEVERAGE_INIT`. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "default_leverage": 10
+}
+```
+
+`default_leverage` must be a positive integer (`422` otherwise). Subject to the same up-to-30s cache as `crypto-allowed-symbol`.
+
+---
+
 ### POST `/admin/flat`
 
 Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
@@ -602,17 +636,17 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | ------- | ------------ | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `key` | String(255) | Setting key (see known keys below) |
-| `value` | String(255) | Setting value (`"0"` / `"1"` for flags) |
+| `value` | Text | Setting value (`"0"` / `"1"` for flags) |
 
 **Known setting keys:**
 
-| Key | Default | Description |
-| --- | ------- | ----------- |
-| `signal_blocked` | `"0"` | Pause signal forwarding to workers |
-| `silent_signal` | `"0"` | Mute Telegram signal notifications |
-| `notification_include_signal_raw` | `"0"` | Append indicators/inputs to notifications |
-| `crypto_allowed_symbol` | `"BTC,ETH"` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
-| `crypto_max_leverage` | `"10"` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
+| Key | Default | Admin endpoint | Description |
+| --- | ------- | --------------- | ----------- |
+| `signal_blocked` | `"0"` | `POST /admin/settings/block-signal` | Pause signal forwarding to workers |
+| `silent_signal` | `"0"` | `POST /admin/settings/silent-signal` | Mute Telegram signal notifications |
+| `notification_include_signal_raw` | `"0"` | `POST /admin/settings/include-signal-raw` | Append indicators/inputs to notifications |
+| `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
+| `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 
 ---
 

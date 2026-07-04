@@ -94,15 +94,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WORKER_CONNECTED` arrives via request/reply the response is sent to that
   worker's reply inbox instead of fanning out on the shared `SYSTEM` subject.
   Fire-and-forget announcements still broadcast on `SYSTEM` unchanged.
-- **Crypto settings read concurrently and cached briefly** — nats-py runs one
+- **Crypto settings read atomically and cached briefly** — nats-py runs one
   task per subscription and awaits each callback to completion before
   pulling the next message, so a reconnect storm serializes
   `WORKER_CONNECTED` handshakes on `SYSTEM` rather than running them in
-  parallel. `SystemEventConsumer._get_crypto_settings` now fetches
-  `crypto_allowed_symbol` and `crypto_max_leverage` with `asyncio.gather`
-  instead of two sequential round trips, and caches the result (hit or miss)
-  for `CRYPTO_SETTINGS_CACHE_TTL_SECONDS` (30s) so a burst of simultaneous
-  reconnects reads the DB once instead of once per worker.
+  parallel. `SettingRepository` gains `get_many(keys)`, implemented as a
+  single `WHERE key IN (...)` query; `SystemEventConsumer._get_crypto_settings`
+  uses it to fetch `crypto_allowed_symbol` and `crypto_max_leverage` in one
+  round trip instead of two, and caches the result (hit or miss) for
+  `CRYPTO_SETTINGS_CACHE_TTL_SECONDS` (30s) so a burst of simultaneous
+  reconnects reads the DB once instead of once per worker. The single query
+  also makes the read atomic — both values reflect the same snapshot even if
+  an admin call lands between what used to be two separate reads.
+- **Reject non-positive `crypto_max_leverage`** — `SystemEventConsumer` now
+  treats a parsed `default_leverage <= 0` the same as a non-integer value:
+  it skips the `CRYPTO_LEVERAGE_INIT` publish and, on request/reply, answers
+  with `WORKER_CONNECTED_ERROR` instead of pushing a nonsensical leverage to
+  a crypto worker.
+- **Admin endpoints for the crypto settings** —
+  `POST /admin/settings/crypto-allowed-symbol` (body: `{"symbols": [...]}`,
+  upper-cased/trimmed/de-duplicated, rejects an empty list) and
+  `POST /admin/settings/crypto-max-leverage` (body:
+  `{"default_leverage": <int>}`, rejects non-positive values) let these two
+  settings be changed without touching the DB directly, matching the
+  `block-signal` / `silent-signal` / `include-signal-raw` pattern. Adds
+  `CryptoAllowedSymbolRequest`, `CryptoMaxLeverageRequest`, and
+  `SettingValueResponse` to `admin_schema.py`.
+
+### Fixed
+
+- **`broker_settings.value` widened to `Text`** — Was `String(255)`, too
+  narrow for a growing `crypto_allowed_symbol` list. Edited directly in the
+  `54892682ef32` migration that creates the table (not a new migration) since
+  the column has never held more than a handful of characters in practice and
+  the target database is being wiped and re-migrated from scratch; the ORM
+  model is updated to match. A deployment that already ran this migration and
+  needs to keep its data would need a real `ALTER COLUMN` migration instead.
 
 ## [1.0.5] - 2026-06-25
 

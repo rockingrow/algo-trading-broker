@@ -44,13 +44,13 @@ messages:
   awaits each callback to completion before pulling the next message off the
   queue), so a reconnect storm serializes its WORKER_CONNECTED handshakes
   rather than running them concurrently. The two crypto BrokerSetting reads
-  are cached briefly (``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``) so that burst
-  doesn't turn into one DB round trip pair per worker.
+  are combined into a single ``get_many`` query and cached briefly
+  (``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``) so that burst doesn't turn into one
+  DB round trip per worker.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from typing import Optional
@@ -58,6 +58,7 @@ from typing import Optional
 from nats.aio.subscription import Subscription
 from pydantic import ValidationError
 
+from broker.constants import CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY
 from broker.interfaces import SettingRepository, SignalPublisher, TradeRepository
 from broker.logger import get_logger
 from broker.nats import NatsClient, nats_client
@@ -71,17 +72,15 @@ from broker.schemas.trade_event_schema import PositionEvent
 
 log = get_logger(__name__)
 
-CRYPTO_ALLOWED_SYMBOL_KEY = "crypto_allowed_symbol"
-CRYPTO_MAX_LEVERAGE_KEY = "crypto_max_leverage"
-
 # nats-py runs one asyncio task per subscription, pulling messages off an
 # internal queue and awaiting the callback to completion before pulling the
 # next one — WORKER_CONNECTED handshakes on SYSTEM are therefore processed
 # one at a time, not concurrently. A reconnect storm (NATS/broker restart)
 # can queue up dozens of these back-to-back, so caching the two crypto
 # settings briefly keeps that burst from re-reading the DB on every single
-# handshake. These settings have no admin-facing update endpoint today, so a
-# short TTL is a safe trade-off between freshness and load.
+# handshake. These settings can be changed via POST /admin/settings/crypto-*,
+# so a short TTL is a deliberate trade-off between freshness and load: an
+# admin update reaches new handshakes within CRYPTO_SETTINGS_CACHE_TTL_SECONDS.
 CRYPTO_SETTINGS_CACHE_TTL_SECONDS = 30.0
 
 
@@ -273,6 +272,18 @@ class SystemEventConsumer:
       )
       return
 
+    if default_leverage <= 0:
+      log.error(
+        "SYSTEM CRYPTO_LEVERAGE_INIT skipped account_id=%s: %s must be positive, got %r",
+        account_id,
+        CRYPTO_MAX_LEVERAGE_KEY,
+        leverage_raw,
+      )
+      await self._reply_error(
+        reply_to, account_id, f"{CRYPTO_MAX_LEVERAGE_KEY} must be a positive integer"
+      )
+      return
+
     try:
       await self._publisher.publish_system_signal(
         action=SystemActionEnum.CRYPTO_LEVERAGE_INIT,
@@ -295,12 +306,13 @@ class SystemEventConsumer:
     """Return (symbols_raw, leverage_raw), reusing a cached read for up to
     ``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``.
 
-    On a cache miss, both settings are fetched concurrently via
-    ``asyncio.gather`` instead of two sequential round trips. Both hits and
-    misses are cached (there is no admin endpoint that updates these settings
-    today, so treating "not configured" as cacheable too keeps the fix
-    simple); worst case an operator who just fixed the DB row waits up to the
-    TTL for it to take effect on the next handshake.
+    On a cache miss, both settings are fetched with a single ``get_many`` query
+    instead of one round trip per key — this is also what makes the read
+    atomic: both values reflect the same DB snapshot, so a concurrent
+    ``/admin/settings/crypto-*`` write can never land between the two reads.
+    Both hits and misses are cached; worst case an operator who just changed a
+    setting via the admin API waits up to the TTL for it to reach the next
+    handshake.
     """
     now = time.monotonic()
     if (
@@ -309,10 +321,11 @@ class SystemEventConsumer:
     ):
       return self._crypto_settings_cache
 
-    symbols_raw, leverage_raw = await asyncio.gather(
-      self._settings.get(CRYPTO_ALLOWED_SYMBOL_KEY),
-      self._settings.get(CRYPTO_MAX_LEVERAGE_KEY),
+    values = await self._settings.get_many(
+      [CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY]
     )
+    symbols_raw = values.get(CRYPTO_ALLOWED_SYMBOL_KEY)
+    leverage_raw = values.get(CRYPTO_MAX_LEVERAGE_KEY)
     self._crypto_settings_cache = (symbols_raw, leverage_raw)
     self._crypto_settings_cached_at = now
     return self._crypto_settings_cache

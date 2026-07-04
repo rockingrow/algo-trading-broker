@@ -63,6 +63,23 @@ class SqlAlchemySettingRepository:
       log.exception("Failed to read broker setting key=%s: %s", key, exc)
       return None
 
+  async def get_many(self, keys: list[str]) -> dict[str, str]:
+    """Return {key: value} for every *keys* found in a single round trip;
+    keys with no row are omitted (callers distinguish "missing" via absence).
+
+    A single query also makes the read atomic under Postgres MVCC — every key
+    reflects the same snapshot, unlike issuing one `get()` per key.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BrokerSetting).where(BrokerSetting.key.in_(keys))
+        )
+        return {row.key: row.value for row in result.scalars().all()}
+    except Exception as exc:
+      log.exception("Failed to read broker settings keys=%s: %s", keys, exc)
+      return {}
+
   async def set(self, key: str, value: str) -> bool:
     """Upsert a broker_settings row. Returns True on success, False on error."""
     try:

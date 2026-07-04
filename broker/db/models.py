@@ -17,6 +17,7 @@ from sqlalchemy import (
   Enum,
   Numeric,
   String,
+  Text,
   func,
   Integer,
   UniqueConstraint,
@@ -175,7 +176,7 @@ class BrokerSetting(Base):
   __table_args__ = (UniqueConstraint("key", name="uq_broker_settings_key"),)
 
   key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-  value: Mapped[str] = mapped_column(String(255), nullable=False)
+  value: Mapped[str] = mapped_column(Text, nullable=False)
 
   def __repr__(self) -> str:
     return f"<BrokerSetting id={self.id} key={self.key} value={self.value}>"
