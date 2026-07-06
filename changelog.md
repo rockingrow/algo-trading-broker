@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - Unreleased
+
+### Added
+
+- **`notification_timezone` broker setting** — Seeded to `"7"` via Alembic
+  migration `e3c4d5f6a7b8`. UTC offset (in hours) applied to the `Time:` line
+  of Telegram notifications; defaults to UTC+7.
+- **`POST /admin/settings/notification-timezone`** — Sets `notification_timezone`.
+  Requires `X-API-KEY`; `utc_offset_hours` must be between `-12` and `14`.
+
+### Changed
+
+- **Telegram `Time:` line now shows its timezone** — Signal and FLAT
+  notifications render as `Time: <time> (UTC+N)` instead of a bare
+  timestamp. The signal's timestamp is normalised to UTC first (naive
+  TradingView timestamps are treated as UTC; aware timestamps are converted),
+  then shifted to the configured `notification_timezone` (default UTC+7)
+  before formatting.
+
 ## [1.0.6] - 2026-07-05
 
 ### Added
@@ -216,6 +235,7 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
+[1.0.7]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.3...v1.0.4

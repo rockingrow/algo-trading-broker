@@ -43,3 +43,15 @@ class CryptoMaxLeverageRequest(BaseModel):
   default_leverage: int = Field(
     ..., gt=0, description="Default leverage pushed to crypto workers on connect."
   )
+
+
+class NotificationTimezoneRequest(BaseModel):
+  """Request body for POST /settings/notification-timezone."""
+
+  utc_offset_hours: float = Field(
+    ...,
+    ge=-12,
+    le=14,
+    description="UTC offset in hours applied to the 'Time:' line of Telegram "
+    "notifications, e.g. 7 for UTC+7.",
+  )
