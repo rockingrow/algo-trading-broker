@@ -7,10 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-# Broker setting default (`notification_timezone`): TradingView alert
-# timestamps are shown in Telegram as UTC+7 (Asia/Ho_Chi_Minh) unless
-# overridden via POST /admin/settings/notification-timezone.
-DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS = 7.0
+from broker.settings import settings
 
 _TIME_FMT = "%Y-%m-%d %H:%M:%S"
 _MAX_ABS_OFFSET_HOURS = 24  # datetime.timezone requires |offset| < 24h
@@ -39,7 +36,7 @@ def parse_offset_hours(raw: str | None) -> float:
       hours = None
     if hours is not None and abs(hours) < _MAX_ABS_OFFSET_HOURS:
       return hours
-  return DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS
+  return settings.DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS
 
 
 def format_offset_value(hours: float) -> str:

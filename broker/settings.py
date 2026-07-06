@@ -77,6 +77,11 @@ class Settings(BaseSettings):
   TELEGRAM_LOG_CHAT_ID: str = ""
   TELEGRAM_LOG_BOT_TOKEN: str = ""
 
+  # ── Notifications ────────────────────────────────────────────────
+  # Fallback UTC offset (hours) used to render Telegram notification
+  # timestamps when the `notification_timezone` broker setting is unset.
+  DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS: float = 7.0
+
   @property
   def postgres_dsn(self) -> str:
     return (

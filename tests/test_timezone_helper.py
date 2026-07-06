@@ -1,12 +1,16 @@
 from datetime import datetime, timedelta, timezone
 
 from broker.helpers.timezone_helper import (
-  DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS,
   format_notification_time,
   format_offset_value,
   format_utc_label,
   parse_offset_hours,
   to_utc,
+)
+from broker.settings import settings
+
+DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS = (
+  settings.DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS
 )
 
 
