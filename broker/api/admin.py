@@ -6,16 +6,19 @@ from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_INCLUDE_SIGNAL_RAW,
+  NOTIFICATION_TIMEZONE_KEY,
   SIGNAL_BLOCKED,
   SILENT_SIGNAL,
 )
 from broker.helpers import emoji_constants as em
+from broker.helpers.timezone_helper import format_offset_value, format_utc_label
 from broker.providers import get_admin_notifier, get_publisher, get_setting_repository
 from broker.interfaces import Notifier, SettingRepository, SignalPublisher
 from broker.schemas.admin_schema import (
   AdminResponse,
   CryptoAllowedSymbolRequest,
   CryptoMaxLeverageRequest,
+  NotificationTimezoneRequest,
   SettingToggleResponse,
   SettingValueResponse,
   FlatRequest,
@@ -216,6 +219,40 @@ def get_admin_router() -> APIRouter:
     )
 
     return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
+
+  @router.post(
+    "/settings/notification-timezone",
+    tags=["settings"],
+    summary="Set the notification display timezone",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_notification_timezone(
+    body: NotificationTimezoneRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingValueResponse:
+    """Set NOTIFICATION_TIMEZONE_KEY, the UTC offset (in hours) applied to the
+    "Time:" line of Telegram notifications. Falls back to UTC+7 when unset."""
+    value = format_offset_value(body.utc_offset_hours)
+
+    ok = await setting_repo.set(NOTIFICATION_TIMEZONE_KEY, value)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broker setting",
+      )
+
+    log.info("%s updated -> %s", NOTIFICATION_TIMEZONE_KEY, value)
+    await notifier.send_message(
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
+      f"Setting: <code>{NOTIFICATION_TIMEZONE_KEY}</code>\n"
+      f"Notification timezone: <b>{format_utc_label(body.utc_offset_hours)}</b>\n"
+    )
+
+    return SettingValueResponse(setting=NOTIFICATION_TIMEZONE_KEY, value=value)
 
   @router.post(
     "/flat",

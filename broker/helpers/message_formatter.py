@@ -10,9 +10,8 @@ from broker.constants import SIGNAL_BLOCKED
 from broker.helpers import emoji_constants as em
 from broker.helpers.signal_helper import action_to_emoji
 from broker.helpers.timeframe_helper import format_timeframe
+from broker.helpers.timezone_helper import format_notification_time
 from broker.schemas.webhook_schema import WebhookPayload
-
-_TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
 
 def _header(payload: WebhookPayload) -> str:
@@ -22,13 +21,15 @@ def _header(payload: WebhookPayload) -> str:
   )
 
 
-def format_flat_message(payload: WebhookPayload) -> str:
+def format_flat_message(
+  payload: WebhookPayload, *, timezone_offset: str | None = None
+) -> str:
   """Telegram body for a FLAT (close-all) directive."""
   return (
     f"{_header(payload)}"
     f"Strategy: <b>{payload.strategy}</b>\n"
     f"Action: <b>FLAT</b>\n"
-    f"Time: {payload.timestamp.strftime(_TIME_FMT)}\n"
+    f"Time: {format_notification_time(payload.timestamp, timezone_offset)}\n"
   )
 
 
@@ -74,7 +75,12 @@ def _format_position_flags_section(payload: WebhookPayload) -> str:
   return f"{divider}\n" + "\n".join(lines) + f"\n{divider}\n"
 
 
-def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False) -> str:
+def format_signal_message(
+  payload: WebhookPayload,
+  *,
+  include_raw: bool = False,
+  timezone_offset: str | None = None,
+) -> str:
   """Telegram body for a normal entry / target / stop signal."""
   pos = payload.position
   risk_percent = (
@@ -97,7 +103,7 @@ def format_signal_message(payload: WebhookPayload, *, include_raw: bool = False)
     f"Quantity: <code>{pos.quantity}</code>{risk_str}\n"
     f"SL: <code>{pos.sl}</code> | TP1: <code>{pos.tp1}</code> | "
     f"TP2: <code>{pos.tp2}</code>\n"
-    f"Time: {payload.timestamp.strftime(_TIME_FMT)}\n"
+    f"Time: {format_notification_time(payload.timestamp, timezone_offset)}\n"
   )
   flags = _format_position_flags_section(payload)
   raw = _format_raw_section(payload) if include_raw else ""

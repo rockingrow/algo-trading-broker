@@ -349,6 +349,7 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
 | `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
 | `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
+| `POST /admin/settings/notification-timezone` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
 
 ---
@@ -549,6 +550,22 @@ Sets the `crypto_max_leverage` broker setting pushed to crypto workers via `SYST
 
 ---
 
+### POST `/admin/settings/notification-timezone`
+
+Sets the `notification_timezone` broker setting: the UTC offset (in hours) applied to the `Time:` line of Telegram notifications. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "utc_offset_hours": 7
+}
+```
+
+`utc_offset_hours` must be between `-12` and `14` (`422` otherwise). Signal timestamps are normalised to UTC first, then shifted by this offset before formatting, e.g. `Time: 2026-07-06 12:55:00 (UTC+7)`. Defaults to `7` (UTC+7) when unset.
+
+---
+
 ### POST `/admin/flat`
 
 Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
@@ -647,6 +664,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `notification_include_signal_raw` | `"0"` | `POST /admin/settings/include-signal-raw` | Append indicators/inputs to notifications |
 | `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
+| `notification_timezone` | `"7"` | `POST /admin/settings/notification-timezone` | UTC offset (hours) applied to the `Time:` line of Telegram notifications |
 
 ---
 

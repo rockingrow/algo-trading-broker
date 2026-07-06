@@ -54,7 +54,34 @@ def test_flat_message_contents():
   )
   assert "Action: <b>FLAT</b>" in msg
   assert "Strategy: <b>strat</b>" in msg
-  assert "2026-01-01 12:30:00" in msg
+  assert "Time: 2026-01-01 19:30:00 (UTC+7)" in msg
+
+
+# ── Time formatting ─────────────────────────────────────────────────
+
+
+def test_time_defaults_to_utc_plus_7():
+  msg = format_signal_message(_payload())
+  assert "Time: 2026-01-01 19:30:00 (UTC+7)" in msg
+
+
+def test_time_honors_custom_timezone_offset():
+  msg = format_signal_message(_payload(), timezone_offset="-5")
+  assert "Time: 2026-01-01 07:30:00 (UTC-5)" in msg
+
+
+def test_time_normalises_naive_timestamp_as_utc():
+  payload = _payload(timestamp=datetime(2026, 1, 1, 12, 30, 0))
+  msg = format_signal_message(payload)
+  assert "Time: 2026-01-01 19:30:00 (UTC+7)" in msg
+
+
+def test_flat_message_time_honors_custom_timezone_offset():
+  msg = format_flat_message(
+    _payload(position=PositionSchema(action=SignalActionEnum.FLAT)),
+    timezone_offset="0",
+  )
+  assert "Time: 2026-01-01 12:30:00 (UTC+0)" in msg
 
 
 # ── Signal message ─────────────────────────────────────────────────

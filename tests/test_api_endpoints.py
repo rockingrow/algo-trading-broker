@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
+  NOTIFICATION_TIMEZONE_KEY,
   SIGNAL_BLOCKED,
 )
 from broker.db.models import Account, Trade
@@ -403,6 +404,61 @@ def test_set_crypto_max_leverage_persist_failure_returns_500(ctx):
   resp = ctx["client"].post(
     "/admin/settings/crypto-max-leverage",
     json={"default_leverage": 10},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 500
+
+
+# ── Admin settings — notification timezone ──────────────────────────
+
+
+def test_set_notification_timezone(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 9},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == NOTIFICATION_TIMEZONE_KEY
+  assert body["value"] == "9"
+  assert ctx["setting_repo"].values[NOTIFICATION_TIMEZONE_KEY] == "9"
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_notification_timezone_accepts_fractional_offset(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 5.5},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "5.5"
+
+
+def test_set_notification_timezone_rejects_above_range(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 15},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_notification_timezone_rejects_below_range(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": -13},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_notification_timezone_persist_failure_returns_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 7},
     headers={"X-API-KEY": API_KEY},
   )
   assert resp.status_code == 500
