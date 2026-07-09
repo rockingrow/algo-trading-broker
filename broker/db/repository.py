@@ -46,6 +46,20 @@ class SqlAlchemyAccountRepository:
       log.exception("Failed to fetch accounts: %s", exc)
       return []
 
+  async def get_by_market(self, market: MarketTypeEnum) -> list[Account]:
+    """Return accounts in *market* ordered by last_activity_at desc."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account)
+          .where(Account.market_type == market)
+          .order_by(Account.last_activity_at.desc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception("Failed to fetch accounts for market=%s: %s", market, exc)
+      return []
+
 
 class SqlAlchemySettingRepository:
   """Reads and upserts rows in the ``broker_settings`` table."""
@@ -176,6 +190,8 @@ class SqlAlchemyTradeRepository:
       if event.account_name is not None:
         row.account_name = event.account_name
       row.market_type = MarketTypeEnum(event.market_type)
+      if event.gateway is not None:
+        row.gateway = event.gateway
       if event.account_balance is not None:
         row.account_balance = event.account_balance
       row.last_activity_at = now
@@ -187,6 +203,7 @@ class SqlAlchemyTradeRepository:
           account_name=event.account_name,
           account_balance=event.account_balance,
           market_type=MarketTypeEnum(event.market_type),
+          gateway=event.gateway,
           last_activity_at=now,
         )
       )

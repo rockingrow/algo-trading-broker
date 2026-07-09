@@ -42,16 +42,6 @@ class SystemActionEnum(str, Enum):
   WORKER_CONNECTED = "WORKER_CONNECTED"
 
 
-# Sentinel worker id for a SYSTEM message addressed to *every* crypto worker
-# rather than one specific worker. The broker stamps this on the
-# CRYPTO_LEVERAGE_INIT it broadcasts on the shared SYSTEM subject after an admin
-# changes a crypto setting (POST /admin/settings/crypto-*), so every connected
-# crypto worker applies the new config immediately instead of waiting for its
-# next WORKER_CONNECTED handshake. It is deliberately not in the
-# <market>-<gateway>-<account_id> worker-id format; workers treat it as "for me".
-SYSTEM_BROADCAST_ACCOUNT_ID = "*"
-
-
 class ScalingSchema(BaseModel):
   """Scaling block carrying the target levels and size used when scaling an existing position."""
 

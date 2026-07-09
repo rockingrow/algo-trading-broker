@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
+  Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
+  for crypto). Nullable; populated from the `TRADE` event and surfaced on
+  `GET /v1/accounts`. Combined with `market_type` and `account_id` it forms the
+  `<market>-<gateway>-<account_id>` worker id used to address `SYSTEM` messages.
+- **`gateway` on the `TRADE` (`PositionEvent`) payload** — Workers may report the
+  account's exchange; the broker upserts it onto the `accounts` row.
 - **`notification_timezone` broker setting** — Seeded to `"7"` via Alembic
   migration `e3c4d5f6a7b8`. UTC offset (in hours) applied to the `Time:` line
   of Telegram notifications; defaults to UTC+7.
@@ -17,15 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Admin crypto settings now push live to connected workers** — `POST
+- **Admin crypto settings now push live to each crypto worker** — `POST
   /admin/settings/crypto-allowed-symbol` and `POST
-  /admin/settings/crypto-max-leverage` broadcast a `SYSTEM`
-  `CRYPTO_LEVERAGE_INIT` (with the wildcard `account_id` `"*"`) to every
-  connected crypto worker after persisting the change, so the new
-  symbols/leverage apply immediately instead of only on the next
-  `WORKER_CONNECTED` handshake. The broadcast carries both settings read back
-  from the DB; it is skipped and logged when the complementary setting is
-  missing or invalid, and the endpoint still returns `200`.
+  /admin/settings/crypto-max-leverage` send a `SYSTEM` `CRYPTO_LEVERAGE_INIT`
+  after persisting the change, addressed per crypto account by its
+  `<market>-<gateway>-<account_id>` worker id (built from the `accounts` row),
+  so the new symbols/leverage apply immediately instead of only on the next
+  `WORKER_CONNECTED` handshake. Each message carries both settings read back
+  from the DB; delivery is best-effort — an account with no `gateway`, a missing
+  or invalid complementary setting, or a failed publish is skipped and logged,
+  and the endpoint still returns `200`.
 - **Telegram `Time:` line now shows its timezone** — Signal and FLAT
   notifications render as `Time: <time> (UTC+N)` instead of a bare
   timestamp. The signal's timestamp is normalised to UTC first (naive

@@ -203,6 +203,45 @@ async def test_upsert_inserts_new_trade_and_account(monkeypatch):
   assert any(isinstance(o, Trade) for o in session.added)
 
 
+async def test_upsert_persists_gateway_on_new_account(monkeypatch):
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(market_type="CRYPTO", gateway="BINANCE")
+  )
+
+  account = next(o for o in session.added if isinstance(o, Account))
+  assert account.gateway == "BINANCE"
+  assert account.market_type == MarketTypeEnum.CRYPTO
+
+
+async def test_upsert_updates_gateway_on_existing_account(monkeypatch):
+  existing_account = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway="OLD"
+  )
+  existing_trade = Trade(
+    account_id="acc-1",
+    ref_id="rs-1",
+    strategy="strat",
+    strategy_code="",
+    symbol="XAUUSD",
+    action="LONG",
+    price=100.0,
+    quantity=0.1,
+    is_running=True,
+    risk_percent=1.0,
+    status=TradeStatusEnum.OPENED,
+  )
+  session = FakeSession(results=[[existing_account], [existing_trade]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(status="TP1", gateway="BINANCE")
+  )
+  assert existing_account.gateway == "BINANCE"
+
+
 async def test_upsert_uses_closed_price_when_present(monkeypatch):
   session = FakeSession(results=[[], []])
   _patch_session(monkeypatch, session)
