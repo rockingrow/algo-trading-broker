@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Admin crypto settings now push live to connected workers** — `POST
+  /admin/settings/crypto-allowed-symbol` and `POST
+  /admin/settings/crypto-max-leverage` broadcast a `SYSTEM`
+  `CRYPTO_LEVERAGE_INIT` (with the wildcard `account_id` `"*"`) to every
+  connected crypto worker after persisting the change, so the new
+  symbols/leverage apply immediately instead of only on the next
+  `WORKER_CONNECTED` handshake. The broadcast carries both settings read back
+  from the DB; it is skipped and logged when the complementary setting is
+  missing or invalid, and the endpoint still returns `200`.
 - **Telegram `Time:` line now shows its timezone** — Signal and FLAT
   notifications render as `Time: <time> (UTC+N)` instead of a bare
   timestamp. The signal's timestamp is normalised to UTC first (naive

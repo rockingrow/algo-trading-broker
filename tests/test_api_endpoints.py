@@ -33,6 +33,10 @@ from broker.router import get_core_router
 from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
+from broker.schemas.publisher_schema import (
+  SYSTEM_BROADCAST_ACCOUNT_ID,
+  SystemActionEnum,
+)
 from broker.security.ensure_api_key import ensure_api_key
 
 API_KEY = "test-api-key"
@@ -62,6 +66,9 @@ class FakeSettingRepo:
   async def get(self, key):
     return self.values.get(key)
 
+  async def get_many(self, keys):
+    return {k: v for k, v in self.values.items() if k in keys and v is not None}
+
   async def set(self, key, value):
     if self.fail_set:
       return False
@@ -80,9 +87,13 @@ class FakeNotifier:
 class FakePublisher:
   def __init__(self):
     self.admin_signals = []
+    self.system_signals = []
 
   async def publish_admin_signal(self, **kwargs):
     self.admin_signals.append(kwargs)
+
+  async def publish_system_signal(self, **kwargs):
+    self.system_signals.append(kwargs)
 
 
 class FakeAccountRepo:
@@ -338,6 +349,44 @@ def test_set_crypto_allowed_symbol(ctx):
   assert body["value"] == "BTC,ETH"
   assert ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] == "BTC,ETH"
   assert len(ctx["notifier"].messages) == 1
+  # No crypto_max_leverage set yet, so the broadcast is skipped (an incomplete
+  # config is never pushed to workers).
+  assert ctx["publisher"].system_signals == []
+
+
+def test_set_crypto_allowed_symbol_broadcasts_when_leverage_present(ctx):
+  ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "10"
+
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["btc", " eth "]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+
+  # Both settings present -> CRYPTO_LEVERAGE_INIT broadcast to all crypto workers.
+  assert len(ctx["publisher"].system_signals) == 1
+  sig = ctx["publisher"].system_signals[0]
+  assert sig["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
+  assert sig["account_id"] == SYSTEM_BROADCAST_ACCOUNT_ID
+  assert sig["symbols"] == ["BTC", "ETH"]
+  assert sig["default_leverage"] == 10
+  # A broadcast targets the shared SYSTEM subject, never a reply inbox.
+  assert sig.get("subject") is None
+
+
+def test_set_crypto_allowed_symbol_skips_broadcast_on_invalid_leverage(ctx):
+  ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "not-an-int"
+
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["BTC"]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  # The persist + response still succeed; only the live push is skipped.
+  assert resp.status_code == 200
+  assert ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] == "BTC"
+  assert ctx["publisher"].system_signals == []
 
 
 def test_set_crypto_allowed_symbol_rejects_empty_list(ctx):
@@ -379,6 +428,27 @@ def test_set_crypto_max_leverage(ctx):
   assert body["setting"] == CRYPTO_MAX_LEVERAGE_KEY
   assert body["value"] == "20"
   assert ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] == "20"
+  # No crypto_allowed_symbol set yet, so the broadcast is skipped.
+  assert ctx["publisher"].system_signals == []
+
+
+def test_set_crypto_max_leverage_broadcasts_when_symbols_present(ctx):
+  ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] = "BTC,ETH"
+
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-max-leverage",
+    json={"default_leverage": 20},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+
+  assert len(ctx["publisher"].system_signals) == 1
+  sig = ctx["publisher"].system_signals[0]
+  assert sig["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
+  assert sig["account_id"] == SYSTEM_BROADCAST_ACCOUNT_ID
+  assert sig["symbols"] == ["BTC", "ETH"]
+  assert sig["default_leverage"] == 20
+  assert sig.get("subject") is None
 
 
 def test_set_crypto_max_leverage_rejects_zero(ctx):

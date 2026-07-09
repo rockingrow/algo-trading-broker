@@ -23,12 +23,82 @@ from broker.schemas.admin_schema import (
   SettingValueResponse,
   FlatRequest,
 )
-from broker.schemas.publisher_schema import AdminActionEnum
+from broker.schemas.publisher_schema import (
+  SYSTEM_BROADCAST_ACCOUNT_ID,
+  AdminActionEnum,
+  SystemActionEnum,
+)
 from broker.logger import get_logger
 from broker.openapi import AUTH_RESPONSES
 from broker.security.ensure_api_key import ensure_api_key
 
 log = get_logger(__name__)
+
+
+async def _broadcast_crypto_leverage_init(
+  publisher: SignalPublisher,
+  setting_repo: SettingRepository,
+) -> None:
+  """Push the current crypto config to every connected crypto worker.
+
+  After an admin changes ``crypto_allowed_symbol`` or ``crypto_max_leverage``,
+  broadcast a ``CRYPTO_LEVERAGE_INIT`` on the shared SYSTEM subject with the
+  wildcard ``SYSTEM_BROADCAST_ACCOUNT_ID`` so workers apply the new configuration
+  right away instead of waiting for their next ``WORKER_CONNECTED`` handshake
+  (up to ``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``).
+
+  Both values are read back from the DB in one ``get_many`` — the caller has
+  already persisted its own change, so the payload always reflects the committed
+  settings and stays atomic. Mirrors ``SystemEventConsumer``'s validation, but
+  best-effort: the setting is the source of truth and reaches workers on their
+  next handshake regardless, so a payload we cannot build (the complementary
+  setting is missing or invalid) or a publish that fails is logged, never
+  surfaced to the admin caller.
+  """
+  values = await setting_repo.get_many(
+    [CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY]
+  )
+  symbols_raw = values.get(CRYPTO_ALLOWED_SYMBOL_KEY)
+  leverage_raw = values.get(CRYPTO_MAX_LEVERAGE_KEY)
+
+  if symbols_raw is None or leverage_raw is None:
+    log.warning(
+      "CRYPTO_LEVERAGE_INIT broadcast skipped: missing settings (%s=%r, %s=%r)",
+      CRYPTO_ALLOWED_SYMBOL_KEY,
+      symbols_raw,
+      CRYPTO_MAX_LEVERAGE_KEY,
+      leverage_raw,
+    )
+    return
+
+  symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+  try:
+    default_leverage = int(leverage_raw)
+  except ValueError:
+    log.error(
+      "CRYPTO_LEVERAGE_INIT broadcast skipped: %s is not an integer: %r",
+      CRYPTO_MAX_LEVERAGE_KEY,
+      leverage_raw,
+    )
+    return
+
+  if default_leverage <= 0:
+    log.error(
+      "CRYPTO_LEVERAGE_INIT broadcast skipped: %s must be positive, got %r",
+      CRYPTO_MAX_LEVERAGE_KEY,
+      leverage_raw,
+    )
+    return
+
+  try:
+    await publisher.publish_system_signal(
+      action=SystemActionEnum.CRYPTO_LEVERAGE_INIT,
+      account_id=SYSTEM_BROADCAST_ACCOUNT_ID,
+      symbols=symbols,
+      default_leverage=default_leverage,
+    )
+  except Exception as exc:
+    log.exception("Failed to broadcast CRYPTO_LEVERAGE_INIT: %s", exc)
 
 
 def get_admin_router() -> APIRouter:
@@ -158,9 +228,10 @@ def get_admin_router() -> APIRouter:
     body: CryptoAllowedSymbolRequest,
     setting_repo: SettingRepository = Depends(get_setting_repository),
     notifier: Notifier = Depends(get_admin_notifier),
+    publisher: SignalPublisher = Depends(get_publisher),
   ) -> SettingValueResponse:
-    """Set CRYPTO_ALLOWED_SYMBOL_KEY, pushed to crypto workers via SYSTEM
-    CRYPTO_LEVERAGE_INIT on their next connect."""
+    """Set CRYPTO_ALLOWED_SYMBOL_KEY and broadcast SYSTEM CRYPTO_LEVERAGE_INIT to
+    every connected crypto worker (they also pick it up on their next connect)."""
     symbols = list(dict.fromkeys(s.strip().upper() for s in body.symbols if s.strip()))
     if not symbols:
       raise HTTPException(
@@ -183,6 +254,8 @@ def get_admin_router() -> APIRouter:
       f"Symbols: <b>{value}</b>\n"
     )
 
+    await _broadcast_crypto_leverage_init(publisher, setting_repo)
+
     return SettingValueResponse(setting=CRYPTO_ALLOWED_SYMBOL_KEY, value=value)
 
   @router.post(
@@ -198,10 +271,11 @@ def get_admin_router() -> APIRouter:
     body: CryptoMaxLeverageRequest,
     setting_repo: SettingRepository = Depends(get_setting_repository),
     notifier: Notifier = Depends(get_admin_notifier),
+    publisher: SignalPublisher = Depends(get_publisher),
   ) -> SettingValueResponse:
-    """Set CRYPTO_MAX_LEVERAGE_KEY, pushed to crypto workers via SYSTEM
-    CRYPTO_LEVERAGE_INIT on their next connect. Must be a positive integer
-    (enforced by CryptoMaxLeverageRequest)."""
+    """Set CRYPTO_MAX_LEVERAGE_KEY and broadcast SYSTEM CRYPTO_LEVERAGE_INIT to
+    every connected crypto worker (they also pick it up on their next connect).
+    Must be a positive integer (enforced by CryptoMaxLeverageRequest)."""
     value = str(body.default_leverage)
 
     ok = await setting_repo.set(CRYPTO_MAX_LEVERAGE_KEY, value)
@@ -217,6 +291,8 @@ def get_admin_router() -> APIRouter:
       f"Setting: <code>{CRYPTO_MAX_LEVERAGE_KEY}</code>\n"
       f"Default leverage: <b>{value}</b>\n"
     )
+
+    await _broadcast_crypto_leverage_init(publisher, setting_repo)
 
     return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
 
