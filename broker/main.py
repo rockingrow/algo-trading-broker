@@ -40,6 +40,7 @@ def main() -> None:
     workers=1,
     log_level=settings.LOG_LEVEL.lower(),
     loop="asyncio",  # uvloop's libuv DNS can't resolve Docker service names on Linux 24.04
+    timeout_keep_alive=settings.WEBHOOK_KEEPALIVE_TIMEOUT,
   )
 
 
