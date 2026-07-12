@@ -14,7 +14,9 @@ http:
           "BTC",
           "ETH",
           "BNB",
-          "ADA"
+          "ADA",
+          "BCH",
+          "TAO"
         ]
       }
   auth: inherit

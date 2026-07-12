@@ -21,6 +21,10 @@ class Settings(BaseSettings):
   WEBHOOK_HOST: str = "0.0.0.0"
   WEBHOOK_PORT: int = 80
   WEBHOOK_SECRET: str = ""  # empty = no HMAC validation
+  # Uvicorn's 5s default is shorter than the gap between TradingView alerts, so
+  # TradingView reuses a pooled connection the server has already closed and the
+  # alert dies as "server closed the connection unexpectedly".
+  WEBHOOK_KEEPALIVE_TIMEOUT: int = 120
   BROKER_PUBLIC_URL: str = (
     ""  # e.g. https://broker.example.com; falls back to host:port
   )
