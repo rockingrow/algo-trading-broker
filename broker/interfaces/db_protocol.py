@@ -28,7 +28,12 @@ class SettingRepository(Protocol):
 
 @runtime_checkable
 class AccountRepository(Protocol):
-  """Reads trading accounts known to the broker."""
+  """Reads trading accounts known to the broker, and records the market/gateway
+  a worker announces on connect."""
+
+  async def upsert_gateway(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> None: ...
 
   async def get_all(self) -> list[Account]: ...
 

@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
-  for crypto). Nullable; populated from the `TRADE` event and surfaced on
-  `GET /v1/accounts`. Combined with `market_type` and `account_id` it forms the
-  `<market>-<gateway>-<account_id>` worker id used to address `SYSTEM` messages.
+  for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
+  `TRADE` event, and surfaced on `GET /v1/accounts`. Combined with `market_type`
+  and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id used
+  to address `SYSTEM` messages.
 - **`gateway` on the `TRADE` (`PositionEvent`) payload** — Workers may report the
   account's exchange; the broker upserts it onto the `accounts` row.
 - **`notification_timezone` broker setting** — Seeded to `"7"` via Alembic
@@ -40,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TradingView timestamps are treated as UTC; aware timestamps are converted),
   then shifted to the configured `notification_timezone` (default UTC+7)
   before formatting.
+- **`WORKER_CONNECTED` now records the worker's market/gateway** — Every valid
+  handshake upserts the announced `market`/`gateway` onto the worker's
+  `accounts` row (inserting the row if the account is unknown), keyed by the
+  bare `account_id` recovered from the `<market>-<gateway>-<account_id>` worker
+  id. Best-effort: a DB failure is logged and the worker still gets its reply.
+
+### Fixed
+
+- **Admin crypto push no longer skipped with `gateway not set`** — `gateway` was
+  only ever written from a `TRADE` event, so an account that had not traded
+  since migration `f4d5e6a7b8c9` kept a NULL `gateway` and was skipped by the
+  `CRYPTO_LEVERAGE_INIT` push from `POST /admin/settings/crypto-*`, even though
+  its worker announced `gateway` on every `WORKER_CONNECTED`. The handshake now
+  persists it, so the column is filled as soon as the worker connects.
 
 ## [1.0.6] - 2026-07-05
 

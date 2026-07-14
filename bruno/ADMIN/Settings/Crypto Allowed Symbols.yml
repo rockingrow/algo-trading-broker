@@ -16,7 +16,10 @@ http:
           "BNB",
           "ADA",
           "BCH",
-          "TAO"
+          "TAO",
+          "SOL",
+          "LTC",
+          "ETHW"
         ]
       }
   auth: inherit

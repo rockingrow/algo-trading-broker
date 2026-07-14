@@ -34,6 +34,21 @@ def compose_worker_id(market_type: str, gateway: str, account_id: str) -> str:
   return f"{market}-{gateway}-{account_id}"
 
 
+def decompose_worker_id(worker_id: str, market_type: str, gateway: str) -> str:
+  """Inverse of :func:`compose_worker_id`: recover the bare ``account_id`` (the
+  one stored in the ``accounts`` table) from a worker id.
+
+  Workers announce themselves on the SYSTEM subject with their full worker id
+  (``CRYPTO-BINANCE-7654321``), while the ``accounts`` row is keyed by the bare
+  ``account_id`` (``7654321``). A worker that sends the bare id instead carries
+  no prefix to strip, so it passes through unchanged.
+  """
+  market = (
+    market_type.value if isinstance(market_type, MarketTypeEnum) else str(market_type)
+  )
+  return worker_id.removeprefix(f"{market}-{gateway}-")
+
+
 class AccountResponse(BaseModel):
   """API response model for a registered trading account, serialised from the Account ORM row."""
 

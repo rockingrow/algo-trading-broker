@@ -16,6 +16,12 @@ messages:
   ``CRYPTO-BINANCE-7654321``), ``market`` and ``gateway``; messages missing
   any of these are rejected by ``SystemWorkerConnectedSignal`` validation.
 
+  Every valid handshake also records the announced market/gateway on the
+  worker's ``accounts`` row (``AccountRepository.upsert_gateway``), so the
+  broker can address it as ``<market>-<gateway>-<account_id>`` — notably from
+  the admin ``/admin/settings/crypto-*`` push — without waiting for the
+  account's first TRADE event.
+
   Request/reply vs. fire-and-forget
   ─────────────────────────────────
   Workers should announce themselves with NATS ``request`` and wait for a
@@ -59,9 +65,15 @@ from nats.aio.subscription import Subscription
 from pydantic import ValidationError
 
 from broker.constants import CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY
-from broker.interfaces import SettingRepository, SignalPublisher, TradeRepository
+from broker.interfaces import (
+  AccountRepository,
+  SettingRepository,
+  SignalPublisher,
+  TradeRepository,
+)
 from broker.logger import get_logger
 from broker.nats import NatsClient, nats_client
+from broker.schemas.account_schema import MarketTypeEnum, decompose_worker_id
 from broker.schemas.core import MarketEnum
 from broker.schemas.publisher_schema import (
   PublishTopicEnum,
@@ -146,10 +158,12 @@ class SystemEventConsumer:
   def __init__(
     self,
     setting_repository: SettingRepository,
+    account_repository: AccountRepository,
     publisher: SignalPublisher,
     connection: NatsClient | None = None,
   ) -> None:
     self._settings = setting_repository
+    self._accounts = account_repository
     self._publisher = publisher
     self._conn = connection or nats_client
     self._sub: Optional[Subscription] = None
@@ -224,6 +238,8 @@ class SystemEventConsumer:
       event.gateway,
     )
 
+    await self._remember_worker(event)
+
     # Only crypto workers need leverage configuration pushed back on connect.
     if event.market != MarketEnum.CRYPTO.value:
       # Acknowledge so a requesting worker's handshake resolves instead of
@@ -232,6 +248,33 @@ class SystemEventConsumer:
       return
 
     await self._send_crypto_leverage_init(event.account_id, reply_to)
+
+  async def _remember_worker(self, event: SystemWorkerConnectedSignal) -> None:
+    """Store the market/gateway this worker announced on its ``accounts`` row.
+
+    The handshake is the only message that always carries the gateway, and it
+    arrives as soon as the worker connects. Recording it here is what lets the
+    admin ``/admin/settings/crypto-*`` push address the worker as
+    ``<market>-<gateway>-<account_id>``; relying on the TRADE event alone leaves
+    a worker that has not traded yet with a NULL gateway and silently skipped.
+
+    ``event.account_id`` is the full worker id, so strip the prefix back to the
+    bare account_id the ``accounts`` table is keyed by. Best-effort — a
+    bookkeeping failure must not stop the worker's reply.
+    """
+    account_id = decompose_worker_id(event.account_id, event.market, event.gateway)
+    try:
+      await self._accounts.upsert_gateway(
+        account_id=account_id,
+        market=MarketTypeEnum(event.market),
+        gateway=event.gateway,
+      )
+    except Exception as exc:
+      log.exception(
+        "Failed to record gateway for account_id=%s: %s",
+        account_id,
+        exc,
+      )
 
   async def _send_crypto_leverage_init(
     self, account_id: str, reply_to: str = ""
