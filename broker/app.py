@@ -6,7 +6,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from broker.db.engine import close_db, init_db
-from broker.db.repository import SqlAlchemySettingRepository, SqlAlchemyTradeRepository
+from broker.db.repository import (
+  SqlAlchemyAccountRepository,
+  SqlAlchemySettingRepository,
+  SqlAlchemyTradeRepository,
+)
 from broker.helpers import emoji_constants as em
 from broker.logger import get_logger
 from broker.nats import nats_client
@@ -41,6 +45,7 @@ async def lifespan(app: FastAPI):
   )
   system_consumer = SystemEventConsumer(
     setting_repository=SqlAlchemySettingRepository(),
+    account_repository=SqlAlchemyAccountRepository(),
     publisher=publisher,
     connection=nats_client,
   )

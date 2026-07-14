@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from broker.constants import NOTIFICATION_TIMEZONE_KEY
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import TradingSignal
 from broker.schemas.webhook_schema import PositionSchema, WebhookPayload
@@ -133,3 +134,48 @@ async def test_persist_failure_raises_500():
   with pytest.raises(SignalError) as exc:
     await service.process(_payload())
   assert exc.value.status_code == 500
+
+
+# ── Notification timezone wiring ─────────────────────────────────────
+
+
+async def test_signal_notification_uses_configured_timezone():
+  publisher = FakePublisher()
+  notifier = FakeNotifier()
+  setting_repo = FakeSettingRepository()
+  setting_repo.values[NOTIFICATION_TIMEZONE_KEY] = "-5"
+  service = SignalProcessingService(
+    signal_repository=FakeSignalRepository(),
+    setting_repository=setting_repo,
+    publisher=publisher,
+    notifier=notifier,
+    webhook_secret="secret",
+  )
+
+  await service.process(_payload())
+
+  assert "Time: 2025-12-31 19:00:00 (UTC-5)" in notifier.messages[0]
+
+
+async def test_flat_notification_uses_configured_timezone():
+  publisher = FakePublisher()
+  notifier = FakeNotifier()
+  setting_repo = FakeSettingRepository()
+  setting_repo.values[NOTIFICATION_TIMEZONE_KEY] = "0"
+  service = SignalProcessingService(
+    signal_repository=FakeSignalRepository(),
+    setting_repository=setting_repo,
+    publisher=publisher,
+    notifier=notifier,
+    webhook_secret="secret",
+  )
+
+  await service.process(_payload(action=SignalActionEnum.FLAT))
+
+  assert "Time: 2026-01-01 00:00:00 (UTC+0)" in notifier.messages[0]
+
+
+async def test_signal_notification_defaults_to_utc_plus_7_when_unset():
+  service, _, notifier = _make_service()
+  await service.process(_payload())
+  assert "Time: 2026-01-01 07:00:00 (UTC+7)" in notifier.messages[0]

@@ -1,8 +1,25 @@
 import json
 
 from broker.constants import CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.publisher_schema import PublishTopicEnum, SystemActionEnum
 from broker.services.nats_service import SystemEventConsumer
+
+
+class FakeAccountRepo:
+  def __init__(self):
+    self.upserts: list[tuple[str, MarketTypeEnum, str]] = []
+
+  async def upsert_gateway(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> None:
+    self.upserts.append((account_id, market, gateway))
+
+  async def get_all(self):
+    return []
+
+  async def get_by_market(self, market):
+    return []
 
 
 class FakeSettingRepo:
@@ -73,6 +90,7 @@ def _worker_connected_payload(
 
 def _make_consumer(
   settings: dict[str, str | None] | None = None,
+  accounts: FakeAccountRepo | None = None,
 ) -> tuple[SystemEventConsumer, FakeSettingRepo, FakePublisher]:
   repo = FakeSettingRepo(
     settings
@@ -83,7 +101,11 @@ def _make_consumer(
     }
   )
   publisher = FakePublisher()
-  consumer = SystemEventConsumer(setting_repository=repo, publisher=publisher)
+  consumer = SystemEventConsumer(
+    setting_repository=repo,
+    account_repository=accounts or FakeAccountRepo(),
+    publisher=publisher,
+  )
   return consumer, repo, publisher
 
 
@@ -239,6 +261,78 @@ async def test_symbols_are_trimmed_and_filtered():
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
   assert publisher.calls[0]["symbols"] == ["BTC", "ETH"]
   assert publisher.calls[0]["default_leverage"] == 5
+
+
+# ── Recording the announced gateway on the accounts row ───────────────────────
+
+
+async def test_worker_connected_records_gateway_under_bare_account_id():
+  accounts = FakeAccountRepo()
+  consumer, _repo, _pub = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  # The worker announces its full worker id; the accounts row is keyed by the
+  # bare account_id, so the <market>-<gateway>- prefix must be stripped.
+  assert accounts.upserts == [("7654321", MarketTypeEnum.CRYPTO, "BINANCE")]
+
+
+async def test_non_crypto_worker_also_records_gateway():
+  accounts = FakeAccountRepo()
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-12345678", market="FOREX", gateway="MT5"
+      )
+    )
+  )
+
+  assert accounts.upserts == [("12345678", MarketTypeEnum.FOREX, "MT5")]
+  assert publisher.calls == []
+
+
+async def test_bare_account_id_is_recorded_unchanged():
+  # A worker that announces without the prefix has nothing to strip.
+  accounts = FakeAccountRepo()
+  consumer, _repo, _pub = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(account_id="7654321"))
+  )
+
+  assert accounts.upserts == [("7654321", MarketTypeEnum.CRYPTO, "BINANCE")]
+
+
+async def test_invalid_payloads_record_nothing():
+  accounts = FakeAccountRepo()
+  consumer, _repo, _pub = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(FakeMsg(b"{not-json"))
+  await consumer.handle_subject_system(
+    FakeMsg(json.dumps({"action": "WORKER_CONNECTED"}).encode())
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(
+      json.dumps(
+        {"action": "CRYPTO_LEVERAGE_INIT", "account_id": "CRYPTO-BINANCE-7654321"}
+      ).encode()
+    )
+  )
+
+  assert accounts.upserts == []
+
+
+async def test_account_repo_failure_does_not_block_leverage_init():
+  class ExplodingAccountRepo(FakeAccountRepo):
+    async def upsert_gateway(self, account_id, market, gateway) -> None:
+      raise RuntimeError("db down")
+
+  consumer, _repo, publisher = _make_consumer(accounts=ExplodingAccountRepo())
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.abc")
+  )
+
+  # Bookkeeping is best-effort; the worker still gets its configuration.
+  assert len(publisher.calls) == 1
+  assert publisher.calls[0]["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
 
 
 # ── Request/reply (worker used nats.request, msg carries a reply inbox) ────────

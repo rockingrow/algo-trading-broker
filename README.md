@@ -201,6 +201,24 @@ A worker may still `publish` `WORKER_CONNECTED` without a reply inbox. In that c
 
 The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `WORKER_CONNECTED_ACK`, `WORKER_CONNECTED_ERROR`) by `action`, so it never reacts to its own messages.
 
+#### Live config push on admin update
+
+The handshake pushes crypto config when a worker *connects*. To also update workers that are **already connected**, `POST /admin/settings/crypto-allowed-symbol` and `POST /admin/settings/crypto-max-leverage` send a `CRYPTO_LEVERAGE_INIT` on the shared `SYSTEM` subject right after persisting the change, so the new value applies immediately instead of waiting for the next reconnect (up to the ~30s settings cache).
+
+The broker looks up every **crypto account** in the `accounts` table and addresses one message per account to its `<market>-<gateway>-<account_id>` worker id — built from the account's `market_type`, `gateway`, and `account_id` — so each worker filters by its own id:
+
+```json
+{
+  "action": "CRYPTO_LEVERAGE_INIT",
+  "account_id": "CRYPTO-BINANCE-7654321",
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "symbols": ["BTC", "ETH"],
+  "default_leverage": 10
+}
+```
+
+Both `symbols` and `default_leverage` are read back from `BrokerSetting`, so whichever setting the admin did *not* just change is included from the DB. The push is best-effort: the setting is already persisted (and still reaches workers on their next handshake), so if the complementary setting is missing or invalid, a crypto account has no `gateway` recorded yet, or a publish fails — the affected message is logged and skipped while the endpoint still returns `200`.
+
 ---
 
 ## ⚙️ Configuration (`.env`)
@@ -349,6 +367,7 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
 | `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
 | `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
+| `POST /admin/settings/notification-timezone` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
 
 ---
@@ -432,6 +451,7 @@ Returns all trading accounts ordered by most recent activity. Requires the `X-AP
     "account_name": "Demo Account",
     "account_balance": 10000.0,
     "market_type": "FOREX",
+    "gateway": "MT5",
     "last_activity_at": "2024-03-20T10:05:00Z",
     "createdAt": "2024-03-01T00:00:00Z",
     "updatedAt": "2024-03-20T10:05:00Z"
@@ -439,7 +459,7 @@ Returns all trading accounts ordered by most recent activity. Requires the `X-AP
 ]
 ```
 
-Accounts are automatically created or updated each time a `TRADE` event arrives from a worker.
+Accounts are automatically created or updated each time a `TRADE` event arrives from a worker. `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market_type` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
 
 ---
 
@@ -529,7 +549,9 @@ Sets the `crypto_allowed_symbol` broker setting pushed to crypto workers via `SY
 }
 ```
 
-Symbols are upper-cased, trimmed, and de-duplicated before being stored as a comma-separated string. At least one non-empty symbol is required (`422` otherwise). Because `SystemEventConsumer` caches this setting for up to 30s (see the `SYSTEM` handshake section above), a worker connecting immediately after this call may still receive the previous value.
+Symbols are upper-cased, trimmed, and de-duplicated before being stored as a comma-separated string. At least one non-empty symbol is required (`422` otherwise).
+
+On success the broker also **pushes** a targeted `SYSTEM.CRYPTO_LEVERAGE_INIT` to each crypto account by its `<market>-<gateway>-<account_id>` worker id (see [Live config push on admin update](#live-config-push-on-admin-update)), so already-running workers apply the new list immediately. That message also carries `crypto_max_leverage` read from the DB, so it is skipped (and logged) until that setting is configured. A worker that *connects* right after this call may still read the previous value from `SystemEventConsumer`'s up-to-30s cache.
 
 ---
 
@@ -545,7 +567,25 @@ Sets the `crypto_max_leverage` broker setting pushed to crypto workers via `SYST
 }
 ```
 
-`default_leverage` must be a positive integer (`422` otherwise). Subject to the same up-to-30s cache as `crypto-allowed-symbol`.
+`default_leverage` must be a positive integer (`422` otherwise).
+
+On success the broker also **pushes** a targeted `SYSTEM.CRYPTO_LEVERAGE_INIT` to each crypto account by its `<market>-<gateway>-<account_id>` worker id (see [Live config push on admin update](#live-config-push-on-admin-update)), so already-running workers apply the new leverage immediately. That message also carries `crypto_allowed_symbol` read from the DB, so it is skipped (and logged) until that setting is configured. A worker that *connects* right after this call is still subject to the same up-to-30s cache as `crypto-allowed-symbol`.
+
+---
+
+### POST `/admin/settings/notification-timezone`
+
+Sets the `notification_timezone` broker setting: the UTC offset (in hours) applied to the `Time:` line of Telegram notifications. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "utc_offset_hours": 7
+}
+```
+
+`utc_offset_hours` must be between `-12` and `14` (`422` otherwise). Signal timestamps are normalised to UTC first, then shifted by this offset before formatting, e.g. `Time: 2026-07-06 12:55:00 (UTC+7)`. Defaults to `7` (UTC+7) when unset.
 
 ---
 
@@ -626,6 +666,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `account_name` | String(255) | Display name of the account (nullable) |
 | `account_balance` | Numeric(20,8) | Most recent account balance (nullable) |
 | `market_type` | Enum | `FOREX` or `CRYPTO` |
+| `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
@@ -647,6 +688,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `notification_include_signal_raw` | `"0"` | `POST /admin/settings/include-signal-raw` | Append indicators/inputs to notifications |
 | `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
+| `notification_timezone` | `"7"` | `POST /admin/settings/notification-timezone` | UTC offset (hours) applied to the `Time:` line of Telegram notifications |
 
 ---
 

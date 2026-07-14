@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from broker.db.models import Account, Trade
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.webhook_schema import WebhookPayload
 
@@ -27,9 +28,16 @@ class SettingRepository(Protocol):
 
 @runtime_checkable
 class AccountRepository(Protocol):
-  """Reads trading accounts known to the broker."""
+  """Reads trading accounts known to the broker, and records the market/gateway
+  a worker announces on connect."""
+
+  async def upsert_gateway(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> None: ...
 
   async def get_all(self) -> list[Account]: ...
+
+  async def get_by_market(self, market: MarketTypeEnum) -> list[Account]: ...
 
 
 @runtime_checkable

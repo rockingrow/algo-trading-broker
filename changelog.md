@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - Unreleased
+
+### Added
+
+- **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
+  Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
+  for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
+  `TRADE` event, and surfaced on `GET /v1/accounts`. Combined with `market_type`
+  and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id used
+  to address `SYSTEM` messages.
+- **`gateway` on the `TRADE` (`PositionEvent`) payload** — Workers may report the
+  account's exchange; the broker upserts it onto the `accounts` row.
+- **`notification_timezone` broker setting** — Seeded to `"7"` via Alembic
+  migration `e3c4d5f6a7b8`. UTC offset (in hours) applied to the `Time:` line
+  of Telegram notifications; defaults to UTC+7.
+- **`POST /admin/settings/notification-timezone`** — Sets `notification_timezone`.
+  Requires `X-API-KEY`; `utc_offset_hours` must be between `-12` and `14`.
+
+### Changed
+
+- **Admin crypto settings now push live to each crypto worker** — `POST
+  /admin/settings/crypto-allowed-symbol` and `POST
+  /admin/settings/crypto-max-leverage` send a `SYSTEM` `CRYPTO_LEVERAGE_INIT`
+  after persisting the change, addressed per crypto account by its
+  `<market>-<gateway>-<account_id>` worker id (built from the `accounts` row),
+  so the new symbols/leverage apply immediately instead of only on the next
+  `WORKER_CONNECTED` handshake. Each message carries both settings read back
+  from the DB; delivery is best-effort — an account with no `gateway`, a missing
+  or invalid complementary setting, or a failed publish is skipped and logged,
+  and the endpoint still returns `200`.
+- **Telegram `Time:` line now shows its timezone** — Signal and FLAT
+  notifications render as `Time: <time> (UTC+N)` instead of a bare
+  timestamp. The signal's timestamp is normalised to UTC first (naive
+  TradingView timestamps are treated as UTC; aware timestamps are converted),
+  then shifted to the configured `notification_timezone` (default UTC+7)
+  before formatting.
+- **`WORKER_CONNECTED` now records the worker's market/gateway** — Every valid
+  handshake upserts the announced `market`/`gateway` onto the worker's
+  `accounts` row (inserting the row if the account is unknown), keyed by the
+  bare `account_id` recovered from the `<market>-<gateway>-<account_id>` worker
+  id. Best-effort: a DB failure is logged and the worker still gets its reply.
+
+### Fixed
+
+- **Admin crypto push no longer skipped with `gateway not set`** — `gateway` was
+  only ever written from a `TRADE` event, so an account that had not traded
+  since migration `f4d5e6a7b8c9` kept a NULL `gateway` and was skipped by the
+  `CRYPTO_LEVERAGE_INIT` push from `POST /admin/settings/crypto-*`, even though
+  its worker announced `gateway` on every `WORKER_CONNECTED`. The handshake now
+  persists it, so the column is filled as soon as the worker connects.
+
 ## [1.0.6] - 2026-07-05
 
 ### Added
@@ -216,6 +267,7 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
+[1.0.7]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.3...v1.0.4

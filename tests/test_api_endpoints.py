@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
+  NOTIFICATION_TIMEZONE_KEY,
   SIGNAL_BLOCKED,
 )
 from broker.db.models import Account, Trade
@@ -30,8 +31,9 @@ from broker.providers import (
 )
 from broker.router import get_core_router
 from broker.schemas.trade_schema import TradeStatusEnum
-from broker.schemas.account_schema import MarketTypeEnum
+from broker.schemas.account_schema import MarketTypeEnum, compose_worker_id
 from broker.schemas.core import SignalActionEnum
+from broker.schemas.publisher_schema import SystemActionEnum
 from broker.security.ensure_api_key import ensure_api_key
 
 API_KEY = "test-api-key"
@@ -61,6 +63,9 @@ class FakeSettingRepo:
   async def get(self, key):
     return self.values.get(key)
 
+  async def get_many(self, keys):
+    return {k: v for k, v in self.values.items() if k in keys and v is not None}
+
   async def set(self, key, value):
     if self.fail_set:
       return False
@@ -79,17 +84,24 @@ class FakeNotifier:
 class FakePublisher:
   def __init__(self):
     self.admin_signals = []
+    self.system_signals = []
 
   async def publish_admin_signal(self, **kwargs):
     self.admin_signals.append(kwargs)
 
+  async def publish_system_signal(self, **kwargs):
+    self.system_signals.append(kwargs)
+
 
 class FakeAccountRepo:
   def __init__(self, accounts):
-    self._accounts = accounts
+    self.accounts = list(accounts)
 
   async def get_all(self):
-    return self._accounts
+    return self.accounts
+
+  async def get_by_market(self, market):
+    return [a for a in self.accounts if a.market_type == market]
 
 
 class FakeTradeRepo:
@@ -108,13 +120,20 @@ class FakeTradeRepo:
     return self._total
 
 
-def _make_account() -> Account:
+def _make_account(
+  *,
+  account_id="acc-1",
+  account_name="Main",
+  market_type=MarketTypeEnum.FOREX,
+  gateway=None,
+) -> Account:
   return Account(
     id=uuid.uuid4(),
-    account_id="acc-1",
-    account_name="Main",
+    account_id=account_id,
+    account_name=account_name,
     account_balance=1000.0,
-    market_type=MarketTypeEnum.FOREX,
+    market_type=market_type,
+    gateway=gateway,
     last_activity_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     createdAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
     updatedAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -180,6 +199,7 @@ def ctx():
     "setting_repo": setting_repo,
     "notifier": notifier,
     "publisher": publisher,
+    "account_repo": account_repo,
     "trade_repo": trade_repo,
   }
 
@@ -337,6 +357,76 @@ def test_set_crypto_allowed_symbol(ctx):
   assert body["value"] == "BTC,ETH"
   assert ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] == "BTC,ETH"
   assert len(ctx["notifier"].messages) == 1
+  # No crypto_max_leverage set yet, so the push is skipped (an incomplete
+  # config is never sent to workers).
+  assert ctx["publisher"].system_signals == []
+
+
+def test_set_crypto_allowed_symbol_pushes_per_crypto_account(ctx):
+  ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "10"
+  # Two crypto accounts (targeted) plus the default forex one (ignored).
+  ctx["account_repo"].accounts.append(
+    _make_account(
+      account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+    )
+  )
+  ctx["account_repo"].accounts.append(
+    _make_account(account_id="111", market_type=MarketTypeEnum.CRYPTO, gateway="BYBIT")
+  )
+
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["btc", " eth "]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+
+  # One CRYPTO_LEVERAGE_INIT per crypto account, addressed to its composite id.
+  signals = ctx["publisher"].system_signals
+  assert len(signals) == 2
+  targets = {s["account_id"] for s in signals}
+  assert targets == {"CRYPTO-BINANCE-7654321", "CRYPTO-BYBIT-111"}
+  for sig in signals:
+    assert sig["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
+    assert sig["symbols"] == ["BTC", "ETH"]
+    assert sig["default_leverage"] == 10
+    # Sent on the shared SYSTEM subject, never a reply inbox.
+    assert sig.get("subject") is None
+
+
+def test_set_crypto_allowed_symbol_skips_crypto_account_without_gateway(ctx):
+  ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "10"
+  # Crypto account whose gateway was never reported cannot be addressed.
+  ctx["account_repo"].accounts.append(
+    _make_account(account_id="999", market_type=MarketTypeEnum.CRYPTO, gateway=None)
+  )
+
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["BTC"]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  assert ctx["publisher"].system_signals == []
+
+
+def test_set_crypto_allowed_symbol_skips_push_on_invalid_leverage(ctx):
+  ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "not-an-int"
+  ctx["account_repo"].accounts.append(
+    _make_account(
+      account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+    )
+  )
+
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-allowed-symbol",
+    json={"symbols": ["BTC"]},
+    headers={"X-API-KEY": API_KEY},
+  )
+  # The persist + response still succeed; only the live push is skipped.
+  assert resp.status_code == 200
+  assert ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] == "BTC"
+  assert ctx["publisher"].system_signals == []
 
 
 def test_set_crypto_allowed_symbol_rejects_empty_list(ctx):
@@ -378,6 +468,34 @@ def test_set_crypto_max_leverage(ctx):
   assert body["setting"] == CRYPTO_MAX_LEVERAGE_KEY
   assert body["value"] == "20"
   assert ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] == "20"
+  # No crypto_allowed_symbol set yet, so the push is skipped.
+  assert ctx["publisher"].system_signals == []
+
+
+def test_set_crypto_max_leverage_pushes_per_crypto_account(ctx):
+  ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] = "BTC,ETH"
+  ctx["account_repo"].accounts.append(
+    _make_account(
+      account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+    )
+  )
+
+  resp = ctx["client"].post(
+    "/admin/settings/crypto-max-leverage",
+    json={"default_leverage": 20},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+
+  assert len(ctx["publisher"].system_signals) == 1
+  sig = ctx["publisher"].system_signals[0]
+  assert sig["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
+  assert sig["account_id"] == compose_worker_id(
+    MarketTypeEnum.CRYPTO, "BINANCE", "7654321"
+  )
+  assert sig["symbols"] == ["BTC", "ETH"]
+  assert sig["default_leverage"] == 20
+  assert sig.get("subject") is None
 
 
 def test_set_crypto_max_leverage_rejects_zero(ctx):
@@ -403,6 +521,61 @@ def test_set_crypto_max_leverage_persist_failure_returns_500(ctx):
   resp = ctx["client"].post(
     "/admin/settings/crypto-max-leverage",
     json={"default_leverage": 10},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 500
+
+
+# ── Admin settings — notification timezone ──────────────────────────
+
+
+def test_set_notification_timezone(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 9},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == NOTIFICATION_TIMEZONE_KEY
+  assert body["value"] == "9"
+  assert ctx["setting_repo"].values[NOTIFICATION_TIMEZONE_KEY] == "9"
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_notification_timezone_accepts_fractional_offset(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 5.5},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "5.5"
+
+
+def test_set_notification_timezone_rejects_above_range(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 15},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_notification_timezone_rejects_below_range(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": -13},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_notification_timezone_persist_failure_returns_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/notification-timezone",
+    json={"utc_offset_hours": 7},
     headers={"X-API-KEY": API_KEY},
   )
   assert resp.status_code == 500

@@ -1,0 +1,21 @@
+info:
+  name: Notification Timezone
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{url}}/admin/settings/notification-timezone"
+  body:
+    type: json
+    data: |-
+      {
+        "utc_offset_hours": 7
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

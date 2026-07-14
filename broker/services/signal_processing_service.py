@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from broker.constants import NOTIFICATION_INCLUDE_SIGNAL_RAW, SIGNAL_BLOCKED
+from broker.constants import (
+  NOTIFICATION_INCLUDE_SIGNAL_RAW,
+  NOTIFICATION_TIMEZONE_KEY,
+  SIGNAL_BLOCKED,
+)
 from broker.helpers.message_formatter import (
   format_blocked_message,
   format_flat_message,
@@ -103,7 +107,10 @@ class SignalProcessingService:
       log.exception("NATS publish_flat error: %s", exc)
       raise SignalError(500, f"Signal logged but publish failed: {exc}")
 
-    await self._notifier.send_message(format_flat_message(payload))
+    timezone_offset = await self._settings.get(NOTIFICATION_TIMEZONE_KEY)
+    await self._notifier.send_message(
+      format_flat_message(payload, timezone_offset=timezone_offset)
+    )
     return {
       "status": "accepted",
       "signal_id": db_signal_id,
@@ -126,8 +133,11 @@ class SignalProcessingService:
       raise SignalError(500, f"Signal logged but publish failed: {exc}")
 
     include_raw = await self._settings.get(NOTIFICATION_INCLUDE_SIGNAL_RAW) == "1"
+    timezone_offset = await self._settings.get(NOTIFICATION_TIMEZONE_KEY)
     await self._notifier.send_message(
-      format_signal_message(payload, include_raw=include_raw)
+      format_signal_message(
+        payload, include_raw=include_raw, timezone_offset=timezone_offset
+      )
     )
     return {
       "status": "accepted",

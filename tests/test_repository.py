@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from broker.db import repository as repo_mod
 from broker.db.models import Account, BrokerSetting, Trade
 from broker.db.repository import (
+  SqlAlchemyAccountRepository,
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
   SqlAlchemyTradeRepository,
@@ -203,6 +204,45 @@ async def test_upsert_inserts_new_trade_and_account(monkeypatch):
   assert any(isinstance(o, Trade) for o in session.added)
 
 
+async def test_upsert_persists_gateway_on_new_account(monkeypatch):
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(market_type="CRYPTO", gateway="BINANCE")
+  )
+
+  account = next(o for o in session.added if isinstance(o, Account))
+  assert account.gateway == "BINANCE"
+  assert account.market_type == MarketTypeEnum.CRYPTO
+
+
+async def test_upsert_updates_gateway_on_existing_account(monkeypatch):
+  existing_account = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway="OLD"
+  )
+  existing_trade = Trade(
+    account_id="acc-1",
+    ref_id="rs-1",
+    strategy="strat",
+    strategy_code="",
+    symbol="XAUUSD",
+    action="LONG",
+    price=100.0,
+    quantity=0.1,
+    is_running=True,
+    risk_percent=1.0,
+    status=TradeStatusEnum.OPENED,
+  )
+  session = FakeSession(results=[[existing_account], [existing_trade]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(status="TP1", gateway="BINANCE")
+  )
+  assert existing_account.gateway == "BINANCE"
+
+
 async def test_upsert_uses_closed_price_when_present(monkeypatch):
   session = FakeSession(results=[[], []])
   _patch_session(monkeypatch, session)
@@ -325,3 +365,67 @@ async def test_get_many_returns_empty_dict_on_error(monkeypatch):
   _patch_session(monkeypatch, BoomSession(results=[]))
   result = await SqlAlchemySettingRepository().get_many(["a", "b"])
   assert result == {}
+
+
+# ── AccountRepository.upsert_gateway (WORKER_CONNECTED handshake) ─────
+
+
+async def test_upsert_gateway_backfills_existing_account(monkeypatch):
+  # The row predates the gateway column (or has only ever seen gateway-less
+  # TRADE events), so the handshake is what fills it in.
+  existing = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway=None
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().upsert_gateway(
+    "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+
+  assert existing.gateway == "BINANCE"
+  assert session.added == []
+
+
+async def test_upsert_gateway_inserts_unknown_account(monkeypatch):
+  # A worker that has connected but never traded is still addressable.
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().upsert_gateway(
+    "acc-2", MarketTypeEnum.FOREX, "MT5"
+  )
+
+  assert len(session.added) == 1
+  row = session.added[0]
+  assert row.account_id == "acc-2"
+  assert row.market_type == MarketTypeEnum.FOREX
+  assert row.gateway == "MT5"
+  assert row.last_activity_at is not None
+
+
+async def test_upsert_gateway_is_noop_when_unchanged(monkeypatch):
+  existing = Account(
+    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().upsert_gateway(
+    "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+
+  assert existing.gateway == "BINANCE"
+  assert session.added == []
+
+
+async def test_upsert_gateway_swallows_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+  # Bookkeeping only — a DB failure must never break the handshake reply.
+  await SqlAlchemyAccountRepository().upsert_gateway(
+    "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
