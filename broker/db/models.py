@@ -158,13 +158,22 @@ class Account(Base):
   market_type: Mapped[MarketTypeEnum] = mapped_column(
     Enum(MarketTypeEnum), nullable=False
   )
+  # Exchange/gateway the account trades through, e.g. MT5 (forex) or BINANCE
+  # (crypto). Combined with market_type + account_id it forms the worker
+  # addressing id <market>-<gateway>-<account_id> used on the SYSTEM subject.
+  # Nullable so rows predating this column (or workers that don't report it)
+  # remain valid.
+  gateway: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
   last_activity_at: Mapped[datetime | None] = mapped_column(
     DateTime(timezone=True), nullable=True
   )
 
   def __repr__(self) -> str:
-    return f"<Account id={self.id} account_id={self.account_id} market_type={self.market_type}>"
+    return (
+      f"<Account id={self.id} account_id={self.account_id} "
+      f"market_type={self.market_type} gateway={self.gateway}>"
+    )
 
 
 class BrokerSetting(Base):

@@ -32,7 +32,59 @@ log = get_logger(__name__)
 
 
 class SqlAlchemyAccountRepository:
-  """Reads rows from the ``accounts`` table."""
+  """Reads rows from the ``accounts`` table, and records the market/gateway a
+  worker announces when it connects."""
+
+  async def upsert_gateway(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> None:
+    """Persist the *market*/*gateway* a worker reported for *account_id*.
+
+    Called on every ``WORKER_CONNECTED`` handshake. Without this, ``gateway`` is
+    only ever written from a ``TRADE`` position event, so an account that has
+    not traded since the column was introduced keeps a NULL gateway and cannot
+    be addressed as ``<market>-<gateway>-<account_id>`` by the admin
+    ``CRYPTO_LEVERAGE_INIT`` push.
+
+    Inserts the row when the account is unknown (a worker that has connected but
+    never traded is still addressable). Best-effort: failures are logged, never
+    raised — the handshake reply matters more than this bookkeeping.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(Account.account_id == account_id)
+        )
+        row: Optional[Account] = result.scalars().first()
+
+        if row is not None:
+          if row.market_type == market and row.gateway == gateway:
+            return
+          row.market_type = market
+          row.gateway = gateway
+        else:
+          session.add(
+            Account(
+              id=uuid.uuid4(),
+              account_id=account_id,
+              market_type=market,
+              gateway=gateway,
+              last_activity_at=datetime.now(timezone.utc),
+            )
+          )
+
+      log.debug(
+        "account gateway upserted account_id=%s market=%s gateway=%s",
+        account_id,
+        market.value,
+        gateway,
+      )
+    except Exception as exc:
+      log.exception(
+        "Failed to upsert gateway for account_id=%s: %s",
+        account_id,
+        exc,
+      )
 
   async def get_all(self) -> list[Account]:
     """Return all accounts ordered by last_activity_at desc."""
@@ -44,6 +96,20 @@ class SqlAlchemyAccountRepository:
         return list(result.scalars().all())
     except Exception as exc:
       log.exception("Failed to fetch accounts: %s", exc)
+      return []
+
+  async def get_by_market(self, market: MarketTypeEnum) -> list[Account]:
+    """Return accounts in *market* ordered by last_activity_at desc."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account)
+          .where(Account.market_type == market)
+          .order_by(Account.last_activity_at.desc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception("Failed to fetch accounts for market=%s: %s", market, exc)
       return []
 
 
@@ -176,6 +242,8 @@ class SqlAlchemyTradeRepository:
       if event.account_name is not None:
         row.account_name = event.account_name
       row.market_type = MarketTypeEnum(event.market_type)
+      if event.gateway is not None:
+        row.gateway = event.gateway
       if event.account_balance is not None:
         row.account_balance = event.account_balance
       row.last_activity_at = now
@@ -187,6 +255,7 @@ class SqlAlchemyTradeRepository:
           account_name=event.account_name,
           account_balance=event.account_balance,
           market_type=MarketTypeEnum(event.market_type),
+          gateway=event.gateway,
           last_activity_at=now,
         )
       )
