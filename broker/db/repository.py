@@ -298,6 +298,8 @@ class SqlAlchemyTradeRepository:
         row.is_running = is_running
         row.price = price
         row.quantity = event.volume
+        if event.reject_reason is not None:
+          row.reject_reason = event.reject_reason
         if event.comment is not None:
           row.comment = event.comment
         if event.account_balance is not None:
@@ -336,7 +338,7 @@ class SqlAlchemyTradeRepository:
         is_running=is_running,
         risk_percent=event.risk_percent,
         status=trade_status,
-        reject_reason=None,
+        reject_reason=event.reject_reason,
       )
       session.add(new_row)
       await session.flush()

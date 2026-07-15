@@ -154,6 +154,15 @@ def test_position_event_valid():
   assert ev.event == PositionEventType.CREATED.value
   assert ev.risk_percent == 0.0  # default
   assert ev.closed_price is None
+  assert ev.reject_reason is None  # default
+
+
+def test_position_event_carries_reject_reason():
+  ev = PositionEvent(
+    **_event_dict(status="REJECTED", reject_reason="MAX ORDER limit reached")
+  )
+  assert ev.status == "REJECTED"
+  assert ev.reject_reason == "MAX ORDER limit reached"
 
 
 def test_position_event_missing_required_rejected():

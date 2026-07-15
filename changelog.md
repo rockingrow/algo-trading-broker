@@ -5,7 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.7] - Unreleased
+## [1.0.8] - Unreleased
+
+### Added
+
+- **`REJECTED` trade status** — Workers now emit a `TRADE` (`PositionEvent`) with
+  `status: "REJECTED"` when they refuse to place an order, e.g. when their
+  **MAX ORDER** limit is reached. The order is still persisted worker-side, so
+  the broker records a terminal, non-running trade instead of dropping the event
+  as an unknown status. `TradeStatusPolicy` maps `REJECTED` →
+  `TradeStatusEnum.REJECTED` (ranked below every other status, so it never
+  overwrites an existing trade for the same `ref_id`), and `is_running` is set
+  to `false`.
+- **`reject_reason` on the `TRADE` (`PositionEvent`) payload** — Optional field
+  carrying why the worker rejected the order (e.g. `"MAX ORDER limit reached"`).
+  `upsert_by_position_event` persists it onto the `trades.reject_reason` column
+  on both insert and update.
+
+## [1.0.7] - 2026-07-15
 
 ### Added
 
