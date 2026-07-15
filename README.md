@@ -141,6 +141,20 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 
 Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
 
+### `TRADE` events
+
+Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(account_id, ref_id)`, translating the worker's position status into a broker trade `status`:
+
+| Worker position status | Broker trade `status` | Running? |
+| ---------------------- | --------------------- | -------- |
+| `OPENED` | `OPENED` | Yes |
+| `TP1` | `PARTIALLY_CLOSED` | Yes |
+| `TP2`, `SL`, `R_SL`, `TERMINAL_CLOSED`, `FORCED_CLOSED` | `CLOSED` | No |
+| `FLATTED` | `FLAT` | No |
+| `REJECTED` | `REJECTED` | No |
+
+**`REJECTED`** is emitted when a worker refuses to place an order — for example when its **MAX ORDER** limit is reached. The worker still records the order in its own database and fires the `TRADE` event, so the broker persists a terminal, non-running trade carrying the worker's `reject_reason` (e.g. `"MAX ORDER limit reached"`). `REJECTED` ranks below every other status, so an event for an already-existing `ref_id` is treated as a lifecycle downgrade and ignored — only a brand-new order is recorded as rejected.
+
 ### `SYSTEM` handshake
 
 When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation:
