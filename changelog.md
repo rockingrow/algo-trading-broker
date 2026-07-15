@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.7] - 2026-07-15
+## [1.0.8] - Unreleased
 
 ### Added
 
@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carrying why the worker rejected the order (e.g. `"MAX ORDER limit reached"`).
   `upsert_by_position_event` persists it onto the `trades.reject_reason` column
   on both insert and update.
+
+## [1.0.7] - 2026-07-15
+
+### Added
+
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
   for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
