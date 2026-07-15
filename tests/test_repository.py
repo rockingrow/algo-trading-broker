@@ -254,6 +254,23 @@ async def test_upsert_uses_closed_price_when_present(monkeypatch):
   assert result.is_running is False
 
 
+async def test_upsert_inserts_rejected_trade_with_reason(monkeypatch):
+  # A worker that hits its MAX ORDER limit still persists the order and fires a
+  # TRADE with status REJECTED; the broker records it as a terminal, non-running
+  # trade carrying the reject reason.
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(status="REJECTED", reject_reason="MAX ORDER limit reached")
+  )
+
+  assert isinstance(result, Trade)
+  assert result.status == TradeStatusEnum.REJECTED
+  assert result.is_running is False
+  assert result.reject_reason == "MAX ORDER limit reached"
+
+
 async def test_upsert_updates_existing_trade(monkeypatch):
   existing_account = Account(account_id="acc-1", market_type=MarketTypeEnum.FOREX)
   existing_trade = Trade(

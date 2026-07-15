@@ -48,6 +48,9 @@ class PositionEvent(BaseModel):
   opened_price: float
   closed_price: Optional[float] = None
   status: str
+  # Why the worker refused to execute the order when ``status`` is ``REJECTED``
+  # (e.g. its MAX ORDER limit was reached). Persisted onto the trade row.
+  reject_reason: Optional[str] = None
   gateway_return_code: Optional[int] = None
   comment: Optional[str] = None
   message: Optional[str] = None

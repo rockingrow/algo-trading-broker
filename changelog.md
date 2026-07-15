@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`REJECTED` trade status** — Workers now emit a `TRADE` (`PositionEvent`) with
+  `status: "REJECTED"` when they refuse to place an order, e.g. when their
+  **MAX ORDER** limit is reached. The order is still persisted worker-side, so
+  the broker records a terminal, non-running trade instead of dropping the event
+  as an unknown status. `TradeStatusPolicy` maps `REJECTED` →
+  `TradeStatusEnum.REJECTED` (ranked below every other status, so it never
+  overwrites an existing trade for the same `ref_id`), and `is_running` is set
+  to `false`.
+- **`reject_reason` on the `TRADE` (`PositionEvent`) payload** — Optional field
+  carrying why the worker rejected the order (e.g. `"MAX ORDER limit reached"`).
+  `upsert_by_position_event` persists it onto the `trades.reject_reason` column
+  on both insert and update.
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
   for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
