@@ -1,6 +1,6 @@
 import json
 
-from broker.services.signal_worker import SignalWorker
+from broker.services.signal_processing_service import SignalWorker
 
 
 class FakeMsg:

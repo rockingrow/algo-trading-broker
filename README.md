@@ -112,7 +112,7 @@ algo-trading-broker/
 │   ├── interfaces/      # Protocols for DI (DB, notifier, publisher)
 │   ├── schemas/         # Pydantic schemas (webhook, publisher, subscriber, trade, account, admin)
 │   ├── security/        # Auth guard (ensure_api_key — X-API-KEY)
-│   ├── services/        # nats_publisher, nats_service, notification, signal_processing
+│   ├── services/        # nats_service, notification, signal_processing
 │   ├── app.py           # FastAPI application factory
 │   ├── main.py          # Entrypoint (uvicorn runner)
 │   ├── router.py        # Aggregates sub-routers under /v1, /admin, /secret

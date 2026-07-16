@@ -8,7 +8,7 @@ from broker.schemas.publisher_schema import (
   SystemActionEnum,
   TradingSignal,
 )
-from broker.services.nats_publisher import NatsPublisher
+from broker.services.nats_service import NatsPublisher
 
 
 class FakeNC:

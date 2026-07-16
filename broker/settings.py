@@ -100,6 +100,16 @@ class Settings(BaseSettings):
   # job from racing an in-flight attempt.
   SIGNAL_RETRY_INTERVAL_SECONDS: int = 15
 
+  # ── JetStream consumer (feeds handle_enqueued) ────────────────────
+  # Consumer name is durable so a broker restart resumes from the same
+  # position on the stream instead of skipping past unacked messages.
+  JETSTREAM_SIGNAL_CONSUMER: str = "broker_signal_handler"
+  # Batch size and fetch timeout picked for a single-writer webhook: even the
+  # noisiest TradingView setup rarely bursts more than a handful of alerts a
+  # second, so 10-per-fetch keeps latency low while amortising the pull round trip.
+  JETSTREAM_FETCH_BATCH: int = 10
+  JETSTREAM_FETCH_TIMEOUT_SECONDS: float = 1.0
+
   @property
   def postgres_dsn(self) -> str:
     return (

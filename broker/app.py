@@ -18,12 +18,17 @@ from broker.nats import nats_client
 from broker.openapi import fastapi_kwargs
 from broker.providers import make_signals_notifier
 from broker.router import get_core_router
-from broker.services.nats_publisher import NatsPublisher
-from broker.services.nats_service import SystemEventConsumer, TradeEventConsumer
+from broker.services.nats_service import (
+  NatsPublisher,
+  SystemEventConsumer,
+  TradeEventConsumer,
+)
 from broker.services.notification_service import TelegramNotification
-from broker.services.signal_processing_service import SignalProcessingService
+from broker.services.signal_processing_service import (
+  SignalProcessingService,
+  SignalWorker,
+)
 from broker.services.signal_retry_job import SignalRetryJob
-from broker.services.signal_worker import SignalWorker
 from broker.settings import settings
 
 log = get_logger(__name__)
