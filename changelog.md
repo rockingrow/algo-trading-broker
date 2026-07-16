@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Live FLAT payload now carries `signal_id`** — `NatsPublisher.publish_flat`
+  and the `SignalPublisher` protocol take `signal_id` as a required keyword
+  arg, and the published JSON includes a `signal_id` field. LONG/SHORT/TP/…
+  already carried it via `TradingSignal`, so live FLAT was the last shape
+  without one; adding it lets a worker de-duplicate a signal seen live
+  against the same signal replayed inside a `SYSTEM.RETRY_SIGNAL` bundle by
+  `signal_id`. Example: `examples/nats/close.flat.json`.
 - **`SignalProcessingService` reshaped around three entry points** —
   `enqueue` (webhook fast path), `handle_enqueued` (JetStream first
   attempt, including persist + block gate), and `retry_signal` (retry job,

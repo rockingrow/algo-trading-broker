@@ -150,6 +150,8 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 
 Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
 
+Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside a `SYSTEM.RETRY_SIGNAL` replay bundle, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
+
 ### `TRADE` events
 
 Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(account_id, ref_id)`, translating the worker's position status into a broker trade `status`:

@@ -17,7 +17,12 @@ class SignalPublisher(Protocol):
   async def publish(self, signal: TradingSignal) -> None: ...
 
   async def publish_flat(
-    self, symbol: str, timestamp: datetime, strategy: str
+    self,
+    *,
+    signal_id: str,
+    symbol: str,
+    timestamp: datetime,
+    strategy: str,
   ) -> None: ...
 
   async def publish_admin_signal(self, **kwargs) -> None: ...

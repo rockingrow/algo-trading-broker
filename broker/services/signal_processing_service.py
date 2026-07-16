@@ -197,7 +197,7 @@ class SignalProcessingService:
     """Publish to workers and notify; record success or attempt failure."""
     try:
       if payload.position.action == SignalActionEnum.FLAT:
-        await self._publish_flat(payload)
+        await self._publish_flat(payload, signal_id)
       else:
         await self._publish_signal(payload, signal_id)
     except Exception as exc:
@@ -244,9 +244,10 @@ class SignalProcessingService:
       log.warning("Blocked-signal notification failed: %s", exc)
     return True
 
-  async def _publish_flat(self, payload: WebhookPayload) -> None:
+  async def _publish_flat(self, payload: WebhookPayload, signal_id: str) -> None:
     flat_symbol = payload.symbol.split(":")[-1].upper().strip()
     await self._publisher.publish_flat(
+      signal_id=signal_id,
       symbol=flat_symbol,
       timestamp=payload.timestamp,
       strategy=payload.strategy,

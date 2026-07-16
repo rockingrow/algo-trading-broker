@@ -107,10 +107,10 @@ class FakePublisher:
       raise RuntimeError("worker publish failed")
     self.published.append(signal)
 
-  async def publish_flat(self, symbol, timestamp, strategy):
+  async def publish_flat(self, *, signal_id, symbol, timestamp, strategy):
     if self._publish_fails:
       raise RuntimeError("worker publish failed")
-    self.flats.append((symbol, timestamp, strategy))
+    self.flats.append((signal_id, symbol, timestamp, strategy))
 
   async def publish_admin_signal(self, **kwargs):
     return None
@@ -256,8 +256,10 @@ async def test_handle_enqueued_flat_uses_publish_flat():
   )
 
   assert result["status"] == "accepted"
+  # signal_id is threaded through so workers can dedup live FLAT against a
+  # RETRY_SIGNAL replay of the same signal.
   assert publisher.flats == [
-    ("XAUUSD", datetime(2026, 1, 1, tzinfo=timezone.utc), "strat")
+    (result["signal_id"], "XAUUSD", datetime(2026, 1, 1, tzinfo=timezone.utc), "strat")
   ]
   assert publisher.published == []
   assert signal_repo.published_ids == [result["signal_id"]]

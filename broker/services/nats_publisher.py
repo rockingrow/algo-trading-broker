@@ -79,10 +79,24 @@ class NatsPublisher:
       signal.symbol,
     )
 
-  async def publish_flat(self, symbol: str, timestamp: datetime, strategy: str) -> None:
-    """Broadcast a FLAT (close-all) directive on the strategy subject."""
+  async def publish_flat(
+    self,
+    *,
+    signal_id: str,
+    symbol: str,
+    timestamp: datetime,
+    strategy: str,
+  ) -> None:
+    """Broadcast a FLAT (close-all) directive on the strategy subject.
+
+    Carries ``signal_id`` — same field the LONG/SHORT/TP payloads (a full
+    ``TradingSignal``) already do — so a worker seeing this signal live and
+    then again inside a ``SYSTEM.RETRY_SIGNAL`` replay can de-duplicate by
+    id instead of by guessing on content.
+    """
     payload = json.dumps(
       {
+        "signal_id": signal_id,
         "strategy": strategy,
         "timestamp": timestamp.isoformat(),
         "action": SignalActionEnum.FLAT.value,
@@ -90,7 +104,12 @@ class NatsPublisher:
       }
     ).encode()
     await self._conn.nc.publish(strategy, payload)
-    log.info("Published [%s] FLAT directive symbol=%s", strategy, symbol)
+    log.info(
+      "Published [%s] FLAT directive signal_id=%s symbol=%s",
+      strategy,
+      signal_id,
+      symbol,
+    )
 
   async def publish_admin_signal(self, **kwargs) -> None:
     """Broadcast an admin signal on the ADMIN subject."""
