@@ -64,11 +64,18 @@ from typing import Optional
 from nats.aio.subscription import Subscription
 from pydantic import ValidationError
 
-from broker.constants import CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY
+from broker.constants import (
+  CRYPTO_ALLOWED_SYMBOL_KEY,
+  CRYPTO_MAX_LEVERAGE_KEY,
+  DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
+  MAX_RETRY_TIMEOUT_KEY,
+)
+from broker.helpers.signal_helper import parse_signal
 from broker.interfaces import (
   AccountRepository,
   SettingRepository,
   SignalPublisher,
+  SignalRepository,
   TradeRepository,
 )
 from broker.logger import get_logger
@@ -79,8 +86,10 @@ from broker.schemas.publisher_schema import (
   PublishTopicEnum,
   SystemActionEnum,
   SystemWorkerConnectedSignal,
+  TradingSignal,
 )
 from broker.schemas.trade_event_schema import PositionEvent
+from broker.schemas.webhook_schema import WebhookPayload
 
 log = get_logger(__name__)
 
@@ -160,11 +169,13 @@ class SystemEventConsumer:
     setting_repository: SettingRepository,
     account_repository: AccountRepository,
     publisher: SignalPublisher,
+    signal_repository: SignalRepository | None = None,
     connection: NatsClient | None = None,
   ) -> None:
     self._settings = setting_repository
     self._accounts = account_repository
     self._publisher = publisher
+    self._signals = signal_repository
     self._conn = connection or nats_client
     self._sub: Optional[Subscription] = None
     self._crypto_settings_cache: tuple[Optional[str], Optional[str]] | None = None
@@ -239,6 +250,13 @@ class SystemEventConsumer:
     )
 
     await self._remember_worker(event)
+
+    # Every WORKER_CONNECTED gets a RETRY_SIGNAL replay of the recent signals
+    # matching the strategies the worker announced, so a reconnecting worker
+    # can catch up on broadcasts it missed while offline. The replay is sent
+    # in addition to (never instead of) the ACK / CRYPTO_LEVERAGE_INIT so
+    # non-crypto workers get their catch-up too.
+    await self._send_retry_signal(event.account_id, event.strategies, reply_to)
 
     # Only crypto workers need leverage configuration pushed back on connect.
     if event.market != MarketEnum.CRYPTO.value:
@@ -344,6 +362,85 @@ class SystemEventConsumer:
         account_id,
         exc,
       )
+
+  async def _send_retry_signal(
+    self, account_id: str, strategies: list[str], reply_to: str = ""
+  ) -> None:
+    """Push a RETRY_SIGNAL replay of the last ``max_retry_timeout`` seconds.
+
+    Nothing to do when the worker announced no strategies, or when we have no
+    ``SignalRepository`` wired in (the deployment opted out of the replay).
+    Query hits are shaped through ``parse_signal`` so the payload matches the
+    live SIGNAL messages exactly. Best-effort: a broken lookup, an invalid
+    persisted row, or a failed publish is logged and the handshake continues.
+    """
+    if self._signals is None or not strategies:
+      return
+
+    window_seconds = await self._get_max_retry_timeout_seconds()
+    try:
+      envelopes = await self._signals.list_recent_by_strategies(
+        strategies=strategies, since_seconds=window_seconds
+      )
+    except Exception as exc:
+      log.exception(
+        "SYSTEM RETRY_SIGNAL skipped account_id=%s: signals lookup failed: %s",
+        account_id,
+        exc,
+      )
+      return
+
+    signals: list[TradingSignal] = []
+    for envelope in envelopes:
+      raw_payload = envelope.get("payload")
+      signal_id = envelope.get("signal_id")
+      if not isinstance(raw_payload, dict) or not signal_id:
+        continue
+      try:
+        payload = WebhookPayload(**raw_payload)
+        signals.append(parse_signal(payload, signal_id))
+      except Exception as exc:
+        # A single bad row must not derail the replay for the rest.
+        log.warning(
+          "SYSTEM RETRY_SIGNAL skipping bad row signal_id=%s: %s", signal_id, exc
+        )
+
+    try:
+      await self._publisher.publish_system_retry_signal(
+        account_id=account_id,
+        signals=signals,
+        subject=reply_to or None,
+      )
+    except Exception as exc:
+      log.exception(
+        "Failed to publish RETRY_SIGNAL for account_id=%s: %s", account_id, exc
+      )
+
+  async def _get_max_retry_timeout_seconds(self) -> int:
+    """Read the ``max_retry_timeout`` broker setting, falling back to the
+    default on missing/invalid values."""
+    raw = await self._settings.get(MAX_RETRY_TIMEOUT_KEY)
+    if raw is None:
+      return DEFAULT_MAX_RETRY_TIMEOUT_SECONDS
+    try:
+      value = int(raw)
+    except (TypeError, ValueError):
+      log.warning(
+        "%s is not an integer: %r — using default %d",
+        MAX_RETRY_TIMEOUT_KEY,
+        raw,
+        DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
+      )
+      return DEFAULT_MAX_RETRY_TIMEOUT_SECONDS
+    if value <= 0:
+      log.warning(
+        "%s must be positive, got %r — using default %d",
+        MAX_RETRY_TIMEOUT_KEY,
+        raw,
+        DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
+      )
+      return DEFAULT_MAX_RETRY_TIMEOUT_SECONDS
+    return value
 
   async def _get_crypto_settings(self) -> tuple[Optional[str], Optional[str]]:
     """Return (symbols_raw, leverage_raw), reusing a cached read for up to

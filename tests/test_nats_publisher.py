@@ -21,9 +21,24 @@ class FakeNC:
     self.published.append((subject, json.loads(payload.decode())))
 
 
+class FakeAck:
+  def __init__(self, seq: int = 1):
+    self.seq = seq
+
+
+class FakeJS:
+  def __init__(self):
+    self.published: list[tuple[str, dict]] = []
+
+  async def publish(self, subject, payload):
+    self.published.append((subject, json.loads(payload.decode())))
+    return FakeAck(seq=len(self.published))
+
+
 class FakeConn:
   def __init__(self):
     self.nc = FakeNC()
+    self.js = FakeJS()
 
 
 def _signal(**overrides) -> TradingSignal:
@@ -150,3 +165,48 @@ async def test_publish_system_error():
   assert body["action"] == "WORKER_CONNECTED_ERROR"
   assert body["account_id"] is None
   assert body["reason"] == "crypto settings not configured"
+
+
+async def test_publish_webhook_event_targets_jetstream_signal_subject():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_webhook_event(
+    signal_id="sig-123",
+    strategy="wt_cross_v1",
+    envelope={"signal_id": "sig-123", "payload": {"strategy": "wt_cross_v1"}},
+  )
+
+  # Core NATS is untouched; the envelope lands on JetStream under SIGNALS.<strategy>.
+  assert conn.nc.published == []
+  assert len(conn.js.published) == 1
+  subject, body = conn.js.published[0]
+  assert subject == "SIGNALS.wt_cross_v1"
+  assert body["signal_id"] == "sig-123"
+
+
+async def test_publish_system_retry_signal_broadcasts_when_no_subject():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  signal = _signal(strategy="wt_cross_v1")
+  await publisher.publish_system_retry_signal(
+    account_id="FOREX-MT5-1", signals=[signal]
+  )
+
+  subject, body = conn.nc.published[0]
+  assert subject == PublishTopicEnum.SYSTEM.value
+  assert body["action"] == SystemActionEnum.RETRY_SIGNAL.value
+  assert body["account_id"] == "FOREX-MT5-1"
+  assert len(body["signals"]) == 1
+  assert body["signals"][0]["signal_id"] == "sig-1"
+
+
+async def test_publish_system_retry_signal_replies_directly_when_subject_set():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_retry_signal(
+    account_id="FOREX-MT5-1", signals=[], subject="_INBOX.reply"
+  )
+  subject, body = conn.nc.published[0]
+  assert subject == "_INBOX.reply"
+  assert body["action"] == SystemActionEnum.RETRY_SIGNAL.value
+  assert body["signals"] == []

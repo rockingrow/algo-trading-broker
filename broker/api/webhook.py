@@ -35,7 +35,7 @@ def get_webhook_router() -> APIRouter:
     tags=["webhook"],
     summary="Receive a TradingView alert",
     responses={
-      202: {"description": "Signal accepted, persisted and published."},
+      202: {"description": "Signal accepted, persisted and queued on JetStream."},
       401: {"description": "Invalid webhook `token`."},
       403: {"description": "Signals are currently blocked by the broker."},
     },
@@ -47,8 +47,10 @@ def get_webhook_router() -> APIRouter:
     """Main entry point for incoming signals.
 
     Authenticated via the `token` field inside the JSON body (not the
-    `X-API-KEY` header). Delegates the full pipeline — auth, block-check,
-    persist, publish, notify — to ``SignalProcessingService``.
+    `X-API-KEY` header). The route only runs the fast path — verify, block
+    check, persist (``status=QUEUED``), enqueue on JetStream — so TradingView
+    is not held open across the fan-out. The background ``SignalWorker`` picks
+    the envelope up and runs publish + notify + mark PUBLISHED.
     """
     try:
       return await service.process(payload)

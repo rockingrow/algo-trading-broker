@@ -14,6 +14,12 @@ class SignalRepository(Protocol):
 
   async def log_signal(self, payload: WebhookPayload) -> str | None: ...
 
+  async def mark_published(self, signal_id: str) -> bool: ...
+
+  async def list_recent_by_strategies(
+    self, strategies: list[str], since_seconds: int
+  ) -> list[dict]: ...
+
 
 @runtime_checkable
 class SettingRepository(Protocol):

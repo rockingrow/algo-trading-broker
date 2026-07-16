@@ -44,6 +44,7 @@ class FakeSettingRepo:
 class FakePublisher:
   def __init__(self):
     self.calls: list[dict] = []
+    self.retries: list[dict] = []
     self.acks: list[dict] = []
     self.errors: list[dict] = []
 
@@ -58,6 +59,9 @@ class FakePublisher:
 
   async def publish_system_signal(self, **kwargs) -> None:
     self.calls.append(kwargs)
+
+  async def publish_system_retry_signal(self, **kwargs) -> None:
+    self.retries.append(kwargs)
 
   async def publish_system_ack(self, **kwargs) -> None:
     self.acks.append(kwargs)
@@ -76,21 +80,42 @@ def _worker_connected_payload(
   account_id: str = "CRYPTO-BINANCE-7654321",
   market: str = "CRYPTO",
   gateway: str = "BINANCE",
+  strategies: list[str] | None = None,
 ) -> bytes:
-  return json.dumps(
-    {
-      "action": "WORKER_CONNECTED",
-      "account_id": account_id,
-      "timestamp": "2026-06-30T00:00:00+00:00",
-      "market": market,
-      "gateway": gateway,
-    }
-  ).encode()
+  body: dict = {
+    "action": "WORKER_CONNECTED",
+    "account_id": account_id,
+    "timestamp": "2026-06-30T00:00:00+00:00",
+    "market": market,
+    "gateway": gateway,
+  }
+  if strategies is not None:
+    body["strategies"] = strategies
+  return json.dumps(body).encode()
+
+
+class FakeSignalRepo:
+  def __init__(self, envelopes: list[dict] | None = None):
+    self._envelopes = list(envelopes or [])
+    self.calls: list[tuple[list[str], int]] = []
+
+  async def log_signal(self, payload):
+    return "sig-id"
+
+  async def mark_published(self, signal_id: str) -> bool:
+    return True
+
+  async def list_recent_by_strategies(
+    self, strategies: list[str], since_seconds: int
+  ) -> list[dict]:
+    self.calls.append((list(strategies), since_seconds))
+    return list(self._envelopes)
 
 
 def _make_consumer(
   settings: dict[str, str | None] | None = None,
   accounts: FakeAccountRepo | None = None,
+  signals: FakeSignalRepo | None = None,
 ) -> tuple[SystemEventConsumer, FakeSettingRepo, FakePublisher]:
   repo = FakeSettingRepo(
     settings
@@ -105,6 +130,7 @@ def _make_consumer(
     setting_repository=repo,
     account_repository=accounts or FakeAccountRepo(),
     publisher=publisher,
+    signal_repository=signals,
   )
   return consumer, repo, publisher
 
@@ -573,3 +599,133 @@ async def test_stop_unsubscribes():
   await consumer.start()
   await consumer.stop()
   assert conn.nc._sub.unsubscribed is True
+
+
+# ── RETRY_SIGNAL replay on WORKER_CONNECTED ────────────────────────────────
+
+
+def _webhook_envelope(strategy: str, signal_id: str = "sig-1") -> dict:
+  return {
+    "signal_id": signal_id,
+    "payload": {
+      "strategy": strategy,
+      "symbol": "OANDA:XAUUSD",
+      "timeframe": "60",
+      "timestamp": "2026-06-30T00:00:00+00:00",
+      "position": {
+        "action": "LONG",
+        "price": 100.0,
+        "quantity": 1.0,
+      },
+      "token": "secret",
+    },
+  }
+
+
+async def test_retry_signal_queries_and_replays_matching_signals():
+  signals = FakeSignalRepo(envelopes=[_webhook_envelope("wt_cross_v1")])
+  consumer, _repo, publisher = _make_consumer(signals=signals)
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-1",
+        market="FOREX",
+        gateway="MT5",
+        strategies=["wt_cross_v1"],
+      ),
+      reply="_INBOX.forex",
+    )
+  )
+
+  # The strategies list and default (60s) window drive the lookup.
+  assert signals.calls == [(["wt_cross_v1"], 60)]
+
+  assert len(publisher.retries) == 1
+  retry = publisher.retries[0]
+  assert retry["account_id"] == "FOREX-MT5-1"
+  assert retry["subject"] == "_INBOX.forex"
+  assert len(retry["signals"]) == 1
+  # Payload mirrors SIGNAL exactly (symbol normalised, strategy carried).
+  assert retry["signals"][0].symbol == "XAUUSD"
+  assert retry["signals"][0].strategy == "wt_cross_v1"
+
+
+async def test_retry_signal_uses_configured_timeout():
+  signals = FakeSignalRepo()
+  consumer, _repo, _pub = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+      CRYPTO_MAX_LEVERAGE_KEY: "10",
+      "max_retry_timeout": "120",
+    },
+    signals=signals,
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
+  )
+  assert signals.calls == [(["wt_cross_v1"], 120)]
+
+
+async def test_retry_signal_defaults_when_timeout_setting_invalid():
+  signals = FakeSignalRepo()
+  consumer, _repo, _pub = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+      CRYPTO_MAX_LEVERAGE_KEY: "10",
+      "max_retry_timeout": "bad",
+    },
+    signals=signals,
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
+  )
+  assert signals.calls == [(["wt_cross_v1"], 60)]
+
+
+async def test_retry_signal_skipped_without_strategies():
+  signals = FakeSignalRepo()
+  consumer, _repo, publisher = _make_consumer(signals=signals)
+  # No `strategies` field → default_factory gives []; nothing to replay.
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert signals.calls == []
+  assert publisher.retries == []
+
+
+async def test_retry_signal_skipped_when_no_signal_repository():
+  # Existing deployments that don't wire a SignalRepository must still work.
+  consumer, _repo, publisher = _make_consumer()
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
+  )
+  assert publisher.retries == []
+
+
+async def test_retry_signal_sent_alongside_crypto_leverage_init():
+  # A crypto worker gets both the RETRY_SIGNAL replay AND CRYPTO_LEVERAGE_INIT.
+  signals = FakeSignalRepo(envelopes=[_webhook_envelope("wt_cross_v1")])
+  consumer, _repo, publisher = _make_consumer(signals=signals)
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(strategies=["wt_cross_v1"]), reply="_INBOX.abc"
+    )
+  )
+  assert len(publisher.retries) == 1
+  assert len(publisher.calls) == 1
+  assert publisher.calls[0]["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
+
+
+async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
+  signals = FakeSignalRepo(
+    envelopes=[
+      {"signal_id": "sig-bad", "payload": {"not": "a webhook"}},
+      _webhook_envelope("wt_cross_v1", signal_id="sig-good"),
+    ]
+  )
+  consumer, _repo, publisher = _make_consumer(signals=signals)
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
+  )
+  assert len(publisher.retries) == 1
+  retry = publisher.retries[0]
+  assert len(retry["signals"]) == 1
+  assert retry["signals"][0].signal_id == "sig-good"

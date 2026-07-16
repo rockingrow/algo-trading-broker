@@ -1,0 +1,20 @@
+{
+  "action": "RETRY_SIGNAL",
+  "account_id": "CRYPTO-BINANCE-7654321",
+  "timestamp": "2026-07-16T00:00:00+00:00",
+  "signals": [
+    {
+      "signal_id": "sig_123456789_long",
+      "timestamp": "2026-07-15T23:59:30+00:00",
+      "strategy": "wt_cross_v1",
+      "action": "LONG",
+      "symbol": "XAUUSD",
+      "price": 2350.5,
+      "quantity": 0.1,
+      "sl": 2340.0,
+      "tp1": 2370.0,
+      "tp2": 2390.0,
+      "risk_percent": 1.0
+    }
+  ]
+}

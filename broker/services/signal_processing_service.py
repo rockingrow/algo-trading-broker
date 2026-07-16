@@ -1,11 +1,28 @@
 """
-broker/services/signal_processing_service.py — Orchestrates the inbound webhook
-flow: authenticate, check the block switch, persist, publish, notify.
+broker/services/signal_processing_service.py — Webhook pipeline, split into a
+fast enqueue step (invoked by the HTTP handler) and a background handler step
+(invoked by the JetStream consumer).
 
-The service depends only on abstractions (``SignalRepository``,
-``SettingRepository``, ``SignalPublisher``, ``Notifier``) so it can be unit
-tested with in-memory fakes. It raises the framework-agnostic ``SignalError``;
-the HTTP layer translates that into an ``HTTPException``.
+Enqueue path (``process``):
+  1. verify the webhook token
+  2. reject if signals are blocked
+  3. persist the row (``status=QUEUED``)
+  4. push the raw envelope onto JetStream and return
+
+The HTTP handler therefore only ever runs steps 1–4, which are all fast, so
+TradingView's connection is not held open across the fan-out to workers. The
+JetStream consumer picks the envelope up and runs the rest.
+
+Handler path (``handle_enqueued``):
+  * parse the persisted webhook payload into a ``TradingSignal``
+  * publish it on the strategy subject (or FLAT on the strategy subject)
+  * send the Telegram notification
+  * mark the DB row ``PUBLISHED``
+
+The service still depends only on abstractions (``SignalRepository``,
+``SettingRepository``, ``SignalPublisher``, ``Notifier``) so both flows can be
+exercised with in-memory fakes. It raises the framework-agnostic
+``SignalError``; the HTTP layer translates that into an ``HTTPException``.
 """
 
 from __future__ import annotations
@@ -46,7 +63,7 @@ class SignalError(Exception):
 
 
 class SignalProcessingService:
-  """Coordinates persistence, publishing, and notification for a webhook."""
+  """Coordinates persistence, JetStream enqueue, publishing, and notification."""
 
   def __init__(
     self,
@@ -63,8 +80,15 @@ class SignalProcessingService:
     self._notifier = notifier
     self._webhook_secret = webhook_secret
 
+  # ── Enqueue path (called from the webhook route) ───────────────────
+
   async def process(self, payload: WebhookPayload) -> Dict[str, Any]:
-    """Run the full webhook pipeline and return the response body."""
+    """Validate, persist (QUEUED), enqueue on JetStream. Fast path only.
+
+    The whole fan-out to workers and Telegram runs later, from the JetStream
+    consumer. This method never touches the strategy subject directly, so
+    TradingView is not held open across a slow publish.
+    """
     self._verify_token(payload)
     await self._ensure_not_blocked(payload)
 
@@ -72,10 +96,48 @@ class SignalProcessingService:
     if not db_signal_id:
       raise SignalError(500, "Failed to persist signal into database")
 
-    if payload.position.action == SignalActionEnum.FLAT:
-      return await self._handle_flat(payload, db_signal_id)
+    envelope = {
+      "signal_id": db_signal_id,
+      "payload": payload.model_dump(mode="json"),
+    }
+    try:
+      await self._publisher.publish_webhook_event(
+        signal_id=db_signal_id,
+        strategy=payload.strategy,
+        envelope=envelope,
+      )
+    except Exception as exc:
+      log.exception("JetStream enqueue error: %s", exc)
+      raise SignalError(500, f"Signal logged but enqueue failed: {exc}")
 
-    return await self._handle_signal(payload, db_signal_id)
+    return {
+      "status": "queued",
+      "signal_id": db_signal_id,
+      "timestamp": payload.timestamp.isoformat(),
+    }
+
+  # ── Handler path (called from the JetStream consumer) ──────────────
+
+  async def handle_enqueued(
+    self, *, signal_id: str, payload: WebhookPayload
+  ) -> Dict[str, Any]:
+    """Run the webhook fan-out for a previously enqueued envelope.
+
+    Mirrors what ``process`` used to do inline: publish to workers, notify, and
+    flip the DB row to ``PUBLISHED``. Returns the same shape the route used to
+    return so tests and logs stay comparable.
+    """
+    if payload.position.action == SignalActionEnum.FLAT:
+      result = await self._handle_flat(payload, signal_id)
+    else:
+      result = await self._handle_signal(payload, signal_id)
+
+    updated = await self._signals.mark_published(signal_id)
+    if not updated:
+      log.warning(
+        "signal_id=%s handled but status not updated to PUBLISHED", signal_id
+      )
+    return result
 
   # ── Steps ──────────────────────────────────────────────────────────
 

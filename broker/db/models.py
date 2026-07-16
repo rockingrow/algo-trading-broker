@@ -24,7 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from broker.schemas.account_schema import MarketTypeEnum
-from broker.schemas.core import SignalActionEnum
+from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.trade_schema import TradeStatusEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -79,6 +79,18 @@ class Signal(Base):
     Boolean, nullable=False, default=False
   )
   scale_strategy: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+  # Delivery state: QUEUED once persisted, PUBLISHED after the JetStream handler
+  # has fanned it out to workers and finished the notification pipeline. Stuck
+  # QUEUED rows flag signals JetStream failed to deliver so an operator can
+  # audit them without re-reading raw broker logs.
+  status: Mapped[SignalStatusEnum] = mapped_column(
+    Enum(SignalStatusEnum),
+    nullable=False,
+    default=SignalStatusEnum.QUEUED,
+    server_default=SignalStatusEnum.QUEUED.value,
+    index=True,
+  )
 
   # Complex objects stored as JSONB
   indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)

@@ -38,6 +38,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NATS JetStream ingestion for webhook events** — The `POST /secret/webhook`
+  handler now only verifies the token, checks the block gate, persists the
+  signal row (`status=QUEUED`) and pushes a durable envelope onto the
+  JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). A new background
+  `SignalWorker` (`broker/services/signal_worker.py`) is a durable pull
+  consumer (`broker_signal_handler`) that fetches envelopes, runs the
+  parse/publish/notify pipeline in its own task, flips the row to `PUBLISHED`,
+  and acks — or NAKs on failure so JetStream redelivers. TradingView therefore
+  gets its `202` as soon as the message is durably queued, closing the
+  `Webhook delivery failed — server closed the connection unexpectedly`
+  failure mode caused by holding the HTTP request open across the fan-out.
+  Docker-compose now runs `nats-server` with `-js -sd /data/jetstream` and a
+  named `nats_data` volume so the stream survives restarts.
+- **`signals.status` column** — Added via Alembic migration `a5e6f7b8c9d0`.
+  Enum (`QUEUED`, `PUBLISHED`) that records where each webhook signal is in
+  the JetStream pipeline. Stuck `QUEUED` rows surface signals JetStream failed
+  to deliver so an operator can audit them without re-reading raw broker logs.
+- **`WORKER_CONNECTED.strategies` field** — `SystemWorkerConnectedSignal` now
+  carries a list of strategy subjects the worker subscribes to. Drives the
+  new `SYSTEM.RETRY_SIGNAL` replay so the broker only replays signals the
+  worker actually consumes.
+- **`SYSTEM.RETRY_SIGNAL` action** — On every `WORKER_CONNECTED` handshake (in
+  addition to the existing `CRYPTO_LEVERAGE_INIT` / `WORKER_CONNECTED_ACK`
+  reply), the broker sends a `RETRY_SIGNAL` back to the worker: every signal
+  persisted in the last `max_retry_timeout` seconds whose strategy the worker
+  announced. Payload is a list of the same objects normally published on the
+  strategy subject, so the worker can replay them through the same handler.
+  Delivered on the request's reply inbox when the handshake used NATS
+  request/reply, otherwise broadcast on the shared `SYSTEM` subject. Introduces
+  the `SystemRetrySignal` schema and `NatsPublisher.publish_system_retry_signal`
+  (plus the matching `SignalPublisher` protocol entry).
+- **`max_retry_timeout` broker setting** — Seeded to `"60"` via Alembic
+  migration `a5e6f7b8c9d0`. Time window (in seconds) used to select signals
+  for the `RETRY_SIGNAL` replay. Missing/invalid values fall back to `60`.
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
   for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
@@ -54,6 +88,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Webhook pipeline split into enqueue + JetStream handler** — What used to
+  run inline on `POST /secret/webhook` (persist → parse → publish to workers →
+  notify) is now two hops. The route only runs the fast half (verify + block
+  check + persist `QUEUED` + JetStream publish) and returns `202` with
+  `status=queued`. The `SignalWorker` runs the second half from the JetStream
+  consumer callback and flips the row to `PUBLISHED`. `SignalProcessingService`
+  gains `handle_enqueued` for the consumer path; the existing `process` now
+  handles only the enqueue path. `SignalRepository` grows two methods —
+  `mark_published` and `list_recent_by_strategies` — used by the worker and
+  the `RETRY_SIGNAL` replay respectively.
 - **Admin crypto settings now push live to each crypto worker** — `POST
   /admin/settings/crypto-allowed-symbol` and `POST
   /admin/settings/crypto-max-leverage` send a `SYSTEM` `CRYPTO_LEVERAGE_INIT`

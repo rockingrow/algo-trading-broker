@@ -45,14 +45,25 @@ def get_trade_repository() -> TradeRepository:
   return SqlAlchemyTradeRepository()
 
 
-def get_signals_notifier(
-  setting_repository: SettingRepository = Depends(get_setting_repository),
-) -> Notifier:
-  """Channel for trade/signal notifications (falls back to the management chat)."""
+def make_signals_notifier(setting_repository: SettingRepository) -> Notifier:
+  """Build the trade/signal notification channel outside a FastAPI request.
+
+  Both the HTTP layer (via ``get_signals_notifier``) and the JetStream signal
+  worker need this same channel; a plain factory keeps the wiring consistent
+  and lets non-request contexts (app lifespan) reuse it without going through
+  ``Depends``.
+  """
   return TelegramNotification(
     chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID,
     setting_repository=setting_repository,
   )
+
+
+def get_signals_notifier(
+  setting_repository: SettingRepository = Depends(get_setting_repository),
+) -> Notifier:
+  """Channel for trade/signal notifications (falls back to the management chat)."""
+  return make_signals_notifier(setting_repository)
 
 
 def get_admin_notifier() -> Notifier:
