@@ -22,6 +22,7 @@ from broker.services.nats_publisher import NatsPublisher
 from broker.services.nats_service import SystemEventConsumer, TradeEventConsumer
 from broker.services.notification_service import TelegramNotification
 from broker.services.signal_processing_service import SignalProcessingService
+from broker.services.signal_retry_job import SignalRetryJob
 from broker.services.signal_worker import SignalWorker
 from broker.settings import settings
 
@@ -56,19 +57,23 @@ async def lifespan(app: FastAPI):
     signal_repository=signal_repo,
     connection=nats_client,
   )
-  signal_worker = SignalWorker(
-    service=SignalProcessingService(
-      signal_repository=signal_repo,
-      setting_repository=setting_repo,
-      publisher=publisher,
-      notifier=make_signals_notifier(setting_repo),
-      webhook_secret=settings.WEBHOOK_SECRET,
-    ),
-    connection=nats_client,
+  signal_service = SignalProcessingService(
+    signal_repository=signal_repo,
+    setting_repository=setting_repo,
+    publisher=publisher,
+    notifier=make_signals_notifier(setting_repo),
+    webhook_secret=settings.WEBHOOK_SECRET,
+  )
+  signal_worker = SignalWorker(service=signal_service, connection=nats_client)
+  signal_retry_job = SignalRetryJob(
+    service=signal_service,
+    signal_repository=signal_repo,
+    interval_seconds=settings.SIGNAL_RETRY_INTERVAL_SECONDS,
   )
   await consumer.start()
   await system_consumer.start()
   await signal_worker.start()
+  await signal_retry_job.start()
   app.state.publisher = publisher
 
   api_prefix = f"/{settings.BROKER_API_PREFIX}" if settings.BROKER_API_PREFIX else ""
@@ -89,6 +94,7 @@ async def lifespan(app: FastAPI):
     f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
 
+  await signal_retry_job.stop()
   await signal_worker.stop()
   await system_consumer.stop()
   await consumer.stop()

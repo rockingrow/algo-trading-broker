@@ -28,6 +28,7 @@ from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalStatusEnum
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.webhook_schema import WebhookPayload
+from broker.settings import settings
 
 log = get_logger(__name__)
 
@@ -206,6 +207,8 @@ class SqlAlchemySignalRepository:
       is_scale_position=bool(pos.is_scale_position),
       scale_strategy=pos.scale_strategy,
       status=SignalStatusEnum.QUEUED,
+      attempts=settings.SIGNAL_MAX_ATTEMPTS,
+      last_attempt=None,
       indicators=json.loads(payload.indicators.model_dump_json())
       if payload.indicators is not None
       else {},
@@ -249,6 +252,95 @@ class SqlAlchemySignalRepository:
     except Exception as exc:
       log.exception("Failed to mark signal published id=%s: %s", signal_id, exc)
       return False
+
+  async def get_by_id(self, signal_id: str) -> Signal | None:
+    """Return the persisted row for *signal_id*, or ``None`` when missing.
+
+    Used by the retry job to rebuild a ``WebhookPayload`` from ``row.raw``
+    before re-running the fan-out.
+    """
+    try:
+      row_id = uuid.UUID(signal_id)
+    except (TypeError, ValueError):
+      log.error("get_by_id: invalid signal_id=%r", signal_id)
+      return None
+
+    try:
+      async with get_session() as session:
+        result = await session.execute(select(Signal).where(Signal.id == row_id))
+        return result.scalars().first()
+    except Exception as exc:
+      log.exception("Failed to fetch signal id=%s: %s", signal_id, exc)
+      return None
+
+  async def record_attempt_failure(self, signal_id: str) -> Signal | None:
+    """Consume one attempt on a failed fan-out.
+
+    Decrements ``attempts`` and stamps ``last_attempt`` on the row. When the
+    row was already at ``attempts == 1`` this call flips it to ``FAILED`` and
+    zeroes the counter — the retry job's ``attempts > 0`` filter then stops
+    re-picking it. Returns the updated row (or ``None`` if missing / invalid
+    id) so the caller can log the transition.
+    """
+    try:
+      row_id = uuid.UUID(signal_id)
+    except (TypeError, ValueError):
+      log.error("record_attempt_failure: invalid signal_id=%r", signal_id)
+      return None
+
+    try:
+      async with get_session() as session:
+        result = await session.execute(select(Signal).where(Signal.id == row_id))
+        row: Optional[Signal] = result.scalars().first()
+        if row is None:
+          log.warning("record_attempt_failure: signal_id=%s not found", signal_id)
+          return None
+        row.last_attempt = datetime.now(timezone.utc)
+        if row.attempts <= 1:
+          row.attempts = 0
+          row.status = SignalStatusEnum.FAILED
+        else:
+          row.attempts -= 1
+        await session.flush()
+        await session.refresh(row)
+      log.info(
+        "signal attempt failure id=%s attempts=%d status=%s",
+        signal_id,
+        row.attempts,
+        row.status,
+      )
+      return row
+    except Exception as exc:
+      log.exception(
+        "Failed to record attempt failure id=%s: %s", signal_id, exc
+      )
+      return None
+
+  async def list_retryable(self, retry_interval_seconds: int) -> list[Signal]:
+    """Return ``QUEUED`` signals eligible for another attempt, oldest first.
+
+    A row is eligible when it is still ``QUEUED``, has attempts remaining, and
+    either has never been attempted (``last_attempt IS NULL``) or its last
+    attempt is older than ``retry_interval_seconds`` — the same interval the
+    retry job polls at, so a row that just failed is not re-picked before the
+    next tick.
+    """
+    threshold = datetime.now(timezone.utc) - timedelta(
+      seconds=retry_interval_seconds
+    )
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Signal)
+          .where(Signal.status == SignalStatusEnum.QUEUED)
+          .where(Signal.attempts > 0)
+          .where((Signal.last_attempt.is_(None)) | (Signal.last_attempt < threshold))
+          .order_by(Signal.createdAt.asc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception("Failed to list retryable signals: %s", exc)
+      return []
 
   async def list_recent_by_strategies(
     self, strategies: list[str], since_seconds: int

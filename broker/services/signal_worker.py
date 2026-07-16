@@ -131,29 +131,31 @@ class SignalWorker:
       await self._term(msg)
       return
 
-    signal_id = envelope.get("signal_id") if isinstance(envelope, dict) else None
     raw_payload = envelope.get("payload") if isinstance(envelope, dict) else None
-    if not signal_id or not isinstance(raw_payload, dict):
-      log.error("SIGNAL envelope: missing signal_id/payload: %s", envelope)
+    if not isinstance(raw_payload, dict):
+      log.error("SIGNAL envelope: missing payload: %s", envelope)
       await self._term(msg)
       return
 
     try:
       payload = WebhookPayload(**raw_payload)
     except ValidationError as exc:
-      log.error(
-        "SIGNAL envelope: invalid WebhookPayload signal_id=%s: %s", signal_id, exc
-      )
+      log.error("SIGNAL envelope: invalid WebhookPayload: %s", exc)
       await self._term(msg)
       return
 
     try:
-      await self._service.handle_enqueued(signal_id=signal_id, payload=payload)
+      # ``handle_enqueued`` records per-attempt failures onto the persisted
+      # row itself (attempts / last_attempt / FAILED). The JetStream message
+      # is still ack-ed on the happy path AND on those recorded failures — a
+      # NAK here would only cause JetStream to redeliver, which would race
+      # the DB-tracked retry job. We only NAK for exceptions that fell out
+      # of the service entirely (e.g. persist failed before an attempt was
+      # even recorded), so JetStream can retry the persist itself.
+      await self._service.handle_enqueued(payload=payload)
     except Exception as exc:
       log.exception(
-        "SIGNAL handler failed signal_id=%s: %s — leaving for redelivery",
-        signal_id,
-        exc,
+        "SIGNAL handler failed: %s — leaving for JetStream redelivery", exc
       )
       await self._nak(msg)
       return

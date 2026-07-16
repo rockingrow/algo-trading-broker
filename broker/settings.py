@@ -86,6 +86,20 @@ class Settings(BaseSettings):
   # timestamps when the `notification_timezone` broker setting is unset.
   DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS: float = 7.0
 
+  # ── Signal handler retry policy ──────────────────────────────────
+  # Total attempts the JetStream handler + retry job may spend on a single
+  # signal before it is marked FAILED. Persisted as the initial ``attempts``
+  # value on every new ``signals`` row; on each failed fan-out the row's
+  # counter is decremented and re-picked up by the retry job until it hits 0.
+  # Kept here (not in ``.env.example``) because it changes retry semantics
+  # rather than deployment topology.
+  SIGNAL_MAX_ATTEMPTS: int = 3
+  # Poll cadence (seconds) of the retry job and the minimum gap between two
+  # attempts on the same row — a row whose ``last_attempt`` is newer than
+  # ``now - SIGNAL_RETRY_INTERVAL_SECONDS`` is not re-picked, which stops the
+  # job from racing an in-flight attempt.
+  SIGNAL_RETRY_INTERVAL_SECONDS: int = 15
+
   @property
   def postgres_dsn(self) -> str:
     return (

@@ -47,13 +47,17 @@ class FakeSignalService:
   def __init__(self):
     self.calls = []
 
-  async def process(self, payload):
+  async def enqueue(self, payload):
     self.calls.append(payload)
     return {
-      "status": "accepted",
-      "signal_id": "sig-1",
+      "status": "queued",
       "timestamp": payload.timestamp.isoformat(),
     }
+
+  # ``enqueue`` is what the webhook route calls now; ``process`` is kept as an
+  # alias on the real service for back-compat and remains available here so
+  # tests can still monkey-patch ``ctx["signal_service"].process``.
+  process = enqueue
 
 
 class FakeSettingRepo:
@@ -234,7 +238,9 @@ def test_health_no_auth(ctx):
 def test_webhook_accepts_valid_payload(ctx):
   resp = ctx["client"].post("/secret/webhook", json=_webhook_body())
   assert resp.status_code == 202
-  assert resp.json()["status"] == "accepted"
+  # The webhook is a fast enqueue-only path now — the response signals the
+  # signal is queued on JetStream, not that the full pipeline succeeded.
+  assert resp.json()["status"] == "queued"
   assert len(ctx["signal_service"].calls) == 1
 
 
@@ -247,12 +253,12 @@ def test_webhook_translates_signal_error(ctx):
   from broker.services.signal_processing_service import SignalError
 
   async def boom(_payload):
-    raise SignalError(403, "blocked")
+    raise SignalError(401, "bad token")
 
-  ctx["signal_service"].process = boom
+  ctx["signal_service"].enqueue = boom
   resp = ctx["client"].post("/secret/webhook", json=_webhook_body())
-  assert resp.status_code == 403
-  assert resp.json()["detail"] == "blocked"
+  assert resp.status_code == 401
+  assert resp.json()["detail"] == "bad token"
 
 
 def test_webhook_response_forces_connection_close(ctx):

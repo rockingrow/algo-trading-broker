@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.8] - Unreleased
 
+### Added
+
+- **Webhook = enqueue-only** — `POST /secret/webhook` now only verifies the
+  `token` and pushes the raw envelope onto JetStream. Every other step (block
+  gate, DB persist, publish to workers, notification) moved into the
+  `SignalWorker` handler. The response is `202 {"status":"queued"}` as soon
+  as JetStream acknowledges the write, so TradingView's connection is not
+  held open across any of the fan-out work.
+- **`signals.attempts` and `signals.last_attempt` columns** — Added via
+  Alembic migration `b6f7a8c9d0e1`. `attempts` starts at
+  `settings.SIGNAL_MAX_ATTEMPTS` (default `3`, kept in code — not in
+  `.env.example` — because it changes retry semantics rather than deployment
+  topology) and is decremented on every failed fan-out; `last_attempt`
+  timestamps the previous try. Repository grows `record_attempt_failure`,
+  `list_retryable`, and `get_by_id`.
+- **`FAILED` signal status** — `SignalStatusEnum` grows a terminal `FAILED`
+  value. `record_attempt_failure` flips the row to `FAILED` (and zeroes
+  `attempts`) once the counter is about to drop below `1`, so the retry job
+  stops re-picking it.
+- **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) — Background
+  task that ticks every `settings.SIGNAL_RETRY_INTERVAL_SECONDS` (default
+  `15`), lists rows still `QUEUED` with `attempts > 0` and
+  `last_attempt < now - interval`, and hands each to
+  `SignalProcessingService.retry_signal`. The same interval is used as the
+  minimum gap between attempts on the same row so a tick cannot race an
+  in-flight attempt without needing a lock.
+- **`Attempt: N` line on retry notifications** — `format_signal_message` and
+  `format_flat_message` render an `Attempt: N` prefix only on the 2nd and
+  3rd attempt on a signal (i.e. when `attempts <= 2`), so the operator sees
+  a visible marker when the broker is retrying rather than firing fresh.
+
+### Changed
+
+- **`SignalProcessingService` reshaped around three entry points** —
+  `enqueue` (webhook fast path), `handle_enqueued` (JetStream first
+  attempt, including persist + block gate), and `retry_signal` (retry job,
+  rebuilds `WebhookPayload` from `row.raw`). All three delegate to a shared
+  `_fanout` that records success (`mark_published`) or attempt failure
+  (`record_attempt_failure`). `process` remains as a back-compat alias for
+  `enqueue`.
+- **JetStream envelope no longer carries `signal_id`** — The webhook has not
+  persisted yet, so the envelope is just the raw `WebhookPayload`. The
+  handler assigns the id when it writes the row.
+- **Block gate moved into the handler** — Blocked signals get their Telegram
+  notification and are dropped without persisting, but the HTTP path always
+  returns `202` (there is nothing to reject on: the row does not exist yet).
+
 ### Fixed
 
 - **TradingView webhook: `server closed the connection unexpectedly`** — The

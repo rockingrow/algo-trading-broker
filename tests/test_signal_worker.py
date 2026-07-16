@@ -22,20 +22,19 @@ class FakeMsg:
 
 class FakeService:
   def __init__(self, raise_exc: Exception | None = None):
-    self.calls: list[tuple[str, dict]] = []
+    self.calls: list[dict] = []
     self._raise = raise_exc
 
-  async def handle_enqueued(self, *, signal_id, payload):
+  async def handle_enqueued(self, *, payload):
     if self._raise is not None:
       raise self._raise
-    self.calls.append((signal_id, payload.model_dump()))
-    return {"status": "accepted", "signal_id": signal_id}
+    self.calls.append(payload.model_dump())
+    return {"status": "accepted"}
 
 
-def _envelope(signal_id: str = "sig-1") -> bytes:
+def _envelope() -> bytes:
   return json.dumps(
     {
-      "signal_id": signal_id,
       "payload": {
         "strategy": "wt_cross_v1",
         "symbol": "OANDA:XAUUSD",
@@ -55,7 +54,6 @@ async def test_valid_envelope_is_handled_and_acked():
   await worker._handle_one(msg)
 
   assert len(service.calls) == 1
-  assert service.calls[0][0] == "sig-1"
   assert msg.acked is True
   assert msg.naked is False
   assert msg.termed is False
@@ -72,10 +70,10 @@ async def test_malformed_json_envelope_is_termed():
   assert msg.acked is False
 
 
-async def test_envelope_missing_signal_id_is_termed():
+async def test_envelope_missing_payload_is_termed():
   service = FakeService()
   worker = SignalWorker(service=service, connection=object())  # type: ignore[arg-type]
-  msg = FakeMsg(json.dumps({"payload": {}}).encode())
+  msg = FakeMsg(json.dumps({"other": {}}).encode())
   await worker._handle_one(msg)
 
   assert msg.termed is True
@@ -84,7 +82,7 @@ async def test_envelope_missing_signal_id_is_termed():
 async def test_invalid_webhook_payload_is_termed():
   service = FakeService()
   worker = SignalWorker(service=service, connection=object())  # type: ignore[arg-type]
-  msg = FakeMsg(json.dumps({"signal_id": "s", "payload": {"foo": "bar"}}).encode())
+  msg = FakeMsg(json.dumps({"payload": {"foo": "bar"}}).encode())
   await worker._handle_one(msg)
 
   assert service.calls == []

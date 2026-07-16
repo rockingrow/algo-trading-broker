@@ -21,12 +21,28 @@ def _header(payload: WebhookPayload) -> str:
   )
 
 
+def _attempt_line(attempt_number: int | None) -> str:
+  """One-line ``Attempt: N`` prefix shown on retry notifications.
+
+  Rendered only when *attempt_number* is set (the caller only sets it for the
+  2nd and 3rd attempt on a signal, so the operator sees a visible marker when
+  the broker is retrying). Returns an empty string otherwise.
+  """
+  if attempt_number is None:
+    return ""
+  return f"Attempt: <b>{attempt_number}</b>\n"
+
+
 def format_flat_message(
-  payload: WebhookPayload, *, timezone_offset: str | None = None
+  payload: WebhookPayload,
+  *,
+  timezone_offset: str | None = None,
+  attempt_number: int | None = None,
 ) -> str:
   """Telegram body for a FLAT (close-all) directive."""
   return (
     f"{_header(payload)}"
+    f"{_attempt_line(attempt_number)}"
     f"Strategy: <b>{payload.strategy}</b>\n"
     f"Action: <b>FLAT</b>\n"
     f"Time: {format_notification_time(payload.timestamp, timezone_offset)}\n"
@@ -80,6 +96,7 @@ def format_signal_message(
   *,
   include_raw: bool = False,
   timezone_offset: str | None = None,
+  attempt_number: int | None = None,
 ) -> str:
   """Telegram body for a normal entry / target / stop signal."""
   pos = payload.position
@@ -97,6 +114,7 @@ def format_signal_message(
   )
   base = (
     f"{_header(payload)}"
+    f"{_attempt_line(attempt_number)}"
     f"Strategy: <b>{payload.strategy}</b>\n"
     f"Action: <b>{pos.action.value}</b>\n"
     f"Price: <code>{pos.price}</code>\n"

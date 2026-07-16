@@ -71,11 +71,13 @@ graph TD
         NATS["NATS Server :4222 (Token Auth + JetStream)"]
         JS[["JetStream SIGNALS stream"]]
         SW[SignalWorker]
-        Broker -- "Log Signal (QUEUED)" --> DB
+        RJ["SignalRetryJob (15s tick)"]
         Broker -- "Publish SIGNALS.{strategy}" --> JS
         JS -- "Pull consumer" --> SW
+        SW -- "Persist QUEUED / mark PUBLISHED / record attempt" --> DB
         SW -- "Publish {strategy}" --> NATS
-        SW -- "Mark PUBLISHED" --> DB
+        RJ -- "list_retryable (QUEUED, attempts > 0)" --> DB
+        RJ -- "retry_signal → publish {strategy}" --> NATS
         NATS -- "TRADE events" --> Consumer[TradeEventConsumer]
         Consumer -- "Upsert Trade + Account" --> DB
     end
@@ -164,12 +166,17 @@ Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their lo
 
 ### JetStream signal pipeline
 
-The webhook endpoint no longer runs the fan-out inline. Instead:
+The webhook endpoint is a fast enqueue-only path. Everything else runs from a background handler, with a retry loop that can re-try failed signals a bounded number of times.
 
-1. **Webhook** (`POST /secret/webhook`) verifies the `token`, checks the `signal_blocked` gate, persists the signal row with `status=QUEUED`, and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). TradingView gets `202 Accepted` (`status=queued`) as soon as JetStream acknowledges the write.
-2. **`SignalWorker`** (`broker/services/signal_worker.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream, parses the payload, publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED` before acknowledging the JetStream message.
+1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
+2. **`SignalWorker`** (`broker/services/signal_worker.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
+3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
+4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.SIGNAL_RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
+5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
 
-If the worker task crashes mid-processing, JetStream redelivers the message and the pipeline re-runs; the DB row's `status` therefore also acts as an audit signal — a row stuck at `QUEUED` means the message was persisted but the fan-out never completed. Enable JetStream on your NATS server (`nats-server -js -sd <path>`) — the bundled `docker-compose.yml` already does so and mounts the `nats_data` volume for durability.
+**Retry-aware notifications**: the Telegram signal / FLAT message carries an `Attempt: N` line on the 2nd and 3rd attempts (not on the fresh first attempt) so the operator sees when the broker is retrying.
+
+Enable JetStream on your NATS server (`nats-server -js -sd <path>`) — the bundled `docker-compose.yml` already does so and mounts the `nats_data` volume for durability.
 
 ### `SYSTEM` handshake
 
@@ -442,7 +449,7 @@ Returns `{"status": "ok"}`. No authentication required.
 
 ### POST `/secret/webhook`
 
-Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Persists the signal (`status=QUEUED`) and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`) — the background `SignalWorker` picks it up and publishes to the NATS subject matching `signal.strategy` (e.g. `wt_cross_v1`) before flipping the row to `PUBLISHED`. Responds `202 Accepted` (`status=queued`) as soon as the message is durably queued, so TradingView is not held open across the fan-out.
+Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
 
 **Example Payload:**
 
@@ -688,7 +695,9 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `risk_percent` | Numeric(10,4) | Risk percentage for position sizing |
 | `is_scale_position` | Boolean | Whether this signal scales into an existing position |
 | `scale_strategy` | String(50) (Nullable) | Scale-in strategy name (e.g. `add_on_pullback`) |
-| `status` | Enum | Delivery state: `QUEUED` on insert, `PUBLISHED` once the JetStream `SignalWorker` has fanned it out |
+| `status` | Enum | Delivery state: `QUEUED` on insert, `PUBLISHED` after a successful fan-out, `FAILED` once every attempt has been exhausted |
+| `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.SIGNAL_MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
+| `last_attempt` | DateTime (Nullable) | Timestamp of the most recent fan-out attempt (`NULL` before the first attempt). Drives the retry job's minimum-gap filter. |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
 | `raw` | JSONB (Nullable) | Raw webhook payload |

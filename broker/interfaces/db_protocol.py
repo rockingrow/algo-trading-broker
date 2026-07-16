@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from broker.db.models import Account, Trade
+from broker.db.models import Account, Signal, Trade
 from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.webhook_schema import WebhookPayload
@@ -15,6 +15,12 @@ class SignalRepository(Protocol):
   async def log_signal(self, payload: WebhookPayload) -> str | None: ...
 
   async def mark_published(self, signal_id: str) -> bool: ...
+
+  async def get_by_id(self, signal_id: str) -> Signal | None: ...
+
+  async def record_attempt_failure(self, signal_id: str) -> Signal | None: ...
+
+  async def list_retryable(self, retry_interval_seconds: int) -> list[Signal]: ...
 
   async def list_recent_by_strategies(
     self, strategies: list[str], since_seconds: int
