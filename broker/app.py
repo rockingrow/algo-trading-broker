@@ -82,9 +82,31 @@ async def lifespan(app: FastAPI):
     await telegram_log_handler.stop()
 
 
+def install_webhook_connection_close(app: FastAPI) -> None:
+  """Send ``Connection: close`` on every response to the TradingView webhook.
+
+  TradingView keeps a per-endpoint TCP pool, but uvicorn drops idle keep-alive
+  sockets after ``WEBHOOK_KEEPALIVE_TIMEOUT`` seconds. On any strategy whose
+  alert cadence exceeds that timeout (e.g. a 15-minute timeframe against the
+  120s default), TradingView reuses a socket the server has already closed
+  and the delivery fails with "server closed the connection unexpectedly".
+  Signalling close per response makes TradingView open a fresh TCP for every
+  alert, removing the race entirely at the cost of one extra handshake.
+  """
+
+  @app.middleware("http")
+  async def _force_close_webhook(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.endswith("/secret/webhook"):
+      response.headers["Connection"] = "close"
+    return response
+
+
 def create_app() -> FastAPI:
   """Build and return the FastAPI application with all routes wired up."""
   app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
+
+  install_webhook_connection_close(app)
 
   @app.exception_handler(Exception)
   async def global_exception_handler(request: Request, exc: Exception):

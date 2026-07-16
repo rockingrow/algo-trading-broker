@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from broker.app import install_webhook_connection_close
 from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
@@ -175,6 +176,7 @@ def _make_trade() -> Trade:
 def ctx():
   """Build an app with all infra dependencies overridden by fakes."""
   app = FastAPI()
+  install_webhook_connection_close(app)
   app.include_router(get_core_router())
 
   signal_service = FakeSignalService()
@@ -251,6 +253,29 @@ def test_webhook_translates_signal_error(ctx):
   resp = ctx["client"].post("/secret/webhook", json=_webhook_body())
   assert resp.status_code == 403
   assert resp.json()["detail"] == "blocked"
+
+
+def test_webhook_response_forces_connection_close(ctx):
+  """TradingView must not reuse the pooled socket between alerts."""
+  resp = ctx["client"].post("/secret/webhook", json=_webhook_body())
+  assert resp.status_code == 202
+  assert resp.headers.get("connection", "").lower() == "close"
+
+
+def test_webhook_error_response_forces_connection_close(ctx):
+  """Same guarantee on the error path — otherwise TradingView would still
+  pool a socket the server intended to close after the response."""
+  resp = ctx["client"].post("/secret/webhook", json={"foo": "bar"})
+  assert resp.status_code == 422
+  assert resp.headers.get("connection", "").lower() == "close"
+
+
+def test_non_webhook_endpoint_keeps_default_connection(ctx):
+  """Middleware must be scoped to /secret/webhook — other routes stay on
+  keep-alive so admin/API callers still benefit from connection reuse."""
+  resp = ctx["client"].get("/v1/health")
+  assert resp.status_code == 200
+  assert resp.headers.get("connection", "").lower() != "close"
 
 
 # ── Accounts ────────────────────────────────────────────────────────

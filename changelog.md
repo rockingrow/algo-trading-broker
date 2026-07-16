@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.8] - Unreleased
 
+### Fixed
+
+- **TradingView webhook: `server closed the connection unexpectedly`** — The
+  `/secret/webhook` response now carries `Connection: close`, forcing
+  TradingView to open a fresh TCP connection per alert. Previously, when the
+  gap between alerts on a strategy (e.g. 15-minute timeframe) exceeded
+  `WEBHOOK_KEEPALIVE_TIMEOUT` (120s default), TradingView reused a socket
+  that uvicorn had already closed and the delivery failed. Simply raising the
+  keep-alive timeout only postponed the race; signalling close per response
+  removes it. Costs one TCP handshake per alert, negligible at TradingView's
+  alert cadence.
+
 ### Added
 
 - **`REJECTED` trade status** — Workers now emit a `TRADE` (`PositionEvent`) with
