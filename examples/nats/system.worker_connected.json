@@ -3,5 +3,6 @@
   "account_id": "CRYPTO-BINANCE-7654321",
   "timestamp": "2026-06-30T00:00:00+00:00",
   "market": "CRYPTO",
-  "gateway": "BINANCE"
+  "gateway": "BINANCE",
+  "strategies": ["wt_cross_v1", "MT5_GOLD_M5_V1"]
 }

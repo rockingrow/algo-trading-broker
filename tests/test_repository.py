@@ -153,6 +153,97 @@ async def test_log_signal_returns_none_on_error(monkeypatch):
   assert result is None
 
 
+async def test_log_signal_seeds_status_queued_and_max_attempts(monkeypatch):
+  from broker.schemas.core import SignalStatusEnum
+  from broker.settings import settings
+
+  session = FakeSession(results=[])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemySignalRepository().log_signal(_payload())
+  row = session.added[0]
+  assert row.status == SignalStatusEnum.QUEUED
+  assert row.attempts == settings.SIGNAL_MAX_ATTEMPTS
+  assert row.last_attempt is None
+
+
+# ── SignalRepository.record_attempt_failure ─────────────────────────
+
+
+class _SignalRow:
+  def __init__(self, attempts: int, status):
+    import uuid as _uuid
+
+    self.id = _uuid.uuid4()
+    self.attempts = attempts
+    self.status = status
+    self.last_attempt = None
+
+
+async def test_record_attempt_failure_decrements_and_stamps_time(monkeypatch):
+  from broker.schemas.core import SignalStatusEnum
+
+  row = _SignalRow(attempts=3, status=SignalStatusEnum.QUEUED)
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  updated = await SqlAlchemySignalRepository().record_attempt_failure(str(row.id))
+  assert updated is not None
+  assert updated.attempts == 2
+  assert updated.status == SignalStatusEnum.QUEUED
+  assert updated.last_attempt is not None
+
+
+async def test_record_attempt_failure_flips_to_failed_on_last_attempt(monkeypatch):
+  from broker.schemas.core import SignalStatusEnum
+
+  row = _SignalRow(attempts=1, status=SignalStatusEnum.QUEUED)
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  updated = await SqlAlchemySignalRepository().record_attempt_failure(str(row.id))
+  assert updated is not None
+  assert updated.attempts == 0
+  assert updated.status == SignalStatusEnum.FAILED
+
+
+async def test_record_attempt_failure_missing_row_returns_none(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  import uuid as _uuid
+
+  assert (
+    await SqlAlchemySignalRepository().record_attempt_failure(str(_uuid.uuid4()))
+    is None
+  )
+
+
+async def test_record_attempt_failure_rejects_bad_id():
+  assert (
+    await SqlAlchemySignalRepository().record_attempt_failure("not-a-uuid") is None
+  )
+
+
+async def test_list_retryable_returns_rows(monkeypatch):
+  from broker.schemas.core import SignalStatusEnum
+
+  row = _SignalRow(attempts=2, status=SignalStatusEnum.QUEUED)
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  rows = await SqlAlchemySignalRepository().list_retryable(15)
+  assert rows == [row]
+
+
+async def test_list_retryable_swallows_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+  assert await SqlAlchemySignalRepository().list_retryable(15) == []
+
+
 # ── TradeRepository.upsert_by_position_event ────────────────────────
 
 

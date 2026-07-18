@@ -24,7 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from broker.schemas.account_schema import MarketTypeEnum
-from broker.schemas.core import SignalActionEnum
+from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.trade_schema import TradeStatusEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -79,6 +79,34 @@ class Signal(Base):
     Boolean, nullable=False, default=False
   )
   scale_strategy: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+  # Delivery state: QUEUED once persisted, PUBLISHED after the JetStream handler
+  # has fanned it out to workers and finished the notification pipeline, or
+  # FAILED once every retry attempt has been exhausted. Rows stay QUEUED
+  # between attempts so the 15s retry job can re-pick them.
+  status: Mapped[SignalStatusEnum] = mapped_column(
+    Enum(SignalStatusEnum),
+    nullable=False,
+    default=SignalStatusEnum.QUEUED,
+    server_default=SignalStatusEnum.QUEUED.value,
+    index=True,
+  )
+  # Remaining fan-out attempts. Seeded from ``settings.SIGNAL_MAX_ATTEMPTS``
+  # on insert and decremented on every failed attempt; when it would drop to
+  # ``0`` the row is flipped to ``FAILED`` instead.
+  attempts: Mapped[int] = mapped_column(
+    Integer,
+    nullable=False,
+    default=0,
+    server_default="0",
+  )
+  # Timestamp of the last attempt (nullable — a QUEUED row that has never been
+  # attempted yet has ``NULL`` here). Used by the retry job to enforce the
+  # minimum gap between two attempts on the same row so a poll tick cannot
+  # race an in-flight attempt.
+  last_attempt: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
 
   # Complex objects stored as JSONB
   indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)

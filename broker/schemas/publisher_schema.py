@@ -28,6 +28,12 @@ class SystemActionEnum(str, Enum):
   # Outgoing (broker → worker)
   CRYPTO_LEVERAGE_INIT = "CRYPTO_LEVERAGE_INIT"
 
+  # Outgoing (broker → worker): replay of every SIGNAL persisted in the last
+  # ``max_retry_timeout`` seconds for the strategies this worker announced.
+  # Delivered as part of the WORKER_CONNECTED handshake so a worker that just
+  # (re)connected can catch up on signals emitted while it was offline.
+  RETRY_SIGNALS = "RETRY_SIGNALS"
+
   # Outgoing reply (broker → worker): acknowledges a WORKER_CONNECTED handshake
   # that needs no further configuration (e.g. a non-crypto worker).
   WORKER_CONNECTED_ACK = "WORKER_CONNECTED_ACK"
@@ -155,7 +161,9 @@ class SystemWorkerConnectedSignal(SystemSignal):
 
   ``account_id``, ``market`` and ``gateway`` are all required so the broker knows
   which worker connected and which market/gateway it serves before deciding what
-  initial configuration to push back.
+  initial configuration to push back. ``strategies`` lists the strategy subjects
+  the worker subscribes to — the broker uses them to select signals for the
+  ``RETRY_SIGNALS`` replay.
   """
 
   model_config = ConfigDict(
@@ -167,6 +175,7 @@ class SystemWorkerConnectedSignal(SystemSignal):
         "timestamp": "2026-06-30T00:00:00+00:00",
         "market": "CRYPTO",
         "gateway": "BINANCE",
+        "strategies": ["wt_cross_v1", "MT5_GOLD_M5_V1"],
       }
     },
   )
@@ -174,6 +183,58 @@ class SystemWorkerConnectedSignal(SystemSignal):
   action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED
   market: MarketEnum = Field(..., description="Market the worker serves.")
   gateway: str = Field(..., description="Gateway/broker the worker uses.")
+  strategies: list[str] = Field(
+    default_factory=list,
+    description=(
+      "Strategy subjects the worker subscribes to. Drives the RETRY_SIGNALS "
+      "replay: only signals whose strategy is in this list are re-sent."
+    ),
+  )
+
+
+class SystemRetrySignal(SystemSignal):
+  """Outbound RETRY_SIGNALS the broker sends to a freshly-connected worker.
+
+  Carries every SIGNAL persisted in the last ``max_retry_timeout`` seconds
+  whose strategy the worker announced on WORKER_CONNECTED, formatted exactly
+  like the payloads normally published on the strategy subject so the worker
+  can replay them through the same handler.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "RETRY_SIGNALS",
+        "account_id": "CRYPTO-BINANCE-7654321",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "signals": [
+          {
+            "signal_id": "sig_123",
+            "timestamp": "2026-06-29T23:59:30+00:00",
+            "strategy": "wt_cross_v1",
+            "action": "LONG",
+            "symbol": "XAUUSD",
+            "price": 2350.5,
+            "quantity": 0.1,
+            "sl": 2340.0,
+            "tp1": 2370.0,
+            "tp2": 2390.0,
+            "risk_percent": 1.0,
+          }
+        ],
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.RETRY_SIGNALS
+  signals: list[TradingSignal] = Field(
+    default_factory=list,
+    description=(
+      "Signals persisted in the last ``max_retry_timeout`` seconds whose "
+      "strategy the worker announced. Same shape as the SIGNAL payload."
+    ),
+  )
 
 
 class SystemWorkerConnectedAck(SystemSignal):

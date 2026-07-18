@@ -204,6 +204,27 @@ def test_raw_section_empty_when_all_none():
   assert "Inputs:" not in msg
 
 
+# ── Attempt line ───────────────────────────────────────────────────
+
+
+def test_signal_message_no_attempt_line_by_default():
+  msg = format_signal_message(_payload())
+  assert "Attempt:" not in msg
+
+
+def test_signal_message_shows_attempt_number_when_set():
+  msg = format_signal_message(_payload(), attempt_number=2)
+  assert "Attempt: <b>2</b>" in msg
+
+
+def test_flat_message_shows_attempt_number_when_set():
+  msg = format_flat_message(
+    _payload(position=PositionSchema(action=SignalActionEnum.FLAT)),
+    attempt_number=3,
+  )
+  assert "Attempt: <b>3</b>" in msg
+
+
 # ── Blocked message ────────────────────────────────────────────────
 
 

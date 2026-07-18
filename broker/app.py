@@ -9,16 +9,26 @@ from broker.db.engine import close_db, init_db
 from broker.db.repository import (
   SqlAlchemyAccountRepository,
   SqlAlchemySettingRepository,
+  SqlAlchemySignalRepository,
   SqlAlchemyTradeRepository,
 )
 from broker.helpers import emoji_constants as em
 from broker.logger import get_logger
 from broker.nats import nats_client
 from broker.openapi import fastapi_kwargs
+from broker.providers import make_signals_notifier
 from broker.router import get_core_router
-from broker.services.nats_publisher import NatsPublisher
-from broker.services.nats_service import SystemEventConsumer, TradeEventConsumer
+from broker.services.nats_service import (
+  NatsPublisher,
+  SystemEventConsumer,
+  TradeEventConsumer,
+)
 from broker.services.notification_service import TelegramNotification
+from broker.services.signal_processing_service import (
+  SignalProcessingService,
+  SignalWorker,
+)
+from broker.services.signal_retry_job import SignalRetryJob
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -40,17 +50,35 @@ async def lifespan(app: FastAPI):
   await nats_client.connect()
 
   publisher = NatsPublisher(connection=nats_client)
+  setting_repo = SqlAlchemySettingRepository()
+  signal_repo = SqlAlchemySignalRepository()
   consumer = TradeEventConsumer(
     trade_repository=SqlAlchemyTradeRepository(), connection=nats_client
   )
   system_consumer = SystemEventConsumer(
-    setting_repository=SqlAlchemySettingRepository(),
+    setting_repository=setting_repo,
     account_repository=SqlAlchemyAccountRepository(),
     publisher=publisher,
+    signal_repository=signal_repo,
     connection=nats_client,
+  )
+  signal_service = SignalProcessingService(
+    signal_repository=signal_repo,
+    setting_repository=setting_repo,
+    publisher=publisher,
+    notifier=make_signals_notifier(setting_repo),
+    webhook_secret=settings.WEBHOOK_SECRET,
+  )
+  signal_worker = SignalWorker(service=signal_service, connection=nats_client)
+  signal_retry_job = SignalRetryJob(
+    service=signal_service,
+    signal_repository=signal_repo,
+    interval_seconds=settings.SIGNAL_RETRY_INTERVAL_SECONDS,
   )
   await consumer.start()
   await system_consumer.start()
+  await signal_worker.start()
+  await signal_retry_job.start()
   app.state.publisher = publisher
 
   api_prefix = f"/{settings.BROKER_API_PREFIX}" if settings.BROKER_API_PREFIX else ""
@@ -71,6 +99,8 @@ async def lifespan(app: FastAPI):
     f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
 
+  await signal_retry_job.stop()
+  await signal_worker.stop()
   await system_consumer.stop()
   await consumer.stop()
   await nats_client.close()
