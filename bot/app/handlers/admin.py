@@ -23,6 +23,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
+from app import emojis
 from app.config import settings
 from app.filters.admin import IsAdmin
 from app.formatters import messages
@@ -34,7 +35,7 @@ router = Router(name="admin")
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
-PAGE_SIZE = settings.BOT_TRADES_PAGE_SIZE
+PAGE_SIZE = settings.BOT_VIEW_TRADES_PER_PAGE
 
 
 # ── /accounts ───────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ PAGE_SIZE = settings.BOT_TRADES_PAGE_SIZE
 async def cmd_accounts(message: Message, broker: BrokerClient) -> None:
   accounts = await broker.admin_list_accounts()
   if accounts is None:
-    await message.answer("⚠️ Không lấy được danh sách tài khoản.")
+    await message.answer(f"{emojis.WARNING} Failed to fetch account list.")
     return
   await message.answer(messages.format_accounts_admin(accounts))
 
@@ -72,17 +73,17 @@ async def cmd_atrades(
   if arg:
     text, kb = await _atrades_view(broker, arg, 0)
     if text is None:
-      await message.answer("⚠️ Không lấy được trades cho tài khoản này.")
+      await message.answer(f"{emojis.WARNING} Failed to fetch trades for this account.")
       return
     await message.answer(text, reply_markup=kb)
     return
 
   accounts = await broker.admin_list_accounts()
   if not accounts:
-    await message.answer("Không có tài khoản nào.")
+    await message.answer("No accounts.")
     return
   await message.answer(
-    "Chọn tài khoản để xem trades:",
+    "Choose an account to view trades:",
     reply_markup=inline.accounts_picker(accounts, "atrp"),
   )
 
@@ -92,7 +93,7 @@ async def cb_atrades_pick(call: CallbackQuery, broker: BrokerClient) -> None:
   account_id = call.data.split(":", 1)[1]
   text, kb = await _atrades_view(broker, account_id, 0)
   if text is None:
-    await call.answer("Lỗi tải dữ liệu", show_alert=True)
+    await call.answer("Failed to load data", show_alert=True)
     return
   await safe_edit_text(call.message, text, kb)
   await call.answer()
@@ -106,7 +107,7 @@ async def cb_atrades_page(call: CallbackQuery, broker: BrokerClient) -> None:
     return
   text, kb = await _atrades_view(broker, parts[1], int(parts[2]))
   if text is None:
-    await call.answer("Lỗi tải dữ liệu", show_alert=True)
+    await call.answer("Failed to load data", show_alert=True)
     return
   await safe_edit_text(call.message, text, kb)
   await call.answer()
@@ -119,11 +120,11 @@ async def cb_atrades_page(call: CallbackQuery, broker: BrokerClient) -> None:
 async def cmd_aflat(message: Message, command: CommandObject) -> None:
   arg = (command.args or "").strip()
   if arg:
-    scope_txt, target = f"tài khoản <code>{html.escape(arg)}</code>", arg
+    scope_txt, target = f"account <code>{html.escape(arg)}</code>", arg
   else:
-    scope_txt, target = "<b>TOÀN BỘ</b> tài khoản", "*"
+    scope_txt, target = "<b>ALL</b> accounts", "*"
   await message.answer(
-    f"⚠️ Xác nhận <b>FLAT</b> (đóng vị thế) {scope_txt}?",
+    f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for {scope_txt}?",
     reply_markup=inline.admin_confirm("aflat", target),
   )
 
@@ -136,12 +137,12 @@ async def cb_aflat(call: CallbackQuery, broker: BrokerClient) -> None:
     return
   target, decision = parts[1], parts[2]
   if decision != "ok":
-    await safe_edit_text(call.message, "Đã hủy.")
+    await safe_edit_text(call.message, "Cancelled.")
     await call.answer()
     return
   result = await broker.admin_flat(account_id=None if target == "*" else target)
   if result is None:
-    await safe_edit_text(call.message, "❌ FLAT thất bại.")
+    await safe_edit_text(call.message, f"{emojis.CROSS} FLAT failed.")
   else:
     await safe_edit_text(call.message, messages.format_command_result(result))
   await call.answer()
@@ -152,8 +153,8 @@ async def cb_aflat(call: CallbackQuery, broker: BrokerClient) -> None:
 
 def _rotate_prompt(account_id: str) -> str:
   return (
-    f"⚠️ Xoay link token cho <code>{html.escape(account_id)}</code>? "
-    "Token cũ sẽ bị thu hồi."
+    f"{emojis.WARNING} Rotate link token for <code>{html.escape(account_id)}</code>? "
+    "The old token will be revoked."
   )
 
 
@@ -169,10 +170,10 @@ async def cmd_rotate(
     return
   accounts = await broker.admin_list_accounts()
   if not accounts:
-    await message.answer("Không có tài khoản nào.")
+    await message.answer("No accounts.")
     return
   await message.answer(
-    "Chọn tài khoản cần xoay token:",
+    "Choose an account to rotate its token:",
     reply_markup=inline.accounts_picker(accounts, "arotp"),
   )
 
@@ -194,12 +195,12 @@ async def cb_rotate(call: CallbackQuery, broker: BrokerClient) -> None:
     return
   account_id, decision = parts[1], parts[2]
   if decision != "ok":
-    await safe_edit_text(call.message, "Đã hủy.")
+    await safe_edit_text(call.message, "Cancelled.")
     await call.answer()
     return
   result = await broker.admin_rotate_token(account_id)
   if result is None:
-    await safe_edit_text(call.message, "❌ Xoay token thất bại.")
+    await safe_edit_text(call.message, f"{emojis.CROSS} Token rotation failed.")
   else:
     await safe_edit_text(call.message, messages.format_rotate_result(result))
   await call.answer()
@@ -221,7 +222,7 @@ async def _render_settings(
 async def cmd_settings(message: Message, broker: BrokerClient) -> None:
   text, kb = await _render_settings(broker)
   if text is None:
-    await message.answer("⚠️ Không lấy được cài đặt broker.")
+    await message.answer(f"{emojis.WARNING} Failed to fetch broker settings.")
     return
   await message.answer(text, reply_markup=kb)
 
@@ -232,7 +233,7 @@ async def cb_settings_toggle(call: CallbackQuery, broker: BrokerClient) -> None:
   await broker.admin_toggle_setting(slug)
   text, kb = await _render_settings(broker)
   if text is None:
-    await call.answer("Lỗi", show_alert=True)
+    await call.answer("Error", show_alert=True)
     return
   await safe_edit_text(call.message, text, kb)
-  await call.answer("Đã cập nhật")
+  await call.answer("Updated")

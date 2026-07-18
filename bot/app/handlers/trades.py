@@ -8,6 +8,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from app import emojis
 from app.config import settings
 from app.formatters import messages
 from app.helpers import safe_edit_text
@@ -16,14 +17,16 @@ from app.services.broker_client import BrokerClient
 
 router = Router(name="trades")
 
-PAGE_SIZE = settings.BOT_TRADES_PAGE_SIZE
+PAGE_SIZE = settings.BOT_VIEW_TRADES_PER_PAGE
 
 
 @router.message(Command("trades"))
 async def cmd_trades(message: Message, broker: BrokerClient) -> None:
   payload = await broker.list_trades(message.from_user.id, limit=PAGE_SIZE, offset=0)
   if payload is None:
-    await message.answer("⚠️ Không lấy được dữ liệu giao dịch. Thử lại sau.")
+    await message.answer(
+      f"{emojis.WARNING} Failed to fetch trade data. Try again later."
+    )
     return
   await message.answer(
     messages.format_trades(payload),
@@ -41,7 +44,7 @@ async def cb_trades_page(call: CallbackQuery, broker: BrokerClient) -> None:
 
   payload = await broker.list_trades(call.from_user.id, limit=PAGE_SIZE, offset=offset)
   if payload is None:
-    await call.answer("Lỗi tải dữ liệu", show_alert=True)
+    await call.answer("Failed to load data", show_alert=True)
     return
 
   await safe_edit_text(

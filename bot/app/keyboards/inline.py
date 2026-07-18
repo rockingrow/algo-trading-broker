@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app import emojis
 from app.formatters.messages import SETTING_META
 
 
@@ -19,8 +20,12 @@ def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
     inline_keyboard=[
       [
-        InlineKeyboardButton(text="✅ Xác nhận", callback_data=f"{action}:confirm"),
-        InlineKeyboardButton(text="✖️ Hủy", callback_data=f"{action}:cancel"),
+        InlineKeyboardButton(
+          text=f"{emojis.CHECK} Confirm", callback_data=f"{action}:confirm"
+        ),
+        InlineKeyboardButton(
+          text=f"{emojis.CANCEL} Cancel", callback_data=f"{action}:cancel"
+        ),
       ]
     ]
   )
@@ -37,12 +42,15 @@ def trades_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
   if offset > 0:
     row.append(
       InlineKeyboardButton(
-        text="⬅️ Trước", callback_data=f"trades:{max(0, offset - limit)}"
+        text=f"{emojis.ARROW_LEFT} Prev",
+        callback_data=f"trades:{max(0, offset - limit)}",
       )
     )
   if offset + limit < total:
     row.append(
-      InlineKeyboardButton(text="Sau ➡️", callback_data=f"trades:{offset + limit}")
+      InlineKeyboardButton(
+        text=f"Next {emojis.ARROW_RIGHT}", callback_data=f"trades:{offset + limit}"
+      )
     )
 
   if not row:
@@ -81,13 +89,15 @@ def admin_trades_pagination(
   if offset > 0:
     row.append(
       InlineKeyboardButton(
-        text="⬅️ Trước", callback_data=f"atr:{account_id}:{max(0, offset - limit)}"
+        text=f"{emojis.ARROW_LEFT} Prev",
+        callback_data=f"atr:{account_id}:{max(0, offset - limit)}",
       )
     )
   if offset + limit < total:
     row.append(
       InlineKeyboardButton(
-        text="Sau ➡️", callback_data=f"atr:{account_id}:{offset + limit}"
+        text=f"Next {emojis.ARROW_RIGHT}",
+        callback_data=f"atr:{account_id}:{offset + limit}",
       )
     )
   if not row:
@@ -102,10 +112,11 @@ def settings_keyboard(states: list[dict[str, Any]]) -> InlineKeyboardMarkup:
     key = str(s.get("setting"))
     label, slug = SETTING_META.get(key, (key, key))
     on = str(s.get("state")) == "ENABLED"
+    dot = emojis.GREEN_CIRCLE if on else emojis.WHITE_CIRCLE
     rows.append(
       [
         InlineKeyboardButton(
-          text=f"{'🟢' if on else '⚪️'} {label}",
+          text=f"{dot} {label}",
           callback_data=f"aset:{slug}",
         )
       ]
@@ -118,8 +129,12 @@ def admin_confirm(action: str, arg: str) -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
     inline_keyboard=[
       [
-        InlineKeyboardButton(text="✅ Xác nhận", callback_data=f"{action}:{arg}:ok"),
-        InlineKeyboardButton(text="✖️ Hủy", callback_data=f"{action}:{arg}:no"),
+        InlineKeyboardButton(
+          text=f"{emojis.CHECK} Confirm", callback_data=f"{action}:{arg}:ok"
+        ),
+        InlineKeyboardButton(
+          text=f"{emojis.CANCEL} Cancel", callback_data=f"{action}:{arg}:no"
+        ),
       ]
     ]
   )

@@ -73,9 +73,9 @@ app/
 | `BROKER_API_KEY` | — | `X-API-KEY` used to call the broker. |
 | `BROKER_API_PREFIX` | `""` | Secret URL segment, if the broker uses one. |
 | `BOT_BROKER_BASE_URL` | `http://broker:8080` | Broker base URL (Docker service name). |
-| `BOT_LOG_LEVEL` | `INFO` | Log level. |
+| `BOT_LOG_LEVEL` | `DEBUG` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). |
 | `BOT_REQUEST_TIMEOUT` | `10.0` | HTTP timeout (seconds). |
-| `BOT_TRADES_PAGE_SIZE` | `5` | Trades per page. |
+| `BOT_VIEW_TRADES_PER_PAGE` | `50` | Trades per page. |
 
 ## Run
 

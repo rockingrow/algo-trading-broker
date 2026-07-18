@@ -20,22 +20,22 @@ from app.logger import get_logger
 log = get_logger(__name__)
 
 USER_COMMANDS = [
-  BotCommand(command="start", description="Liên kết tài khoản"),
-  BotCommand(command="trades", description="Giao dịch gần đây"),
-  BotCommand(command="flat", description="Đóng toàn bộ vị thế"),
-  BotCommand(command="prevent", description="Chặn vào lệnh mới"),
-  BotCommand(command="allow", description="Cho phép vào lệnh mới"),
-  BotCommand(command="status", description="Thông tin tài khoản"),
-  BotCommand(command="unlink", description="Hủy liên kết"),
-  BotCommand(command="help", description="Trợ giúp"),
+  BotCommand(command="start", description="Link account"),
+  BotCommand(command="trades", description="Recent trades"),
+  BotCommand(command="flat", description="Close all positions"),
+  BotCommand(command="prevent", description="Block new orders"),
+  BotCommand(command="allow", description="Allow new orders"),
+  BotCommand(command="status", description="Account info"),
+  BotCommand(command="unlink", description="Unlink account"),
+  BotCommand(command="help", description="Help"),
 ]
 
 ADMIN_EXTRA_COMMANDS = [
-  BotCommand(command="accounts", description="[ADMIN] Danh sách tài khoản"),
-  BotCommand(command="atrades", description="[ADMIN] Trades của một tài khoản"),
-  BotCommand(command="aflat", description="[ADMIN] FLAT toàn hệ thống / tài khoản"),
-  BotCommand(command="rotate", description="[ADMIN] Xoay link token"),
-  BotCommand(command="settings", description="[ADMIN] Cài đặt broker"),
+  BotCommand(command="accounts", description="[ADMIN] Account list"),
+  BotCommand(command="atrades", description="[ADMIN] Trades for an account"),
+  BotCommand(command="aflat", description="[ADMIN] FLAT system-wide / account"),
+  BotCommand(command="rotate", description="[ADMIN] Rotate link token"),
+  BotCommand(command="settings", description="[ADMIN] Broker settings"),
 ]
 
 ADMIN_COMMANDS = USER_COMMANDS + ADMIN_EXTRA_COMMANDS

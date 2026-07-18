@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app import emojis
 from app.formatters import messages
 
 
@@ -17,7 +18,7 @@ def test_format_account_shows_id_and_balance():
   )
   assert "acc-1" in out
   assert "1,234.50" in out
-  assert "đã liên kết" in out
+  assert "Status: linked" in out
 
 
 def test_format_account_escapes_html():
@@ -29,7 +30,7 @@ def test_format_account_escapes_html():
 
 
 def test_format_trades_empty():
-  assert "Chưa có giao dịch" in messages.format_trades({"data": [], "page": {}})
+  assert "No trades yet" in messages.format_trades({"data": [], "page": {}})
 
 
 def test_format_trades_lists_rows_with_header():
@@ -83,14 +84,14 @@ def test_format_accounts_admin():
     ]
   )
   assert "acc-1" in out and "acc-2" in out
-  assert "✅" in out  # linked
+  assert emojis.CHECK in out  # linked
   assert "—" in out  # unlinked
   assert "tok-123" in out
   assert "tg-spoiler" in out
 
 
 def test_format_accounts_admin_empty():
-  assert "Chưa có tài khoản" in messages.format_accounts_admin([])
+  assert "No accounts yet" in messages.format_accounts_admin([])
 
 
 def test_format_settings():
@@ -100,7 +101,7 @@ def test_format_settings():
       {"setting": "silent_signal", "value": "0", "state": "DISABLED"},
     ]
   )
-  assert "Chặn tín hiệu" in out
+  assert "Block signal" in out
   assert "ENABLED" in out and "DISABLED" in out
 
 
@@ -110,4 +111,4 @@ def test_format_rotate_result():
   )
   assert "new-tok" in out
   assert "acc-1" in out
-  assert "thu hồi" in out
+  assert "revoked" in out

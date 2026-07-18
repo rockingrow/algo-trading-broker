@@ -2,7 +2,7 @@
 app/handlers/commands.py — Trading control: /flat, /prevent, /allow.
 
 Each command shows a confirmation keyboard; the actual broker call happens only
-after the user taps "Xác nhận". Protected router (requires a linked account).
+after the user taps "Confirm". Protected router (requires a linked account).
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from app import emojis
 from app.formatters import messages
 from app.helpers import safe_edit_text
 from app.keyboards import inline
@@ -24,7 +25,7 @@ router = Router(name="commands")
 @router.message(Command("flat"))
 async def cmd_flat(message: Message, account: dict[str, Any]) -> None:
   await message.answer(
-    f"⚠️ Xác nhận <b>FLAT</b> (đóng toàn bộ vị thế) cho tài khoản "
+    f"{emojis.WARNING} Confirm <b>FLAT</b> (close all positions) for account "
     f"<code>{account.get('account_id')}</code>?",
     reply_markup=inline.confirm_keyboard("flat"),
   )
@@ -33,7 +34,7 @@ async def cmd_flat(message: Message, account: dict[str, Any]) -> None:
 @router.message(Command("prevent"))
 async def cmd_prevent(message: Message, account: dict[str, Any]) -> None:
   await message.answer(
-    f"⚠️ Xác nhận <b>CHẶN</b> vào lệnh mới cho tài khoản "
+    f"{emojis.WARNING} Confirm <b>BLOCK</b> new orders for account "
     f"<code>{account.get('account_id')}</code>?",
     reply_markup=inline.confirm_keyboard("prevent"),
   )
@@ -42,7 +43,7 @@ async def cmd_prevent(message: Message, account: dict[str, Any]) -> None:
 @router.message(Command("allow"))
 async def cmd_allow(message: Message, account: dict[str, Any]) -> None:
   await message.answer(
-    f"Xác nhận <b>CHO PHÉP</b> vào lệnh mới cho tài khoản "
+    f"Confirm <b>ALLOW</b> new orders for account "
     f"<code>{account.get('account_id')}</code>?",
     reply_markup=inline.confirm_keyboard("allow"),
   )
@@ -61,7 +62,9 @@ async def cb_confirm(call: CallbackQuery, broker: BrokerClient) -> None:
     result = await broker.prevent(tg_id, enabled=False)
 
   if result is None:
-    await safe_edit_text(call.message, "❌ Lệnh thất bại. Thử lại sau.")
+    await safe_edit_text(
+      call.message, f"{emojis.CROSS} Command failed. Try again later."
+    )
   else:
     await safe_edit_text(call.message, messages.format_command_result(result))
   await call.answer()
@@ -69,5 +72,5 @@ async def cb_confirm(call: CallbackQuery, broker: BrokerClient) -> None:
 
 @router.callback_query(F.data.in_({"flat:cancel", "prevent:cancel", "allow:cancel"}))
 async def cb_cancel(call: CallbackQuery) -> None:
-  await safe_edit_text(call.message, "Đã hủy.")
+  await safe_edit_text(call.message, "Cancelled.")
   await call.answer()

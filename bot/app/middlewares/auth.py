@@ -16,7 +16,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.services.broker_client import BrokerClient
 
-_NOT_LINKED = "Bạn chưa liên kết tài khoản. Gõ /start để liên kết bằng mã UUID của bạn."
+_NOT_LINKED = "You haven't linked an account yet. Type /start to link using your UUID code."
 
 
 class AuthMiddleware(BaseMiddleware):

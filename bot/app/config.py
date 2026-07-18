@@ -37,7 +37,7 @@ class BotSettings(BaseSettings):
   # Bot behaviour.
   BOT_LOG_LEVEL: str = "INFO"
   BOT_REQUEST_TIMEOUT: float = 10.0
-  BOT_TRADES_PAGE_SIZE: int = 5
+  BOT_VIEW_TRADES_PER_PAGE: int = 5
 
   @property
   def admin_ids(self) -> set[int]:

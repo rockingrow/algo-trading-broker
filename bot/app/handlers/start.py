@@ -9,6 +9,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from app import emojis
 from app.formatters import messages
 from app.services.broker_client import BrokerClient
 from app.states import LinkAccount
@@ -22,7 +23,7 @@ async def cmd_start(message: Message, state: FSMContext, broker: BrokerClient) -
   if account is not None:
     await state.clear()
     await message.answer(
-      "✅ Tài khoản của bạn đã được liên kết.\n\n"
+      f"{emojis.CHECK} Your account is already linked.\n\n"
       + messages.format_account(account)
       + "\n\n"
       + messages.COMMANDS_HINT
@@ -31,10 +32,10 @@ async def cmd_start(message: Message, state: FSMContext, broker: BrokerClient) -
 
   await state.set_state(LinkAccount.waiting_for_token)
   await message.answer(
-    "👋 <b>Chào mừng!</b>\n\n"
-    "Hãy gửi cho tôi <b>mã UUID</b> mà quản trị viên đã cấp để liên kết tài khoản "
-    "của bạn.\n\n"
-    "<i>Ví dụ: b5dc0374-9639-4861-acf4-2d239aa5c1b4</i>"
+    f"{emojis.WAVE} <b>Welcome!</b>\n\n"
+    "Please send me the <b>UUID code</b> your admin gave you to link your "
+    "account.\n\n"
+    "<i>Example: b5dc0374-9639-4861-acf4-2d239aa5c1b4</i>"
   )
 
 
