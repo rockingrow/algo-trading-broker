@@ -10,8 +10,8 @@ from aiogram.types import CallbackQuery, Message
 
 from app import emojis
 from app.config import settings
-from app.formatters import messages
-from app.helpers import safe_edit_text
+from app.presenters import messages
+from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClient
 
@@ -29,7 +29,7 @@ async def cmd_trades(message: Message, broker: BrokerClient) -> None:
     )
     return
   await message.answer(
-    messages.format_trades(payload),
+    messages.UserMessages.format_trades(payload),
     reply_markup=inline.trades_pagination(payload.get("page", {})),
   )
 
@@ -49,7 +49,7 @@ async def cb_trades_page(call: CallbackQuery, broker: BrokerClient) -> None:
 
   await safe_edit_text(
     call.message,
-    messages.format_trades(payload),
+    messages.UserMessages.format_trades(payload),
     reply_markup=inline.trades_pagination(payload.get("page", {})),
   )
   await call.answer()

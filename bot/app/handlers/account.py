@@ -11,8 +11,8 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app import emojis
-from app.formatters import messages
-from app.helpers import safe_edit_text
+from app.presenters import messages
+from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClient
 
@@ -21,7 +21,7 @@ router = Router(name="account")
 
 @router.message(Command("status"))
 async def cmd_status(message: Message, account: dict[str, Any]) -> None:
-  await message.answer(messages.format_account(account))
+  await message.answer(messages.UserMessages.format_account(account))
 
 
 @router.message(Command("unlink"))

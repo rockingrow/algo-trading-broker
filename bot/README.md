@@ -61,7 +61,7 @@ app/
 ├── middlewares/       # deps.py (DI), auth.py (require-linked guard)
 ├── handlers/          # start, link, trades, commands, account, admin
 ├── keyboards/         # inline keyboards (confirm, pagination, pickers, settings)
-└── formatters/        # render API payloads → Telegram HTML
+└── presenters/        # render API payloads → Telegram HTML
 ```
 
 ## Configuration (env / `.env`)

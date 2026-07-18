@@ -1,13 +1,13 @@
-"""Unit tests for the message formatters."""
+"""Unit tests for the message presenters."""
 
 from __future__ import annotations
 
 from app import emojis
-from app.formatters import messages
+from app.presenters import messages
 
 
 def test_format_account_shows_id_and_balance():
-  out = messages.format_account(
+  out = messages.UserMessages.format_account(
     {
       "account_id": "acc-1",
       "account_name": "Main",
@@ -22,7 +22,7 @@ def test_format_account_shows_id_and_balance():
 
 
 def test_format_account_escapes_html():
-  out = messages.format_account(
+  out = messages.UserMessages.format_account(
     {"account_id": "<b>x</b>", "account_name": None, "market_type": "FOREX"}
   )
   assert "<b>x</b>" not in out
@@ -30,7 +30,7 @@ def test_format_account_escapes_html():
 
 
 def test_format_trades_empty():
-  assert "No trades yet" in messages.format_trades({"data": [], "page": {}})
+  assert "No trades yet" in messages.UserMessages.format_trades({"data": [], "page": {}})
 
 
 def test_format_trades_lists_rows_with_header():
@@ -48,7 +48,7 @@ def test_format_trades_lists_rows_with_header():
     ],
     "page": {"total": 1, "limit": 5, "offset": 0},
   }
-  out = messages.format_trades(payload)
+  out = messages.UserMessages.format_trades(payload)
   assert "XAUUSD" in out
   assert "LONG" in out
   assert "1 / 1" in out  # header range "(1–1 / 1)"
@@ -60,11 +60,11 @@ def test_format_command_result():
   assert "account=acc-1" in out
 
 
-# ── admin formatters ────────────────────────────────────────────────
+# ── admin presenters ────────────────────────────────────────────────
 
 
 def test_format_accounts_admin():
-  out = messages.format_accounts_admin(
+  out = messages.AdminMessages.format_accounts_admin(
     [
       {
         "account_name": "Main",
@@ -91,11 +91,11 @@ def test_format_accounts_admin():
 
 
 def test_format_accounts_admin_empty():
-  assert "No accounts yet" in messages.format_accounts_admin([])
+  assert "No accounts yet" in messages.AdminMessages.format_accounts_admin([])
 
 
 def test_format_settings():
-  out = messages.format_settings(
+  out = messages.AdminMessages.format_settings(
     [
       {"setting": "signal_blocked", "value": "1", "state": "ENABLED"},
       {"setting": "silent_signal", "value": "0", "state": "DISABLED"},
@@ -106,7 +106,7 @@ def test_format_settings():
 
 
 def test_format_rotate_result():
-  out = messages.format_rotate_result(
+  out = messages.AdminMessages.format_rotate_result(
     {"account_id": "acc-1", "telegram_link_token": "new-tok"}
   )
   assert "new-tok" in out

@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app import emojis
-from app.formatters import messages
+from app.presenters import messages
 from app.services.broker_client import BrokerClient
 from app.states import LinkAccount
 
@@ -42,9 +42,9 @@ async def receive_token(
   await state.clear()
   await message.answer(
     f"{emojis.CHECK} <b>Linked successfully!</b>\n\n"
-    + messages.format_account(account)
+    + messages.UserMessages.format_account(account)
     + "\n\n"
-    + messages.COMMANDS_HINT
+    + messages.UserMessages.COMMANDS_HINT
   )
 
 

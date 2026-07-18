@@ -12,7 +12,8 @@ from typing import Any, Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app import emojis
-from app.formatters.messages import SETTING_META
+from app.presenters.messages import AdminMessages
+from app.utils.pagination import build_pagination_keyboard
 
 
 def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
@@ -34,28 +35,7 @@ def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
 def trades_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
   """Prev/Next buttons derived from the trades page metadata, or None when a
   single page covers everything."""
-  total = int(page.get("total", 0))
-  limit = int(page.get("limit", 0)) or 1
-  offset = int(page.get("offset", 0))
-
-  row: list[InlineKeyboardButton] = []
-  if offset > 0:
-    row.append(
-      InlineKeyboardButton(
-        text=f"{emojis.ARROW_LEFT} Prev",
-        callback_data=f"trades:{max(0, offset - limit)}",
-      )
-    )
-  if offset + limit < total:
-    row.append(
-      InlineKeyboardButton(
-        text=f"Next {emojis.ARROW_RIGHT}", callback_data=f"trades:{offset + limit}"
-      )
-    )
-
-  if not row:
-    return None
-  return InlineKeyboardMarkup(inline_keyboard=[row])
+  return build_pagination_keyboard(page, lambda offset: f"trades:{offset}")
 
 
 # ── Admin keyboards ─────────────────────────────────────────────────
@@ -81,28 +61,9 @@ def admin_trades_pagination(
   account_id: str, page: dict
 ) -> Optional[InlineKeyboardMarkup]:
   """Prev/Next for admin trade browsing → callback ``atr:{account_id}:{offset}``."""
-  total = int(page.get("total", 0))
-  limit = int(page.get("limit", 0)) or 1
-  offset = int(page.get("offset", 0))
-
-  row: list[InlineKeyboardButton] = []
-  if offset > 0:
-    row.append(
-      InlineKeyboardButton(
-        text=f"{emojis.ARROW_LEFT} Prev",
-        callback_data=f"atr:{account_id}:{max(0, offset - limit)}",
-      )
-    )
-  if offset + limit < total:
-    row.append(
-      InlineKeyboardButton(
-        text=f"Next {emojis.ARROW_RIGHT}",
-        callback_data=f"atr:{account_id}:{offset + limit}",
-      )
-    )
-  if not row:
-    return None
-  return InlineKeyboardMarkup(inline_keyboard=[row])
+  return build_pagination_keyboard(
+    page, lambda offset: f"atr:{account_id}:{offset}"
+  )
 
 
 def settings_keyboard(states: list[dict[str, Any]]) -> InlineKeyboardMarkup:
@@ -110,7 +71,7 @@ def settings_keyboard(states: list[dict[str, Any]]) -> InlineKeyboardMarkup:
   rows = []
   for s in states:
     key = str(s.get("setting"))
-    label, slug = SETTING_META.get(key, (key, key))
+    label, slug = AdminMessages.SETTING_META.get(key, (key, key))
     on = str(s.get("state")) == "ENABLED"
     dot = emojis.GREEN_CIRCLE if on else emojis.WHITE_CIRCLE
     rows.append(

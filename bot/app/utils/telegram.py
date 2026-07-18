@@ -1,5 +1,5 @@
 """
-app/helpers.py — Small shared helpers for handlers.
+app/utils/telegram.py — Small shared helpers for talking to the Telegram API.
 """
 
 from __future__ import annotations

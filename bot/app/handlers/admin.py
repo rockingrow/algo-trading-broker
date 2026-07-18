@@ -26,8 +26,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from app import emojis
 from app.config import settings
 from app.filters.admin import IsAdmin
-from app.formatters import messages
-from app.helpers import safe_edit_text
+from app.presenters import messages
+from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClient
 
@@ -47,7 +47,7 @@ async def cmd_accounts(message: Message, broker: BrokerClient) -> None:
   if accounts is None:
     await message.answer(f"{emojis.WARNING} Failed to fetch account list.")
     return
-  await message.answer(messages.format_accounts_admin(accounts))
+  await message.answer(messages.AdminMessages.format_accounts_admin(accounts))
 
 
 # ── /atrades ────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ async def _atrades_view(
   if payload is None:
     return None, None
   return (
-    messages.format_admin_trades(account_id, payload),
+    messages.AdminMessages.format_admin_trades(account_id, payload),
     inline.admin_trades_pagination(account_id, payload.get("page", {})),
   )
 
@@ -202,7 +202,7 @@ async def cb_rotate(call: CallbackQuery, broker: BrokerClient) -> None:
   if result is None:
     await safe_edit_text(call.message, f"{emojis.CROSS} Token rotation failed.")
   else:
-    await safe_edit_text(call.message, messages.format_rotate_result(result))
+    await safe_edit_text(call.message, messages.AdminMessages.format_rotate_result(result))
   await call.answer()
 
 
@@ -215,7 +215,7 @@ async def _render_settings(
   states = await broker.admin_get_settings()
   if states is None:
     return None, None
-  return messages.format_settings(states), inline.settings_keyboard(states)
+  return messages.AdminMessages.format_settings(states), inline.settings_keyboard(states)
 
 
 @router.message(Command("settings"))

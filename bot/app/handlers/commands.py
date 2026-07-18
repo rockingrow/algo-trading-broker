@@ -14,8 +14,8 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app import emojis
-from app.formatters import messages
-from app.helpers import safe_edit_text
+from app.presenters import messages
+from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClient
 
