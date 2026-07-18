@@ -5,10 +5,124 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.7] - Unreleased
+## [1.1.0] - 2026-07-18
 
 ### Added
 
+- **Webhook = enqueue-only** — `POST /secret/webhook` now only verifies the
+  `token` and pushes the raw envelope onto JetStream. Every other step (block
+  gate, DB persist, publish to workers, notification) moved into the
+  `SignalWorker` handler. The response is `202 {"status":"queued"}` as soon
+  as JetStream acknowledges the write, so TradingView's connection is not
+  held open across any of the fan-out work.
+- **`signals.attempts` and `signals.last_attempt` columns** — Added via
+  Alembic migration `b6f7a8c9d0e1`. `attempts` starts at
+  `settings.SIGNAL_MAX_ATTEMPTS` (default `3`, kept in code — not in
+  `.env.example` — because it changes retry semantics rather than deployment
+  topology) and is decremented on every failed fan-out; `last_attempt`
+  timestamps the previous try. Repository grows `record_attempt_failure`,
+  `list_retryable`, and `get_by_id`.
+- **`FAILED` signal status** — `SignalStatusEnum` grows a terminal `FAILED`
+  value. `record_attempt_failure` flips the row to `FAILED` (and zeroes
+  `attempts`) once the counter is about to drop below `1`, so the retry job
+  stops re-picking it.
+- **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) — Background
+  task that ticks every `settings.SIGNAL_RETRY_INTERVAL_SECONDS` (default
+  `15`), lists rows still `QUEUED` with `attempts > 0` and
+  `last_attempt < now - interval`, and hands each to
+  `SignalProcessingService.retry_signal`. The same interval is used as the
+  minimum gap between attempts on the same row so a tick cannot race an
+  in-flight attempt without needing a lock.
+- **`Attempt: N` line on retry notifications** — `format_signal_message` and
+  `format_flat_message` render an `Attempt: N` prefix only on the 2nd and
+  3rd attempt on a signal (i.e. when `attempts <= 2`), so the operator sees
+  a visible marker when the broker is retrying rather than firing fresh.
+- **`REJECTED` trade status** — Workers now emit a `TRADE` (`PositionEvent`) with
+  `status: "REJECTED"` when they refuse to place an order, e.g. when their
+  **MAX ORDER** limit is reached. The order is still persisted worker-side, so
+  the broker records a terminal, non-running trade instead of dropping the event
+  as an unknown status. `TradeStatusPolicy` maps `REJECTED` →
+  `TradeStatusEnum.REJECTED` (ranked below every other status, so it never
+  overwrites an existing trade for the same `ref_id`), and `is_running` is set
+  to `false`.
+- **`reject_reason` on the `TRADE` (`PositionEvent`) payload** — Optional field
+  carrying why the worker rejected the order (e.g. `"MAX ORDER limit reached"`).
+  `upsert_by_position_event` persists it onto the `trades.reject_reason` column
+  on both insert and update.
+
+### Changed
+
+- **Live FLAT payload now carries `signal_id`** — `NatsPublisher.publish_flat`
+  and the `SignalPublisher` protocol take `signal_id` as a required keyword
+  arg, and the published JSON includes a `signal_id` field. LONG/SHORT/TP/…
+  already carried it via `TradingSignal`, so live FLAT was the last shape
+  without one; adding it lets a worker de-duplicate a signal seen live
+  against the same signal replayed inside a `SYSTEM.RETRY_SIGNALS` bundle by
+  `signal_id`. Example: `examples/nats/close.flat.json`.
+- **`SignalProcessingService` reshaped around three entry points** —
+  `enqueue` (webhook fast path), `handle_enqueued` (JetStream first
+  attempt, including persist + block gate), and `retry_signal` (retry job,
+  rebuilds `WebhookPayload` from `row.raw`). All three delegate to a shared
+  `_fanout` that records success (`mark_published`) or attempt failure
+  (`record_attempt_failure`). `process` remains as a back-compat alias for
+  `enqueue`.
+- **JetStream envelope no longer carries `signal_id`** — The webhook has not
+  persisted yet, so the envelope is just the raw `WebhookPayload`. The
+  handler assigns the id when it writes the row.
+- **Block gate moved into the handler** — Blocked signals get their Telegram
+  notification and are dropped without persisting, but the HTTP path always
+  returns `202` (there is nothing to reject on: the row does not exist yet).
+
+### Fixed
+
+- **TradingView webhook: `server closed the connection unexpectedly`** — The
+  `/secret/webhook` response now carries `Connection: close`, forcing
+  TradingView to open a fresh TCP connection per alert. Previously, when the
+  gap between alerts on a strategy (e.g. 15-minute timeframe) exceeded
+  `WEBHOOK_KEEPALIVE_TIMEOUT` (120s default), TradingView reused a socket
+  that uvicorn had already closed and the delivery failed. Simply raising the
+  keep-alive timeout only postponed the race; signalling close per response
+  removes it. Costs one TCP handshake per alert, negligible at TradingView's
+  alert cadence.
+
+## [1.0.7] - 2026-07-15
+
+### Added
+
+- **NATS JetStream ingestion for webhook events** — The `POST /secret/webhook`
+  handler now only verifies the token, checks the block gate, persists the
+  signal row (`status=QUEUED`) and pushes a durable envelope onto the
+  JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). A new background
+  `SignalWorker` (`broker/services/signal_worker.py`) is a durable pull
+  consumer (`broker_signal_handler`) that fetches envelopes, runs the
+  parse/publish/notify pipeline in its own task, flips the row to `PUBLISHED`,
+  and acks — or NAKs on failure so JetStream redelivers. TradingView therefore
+  gets its `202` as soon as the message is durably queued, closing the
+  `Webhook delivery failed — server closed the connection unexpectedly`
+  failure mode caused by holding the HTTP request open across the fan-out.
+  Docker-compose now runs `nats-server` with `-js -sd /data/jetstream` and a
+  named `nats_data` volume so the stream survives restarts.
+- **`signals.status` column** — Added via Alembic migration `a5e6f7b8c9d0`.
+  Enum (`QUEUED`, `PUBLISHED`) that records where each webhook signal is in
+  the JetStream pipeline. Stuck `QUEUED` rows surface signals JetStream failed
+  to deliver so an operator can audit them without re-reading raw broker logs.
+- **`WORKER_CONNECTED.strategies` field** — `SystemWorkerConnectedSignal` now
+  carries a list of strategy subjects the worker subscribes to. Drives the
+  new `SYSTEM.RETRY_SIGNALS` replay so the broker only replays signals the
+  worker actually consumes.
+- **`SYSTEM.RETRY_SIGNALS` action** — On every `WORKER_CONNECTED` handshake (in
+  addition to the existing `CRYPTO_LEVERAGE_INIT` / `WORKER_CONNECTED_ACK`
+  reply), the broker sends a `RETRY_SIGNALS` back to the worker: every signal
+  persisted in the last `max_retry_timeout` seconds whose strategy the worker
+  announced. Payload is a list of the same objects normally published on the
+  strategy subject, so the worker can replay them through the same handler.
+  Delivered on the request's reply inbox when the handshake used NATS
+  request/reply, otherwise broadcast on the shared `SYSTEM` subject. Introduces
+  the `SystemRetrySignal` schema and `NatsPublisher.publish_system_retry_signal`
+  (plus the matching `SignalPublisher` protocol entry).
+- **`max_retry_timeout` broker setting** — Seeded to `"60"` via Alembic
+  migration `a5e6f7b8c9d0`. Time window (in seconds) used to select signals
+  for the `RETRY_SIGNALS` replay. Missing/invalid values fall back to `60`.
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
   for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
@@ -25,6 +139,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Webhook pipeline split into enqueue + JetStream handler** — What used to
+  run inline on `POST /secret/webhook` (persist → parse → publish to workers →
+  notify) is now two hops. The route only runs the fast half (verify + block
+  check + persist `QUEUED` + JetStream publish) and returns `202` with
+  `status=queued`. The `SignalWorker` runs the second half from the JetStream
+  consumer callback and flips the row to `PUBLISHED`. `SignalProcessingService`
+  gains `handle_enqueued` for the consumer path; the existing `process` now
+  handles only the enqueue path. `SignalRepository` grows two methods —
+  `mark_published` and `list_recent_by_strategies` — used by the worker and
+  the `RETRY_SIGNALS` replay respectively.
 - **Admin crypto settings now push live to each crypto worker** — `POST
   /admin/settings/crypto-allowed-symbol` and `POST
   /admin/settings/crypto-max-leverage` send a `SYSTEM` `CRYPTO_LEVERAGE_INIT`
@@ -267,6 +391,7 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
+[1.1.0]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.4...v1.0.5

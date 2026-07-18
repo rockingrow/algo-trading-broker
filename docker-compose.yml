@@ -32,7 +32,9 @@ services:
     ports:
       - "${NATS_PORT:-4222}:${NATS_PORT:-4222}"                       # client connections (workers connect from outside)
       - "${NATS_MONITOR_PORT:-8222}:${NATS_MONITOR_PORT:-8222}"       # HTTP monitoring dashboard
-    command: ["--port", "${NATS_PORT:-4222}", "--auth", "${NATS_TOKEN:-changeme}", "--http_port", "${NATS_MONITOR_PORT:-8222}"]
+    command: ["-js", "-sd", "/data/jetstream", "--port", "${NATS_PORT:-4222}", "--auth", "${NATS_TOKEN:-changeme}", "--http_port", "${NATS_MONITOR_PORT:-8222}"]
+    volumes:
+      - nats_data:/data/jetstream
     networks:
       - trading_net
 
@@ -82,6 +84,7 @@ services:
 
 volumes:
   postgres_data:
+  nats_data:
 
 networks:
   trading_net:

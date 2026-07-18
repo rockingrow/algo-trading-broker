@@ -47,9 +47,10 @@ make dev
 
 ## ✨ Features
 
-- **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification).
-- **Persistence**: Logs every signal, trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
-- **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need.
+- **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification). Every alert is persisted (`status=QUEUED`) and pushed onto a **NATS JetStream** stream so the HTTP request returns as soon as the message is durably queued — the fan-out to workers runs in a background consumer, which closes the `Webhook delivery failed — server closed the connection unexpectedly` failure mode from holding the request open across the pipeline.
+- **Persistence**: Logs every signal (with a `QUEUED` → `PUBLISHED` status), trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
+- **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
+- **Signal replay on reconnect**: On every `WORKER_CONNECTED` handshake, the broker sends a `SYSTEM.RETRY_SIGNALS` back to the worker with every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
@@ -67,9 +68,16 @@ graph TD
     subgraph "Broker Node (This Repo)"
         Broker[FastAPI Webhook Server]
         DB[(PostgreSQL)]
-        NATS["NATS Server :4222 (Token Auth)"]
-        Broker -- "Log Signal" --> DB
-        Broker -- "Publish {strategy}" --> NATS
+        NATS["NATS Server :4222 (Token Auth + JetStream)"]
+        JS[["JetStream SIGNALS stream"]]
+        SW[SignalWorker]
+        RJ["SignalRetryJob (15s tick)"]
+        Broker -- "Publish SIGNALS.{strategy}" --> JS
+        JS -- "Pull consumer" --> SW
+        SW -- "Persist QUEUED / mark PUBLISHED / record attempt" --> DB
+        SW -- "Publish {strategy}" --> NATS
+        RJ -- "list_retryable (QUEUED, attempts > 0)" --> DB
+        RJ -- "retry_signal → publish {strategy}" --> NATS
         NATS -- "TRADE events" --> Consumer[TradeEventConsumer]
         Consumer -- "Upsert Trade + Account" --> DB
     end
@@ -104,7 +112,7 @@ algo-trading-broker/
 │   ├── interfaces/      # Protocols for DI (DB, notifier, publisher)
 │   ├── schemas/         # Pydantic schemas (webhook, publisher, subscriber, trade, account, admin)
 │   ├── security/        # Auth guard (ensure_api_key — X-API-KEY)
-│   ├── services/        # nats_publisher, nats_service, notification, signal_processing
+│   ├── services/        # nats_service, notification, signal_processing
 │   ├── app.py           # FastAPI application factory
 │   ├── main.py          # Entrypoint (uvicorn runner)
 │   ├── router.py        # Aggregates sub-routers under /v1, /admin, /secret
@@ -135,15 +143,46 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | --------- | ------- | ------- |
 | Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
 | Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
-| Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` sent back after a worker announces itself |
+| Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` and `RETRY_SIGNALS` sent back after a worker announces itself |
+| Publish (broker → broker) | `SIGNALS.<strategy>` (JetStream stream `SIGNALS`) | Durable webhook envelope buffer — the webhook endpoint enqueues here, the broker's own `SignalWorker` consumes and fans out to `{strategy}` |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
-| Subscribe (workers → broker) | `SYSTEM` | `WORKER_CONNECTED` announcements published by a worker right after it connects (payload carries `account_id` in `<market>-<gateway>-<account_id>` format, plus `market` and `gateway`) |
+| Subscribe (workers → broker) | `SYSTEM` | `WORKER_CONNECTED` announcements published by a worker right after it connects (payload carries `account_id` in `<market>-<gateway>-<account_id>` format, plus `market`, `gateway`, and `strategies`) |
 
 Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
 
+Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside a `SYSTEM.RETRY_SIGNALS` replay bundle, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
+
+### `TRADE` events
+
+Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(account_id, ref_id)`, translating the worker's position status into a broker trade `status`:
+
+| Worker position status | Broker trade `status` | Running? |
+| ---------------------- | --------------------- | -------- |
+| `OPENED` | `OPENED` | Yes |
+| `TP1` | `PARTIALLY_CLOSED` | Yes |
+| `TP2`, `SL`, `R_SL`, `TERMINAL_CLOSED`, `FORCED_CLOSED` | `CLOSED` | No |
+| `FLATTED` | `FLAT` | No |
+| `REJECTED` | `REJECTED` | No |
+
+**`REJECTED`** is emitted when a worker refuses to place an order — for example when its **MAX ORDER** limit is reached. The worker still records the order in its own database and fires the `TRADE` event, so the broker persists a terminal, non-running trade carrying the worker's `reject_reason` (e.g. `"MAX ORDER limit reached"`). `REJECTED` ranks below every other status, so an event for an already-existing `ref_id` is treated as a lifecycle downgrade and ignored — only a brand-new order is recorded as rejected.
+
+### JetStream signal pipeline
+
+The webhook endpoint is a fast enqueue-only path. Everything else runs from a background handler, with a retry loop that can re-try failed signals a bounded number of times.
+
+1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
+2. **`SignalWorker`** (`broker/services/signal_worker.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
+3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
+4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.SIGNAL_RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
+5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
+
+**Retry-aware notifications**: the Telegram signal / FLAT message carries an `Attempt: N` line on the 2nd and 3rd attempts (not on the fresh first attempt) so the operator sees when the broker is retrying.
+
+Enable JetStream on your NATS server (`nats-server -js -sd <path>`) — the bundled `docker-compose.yml` already does so and mounts the `nats_data` volume for durability.
+
 ### `SYSTEM` handshake
 
-When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation:
+When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation. `strategies` is optional; when set, it lists the strategy subjects the worker subscribes to and drives the `RETRY_SIGNALS` replay described below.
 
 ```json
 {
@@ -151,7 +190,8 @@ When a worker successfully connects to NATS, it announces itself on the `SYSTEM`
   "account_id": "CRYPTO-BINANCE-7654321",
   "timestamp": "2026-06-30T00:00:00+00:00",
   "market": "CRYPTO",
-  "gateway": "BINANCE"
+  "gateway": "BINANCE",
+  "strategies": ["wt_cross_v1", "MT5_GOLD_M5_V1"]
 }
 ```
 
@@ -171,6 +211,8 @@ The broker answers with one of three actions:
 | Crypto worker, settings loaded | `CRYPTO_LEVERAGE_INIT` | `symbols`, `default_leverage` |
 | Non-crypto worker | `WORKER_CONNECTED_ACK` | — (nothing to configure) |
 | Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
+
+In addition, every valid `WORKER_CONNECTED` also gets a `RETRY_SIGNALS` (see [Signal replay on reconnect](#signal-replay-on-reconnect) below) so a worker that just reconnected can catch up on broadcasts it missed while offline.
 
 For a crypto worker, the broker loads the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows and replies with `CRYPTO_LEVERAGE_INIT`:
 
@@ -200,6 +242,35 @@ If the crypto settings are missing or invalid, the worker gets an explicit error
 A worker may still `publish` `WORKER_CONNECTED` without a reply inbox. In that case the broker broadcasts `CRYPTO_LEVERAGE_INIT` on the shared `SYSTEM` subject for crypto workers (workers filter by `account_id`); non-crypto and error outcomes can only be logged, not signalled back. Request/reply is preferred precisely because it removes those blind spots.
 
 The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `WORKER_CONNECTED_ACK`, `WORKER_CONNECTED_ERROR`) by `action`, so it never reacts to its own messages.
+
+#### Signal replay on reconnect
+
+Every valid `WORKER_CONNECTED` triggers a `RETRY_SIGNALS` reply carrying every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list. The payload is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler.
+
+Sent on the request's reply inbox when the worker used NATS request/reply, otherwise broadcast on the shared `SYSTEM` subject. Nothing is sent when the worker did not announce any strategies. Example: `examples/nats/system.retry_signals.json`.
+
+```json
+{
+  "action": "RETRY_SIGNALS",
+  "account_id": "CRYPTO-BINANCE-7654321",
+  "timestamp": "2026-07-16T00:00:00+00:00",
+  "signals": [
+    {
+      "signal_id": "sig_123456789_long",
+      "timestamp": "2026-07-15T23:59:30+00:00",
+      "strategy": "wt_cross_v1",
+      "action": "LONG",
+      "symbol": "XAUUSD",
+      "price": 2350.5,
+      "quantity": 0.1,
+      "sl": 2340.0,
+      "tp1": 2370.0,
+      "tp2": 2390.0,
+      "risk_percent": 1.0
+    }
+  ]
+}
+```
 
 #### Live config push on admin update
 
@@ -380,7 +451,7 @@ Returns `{"status": "ok"}`. No authentication required.
 
 ### POST `/secret/webhook`
 
-Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Publishes the signal to the NATS subject matching `signal.strategy` (e.g. `wt_cross_v1`).
+Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
 
 **Example Payload:**
 
@@ -626,6 +697,9 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `risk_percent` | Numeric(10,4) | Risk percentage for position sizing |
 | `is_scale_position` | Boolean | Whether this signal scales into an existing position |
 | `scale_strategy` | String(50) (Nullable) | Scale-in strategy name (e.g. `add_on_pullback`) |
+| `status` | Enum | Delivery state: `QUEUED` on insert, `PUBLISHED` after a successful fan-out, `FAILED` once every attempt has been exhausted |
+| `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.SIGNAL_MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
+| `last_attempt` | DateTime (Nullable) | Timestamp of the most recent fan-out attempt (`NULL` before the first attempt). Drives the retry job's minimum-gap filter. |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
 | `raw` | JSONB (Nullable) | Raw webhook payload |
@@ -689,6 +763,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `notification_timezone` | `"7"` | `POST /admin/settings/notification-timezone` | UTC offset (hours) applied to the `Time:` line of Telegram notifications |
+| `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `SYSTEM.RETRY_SIGNALS` replay sent to a freshly-connected worker |
 
 ---
 

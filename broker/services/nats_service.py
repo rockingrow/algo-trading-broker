@@ -1,8 +1,11 @@
 """
-broker/services/nats_service.py — Inbound side of NATS.
+broker/services/nats_service.py — NATS service layer: outbound publishing and
+inbound consumption.
 
-Hosts the consumers that subscribe to NATS subjects and react to incoming
-messages:
+- ``NatsPublisher`` implements the ``SignalPublisher`` Protocol and is the
+  only outbound path — clients that only need to publish (e.g. the webhook
+  flow) depend on this narrow interface and never see the inbound consumer
+  machinery below.
 
 - ``TradeEventConsumer`` subscribes to the TRADE subject and applies each
   position event to the trades table via an injected ``TradeRepository``. It
@@ -59,30 +62,53 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import Optional
 
 from nats.aio.subscription import Subscription
 from pydantic import ValidationError
 
-from broker.constants import CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY
+from broker.constants import (
+  CRYPTO_ALLOWED_SYMBOL_KEY,
+  CRYPTO_MAX_LEVERAGE_KEY,
+  DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
+  MAX_RETRY_TIMEOUT_KEY,
+)
+from broker.helpers.signal_helper import parse_signal
 from broker.interfaces import (
   AccountRepository,
   SettingRepository,
   SignalPublisher,
+  SignalRepository,
   TradeRepository,
 )
 from broker.logger import get_logger
-from broker.nats import NatsClient, nats_client
+from broker.nats import JETSTREAM_SIGNAL_SUBJECT_PREFIX, NatsClient, nats_client
 from broker.schemas.account_schema import MarketTypeEnum, decompose_worker_id
-from broker.schemas.core import MarketEnum
+from broker.schemas.core import MarketEnum, SignalActionEnum
 from broker.schemas.publisher_schema import (
+  AdminSignal,
   PublishTopicEnum,
   SystemActionEnum,
+  SystemCryptoLeverageInitSignal,
+  SystemRetrySignal,
+  SystemWorkerConnectedAck,
+  SystemWorkerConnectedError,
   SystemWorkerConnectedSignal,
+  TradingSignal,
 )
 from broker.schemas.trade_event_schema import PositionEvent
+from broker.schemas.webhook_schema import WebhookPayload
 
 log = get_logger(__name__)
+
+def _jetstream_subject(strategy: str) -> str:
+  """Return the JetStream subject a webhook envelope should be published on.
+
+  Kept as a helper so producers and consumers agree on the layout without
+  hard-coding string concatenation in two places.
+  """
+  return f"{JETSTREAM_SIGNAL_SUBJECT_PREFIX}.{strategy}"
 
 # nats-py runs one asyncio task per subscription, pulling messages off an
 # internal queue and awaiting the callback to completion before pulling the
@@ -160,11 +186,13 @@ class SystemEventConsumer:
     setting_repository: SettingRepository,
     account_repository: AccountRepository,
     publisher: SignalPublisher,
+    signal_repository: SignalRepository | None = None,
     connection: NatsClient | None = None,
   ) -> None:
     self._settings = setting_repository
     self._accounts = account_repository
     self._publisher = publisher
+    self._signals = signal_repository
     self._conn = connection or nats_client
     self._sub: Optional[Subscription] = None
     self._crypto_settings_cache: tuple[Optional[str], Optional[str]] | None = None
@@ -232,13 +260,21 @@ class SystemEventConsumer:
       return
 
     log.info(
-      "SYSTEM WORKER_CONNECTED account_id=%s market=%s gateway=%s",
+      "SYSTEM WORKER_CONNECTED account_id=%s market=%s gateway=%s strategies=%s",
       event.account_id,
       event.market,
       event.gateway,
+      event.strategies,
     )
 
     await self._remember_worker(event)
+
+    # Every WORKER_CONNECTED gets a RETRY_SIGNALS replay of the recent signals
+    # matching the strategies the worker announced, so a reconnecting worker
+    # can catch up on broadcasts it missed while offline. The replay is sent
+    # in addition to (never instead of) the ACK / CRYPTO_LEVERAGE_INIT so
+    # non-crypto workers get their catch-up too.
+    await self._send_retry_signal(event.account_id, event.strategies, reply_to)
 
     # Only crypto workers need leverage configuration pushed back on connect.
     if event.market != MarketEnum.CRYPTO.value:
@@ -345,6 +381,85 @@ class SystemEventConsumer:
         exc,
       )
 
+  async def _send_retry_signal(
+    self, account_id: str, strategies: list[str], reply_to: str = ""
+  ) -> None:
+    """Push a RETRY_SIGNALS replay of the last ``max_retry_timeout`` seconds.
+
+    Nothing to do when the worker announced no strategies, or when we have no
+    ``SignalRepository`` wired in (the deployment opted out of the replay).
+    Query hits are shaped through ``parse_signal`` so the payload matches the
+    live SIGNAL messages exactly. Best-effort: a broken lookup, an invalid
+    persisted row, or a failed publish is logged and the handshake continues.
+    """
+    if self._signals is None or not strategies:
+      return
+
+    window_seconds = await self._get_max_retry_timeout_seconds()
+    try:
+      envelopes = await self._signals.list_recent_by_strategies(
+        strategies=strategies, since_seconds=window_seconds
+      )
+    except Exception as exc:
+      log.exception(
+        "SYSTEM RETRY_SIGNALS skipped account_id=%s: signals lookup failed: %s",
+        account_id,
+        exc,
+      )
+      return
+
+    signals: list[TradingSignal] = []
+    for envelope in envelopes:
+      raw_payload = envelope.get("payload")
+      signal_id = envelope.get("signal_id")
+      if not isinstance(raw_payload, dict) or not signal_id:
+        continue
+      try:
+        payload = WebhookPayload(**raw_payload)
+        signals.append(parse_signal(payload, signal_id))
+      except Exception as exc:
+        # A single bad row must not derail the replay for the rest.
+        log.warning(
+          "SYSTEM RETRY_SIGNALS skipping bad row signal_id=%s: %s", signal_id, exc
+        )
+
+    try:
+      await self._publisher.publish_system_retry_signal(
+        account_id=account_id,
+        signals=signals,
+        subject=reply_to or None,
+      )
+    except Exception as exc:
+      log.exception(
+        "Failed to publish RETRY_SIGNALS for account_id=%s: %s", account_id, exc
+      )
+
+  async def _get_max_retry_timeout_seconds(self) -> int:
+    """Read the ``max_retry_timeout`` broker setting, falling back to the
+    default on missing/invalid values."""
+    raw = await self._settings.get(MAX_RETRY_TIMEOUT_KEY)
+    if raw is None:
+      return DEFAULT_MAX_RETRY_TIMEOUT_SECONDS
+    try:
+      value = int(raw)
+    except (TypeError, ValueError):
+      log.warning(
+        "%s is not an integer: %r — using default %d",
+        MAX_RETRY_TIMEOUT_KEY,
+        raw,
+        DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
+      )
+      return DEFAULT_MAX_RETRY_TIMEOUT_SECONDS
+    if value <= 0:
+      log.warning(
+        "%s must be positive, got %r — using default %d",
+        MAX_RETRY_TIMEOUT_KEY,
+        raw,
+        DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
+      )
+      return DEFAULT_MAX_RETRY_TIMEOUT_SECONDS
+    return value
+
   async def _get_crypto_settings(self) -> tuple[Optional[str], Optional[str]]:
     """Return (symbols_raw, leverage_raw), reusing a cached read for up to
     ``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``.
@@ -400,3 +515,168 @@ class SystemEventConsumer:
       log.warning(
         "Failed to reply WORKER_CONNECTED_ERROR account_id=%s: %s", account_id, exc
       )
+
+
+# ── Outbound side of NATS ────────────────────────────────────────────────
+
+
+class NatsPublisher:
+  """Publishes trading signals and FLAT directives to subscribers."""
+
+  def __init__(self, connection: NatsClient | None = None) -> None:
+    self._conn = connection or nats_client
+
+  async def publish_webhook_event(
+    self, *, signal_id: str, strategy: str, envelope: dict
+  ) -> None:
+    """Persist a raw webhook envelope to JetStream so it can be handled offline.
+
+    The webhook HTTP path calls this to move the entire signal-handling pipeline
+    (parse → publish to workers → notify → mark PUBLISHED) into a background
+    consumer. TradingView therefore gets its 202 back as soon as the message is
+    durably queued, closing the ``server closed the connection unexpectedly``
+    failure mode that came from doing the whole pipeline inline.
+    """
+    subject = _jetstream_subject(strategy)
+    payload = json.dumps(envelope, default=str).encode()
+    ack = await self._conn.js.publish(subject, payload)
+    log.info(
+      "Enqueued [%s] signal_id=%s stream_seq=%s",
+      subject,
+      signal_id,
+      getattr(ack, "seq", None),
+    )
+
+  async def publish(self, signal: TradingSignal) -> None:
+    """Serialise *signal* and broadcast to subscribers on the strategy subject."""
+    if signal is None:
+      log.warning("NatsPublisher.publish called with None signal; skipping.")
+      return
+    subject = signal.strategy
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(subject, payload)
+    log.info(
+      "Published [%s] signal_id=%s action=%s symbol=%s",
+      subject,
+      signal.signal_id,
+      signal.action,
+      signal.symbol,
+    )
+
+  async def publish_flat(
+    self,
+    *,
+    signal_id: str,
+    symbol: str,
+    timestamp: datetime,
+    strategy: str,
+  ) -> None:
+    """Broadcast a FLAT (close-all) directive on the strategy subject.
+
+    Carries ``signal_id`` — same field the LONG/SHORT/TP payloads (a full
+    ``TradingSignal``) already do — so a worker seeing this signal live and
+    then again inside a ``SYSTEM.RETRY_SIGNALS`` replay can de-duplicate by
+    id instead of by guessing on content.
+    """
+    payload = json.dumps(
+      {
+        "signal_id": signal_id,
+        "strategy": strategy,
+        "timestamp": timestamp.isoformat(),
+        "action": SignalActionEnum.FLAT.value,
+        "symbol": symbol,
+      }
+    ).encode()
+    await self._conn.nc.publish(strategy, payload)
+    log.info(
+      "Published [%s] FLAT directive signal_id=%s symbol=%s",
+      strategy,
+      signal_id,
+      symbol,
+    )
+
+  async def publish_admin_signal(self, **kwargs) -> None:
+    """Broadcast an admin signal on the ADMIN subject."""
+    signal = AdminSignal(**kwargs)
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(PublishTopicEnum.ADMIN.value, payload)
+    log.info(
+      "Published [ADMIN] action=%s strategy=%s symbol=%s account_id=%s",
+      signal.action,
+      signal.strategy,
+      signal.symbol,
+      signal.account_id,
+    )
+
+  async def publish_system_signal(
+    self, *, subject: str | None = None, **kwargs
+  ) -> None:
+    """Publish a CRYPTO_LEVERAGE_INIT system signal.
+
+    When *subject* is given (a worker's reply inbox from NATS ``request``) the
+    signal is delivered directly to that one worker; otherwise it is broadcast
+    on the shared SYSTEM subject for backward compatibility with fire-and-forget
+    workers.
+    """
+    signal = SystemCryptoLeverageInitSignal(**kwargs)
+    target = subject or PublishTopicEnum.SYSTEM.value
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(target, payload)
+    log.info(
+      "Published [SYSTEM→%s] action=%s account_id=%s symbols=%s default_leverage=%s",
+      target,
+      signal.action,
+      signal.account_id,
+      signal.symbols,
+      signal.default_leverage,
+    )
+
+  async def publish_system_retry_signal(
+    self, *, subject: str | None = None, **kwargs
+  ) -> None:
+    """Publish a RETRY_SIGNALS replay of recent signals to a reconnecting worker.
+
+    Sent as the second half of the WORKER_CONNECTED handshake — after the
+    market-specific ACK / CRYPTO_LEVERAGE_INIT — so a worker that missed
+    broadcasts while it was offline can catch up. Delivered directly on
+    *subject* (the request's reply inbox) when set; otherwise broadcast on the
+    shared SYSTEM subject.
+    """
+    signal = SystemRetrySignal(**kwargs)
+    target = subject or PublishTopicEnum.SYSTEM.value
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(target, payload)
+    log.info(
+      "Published [SYSTEM→%s] action=%s account_id=%s count=%d",
+      target,
+      signal.action,
+      signal.account_id,
+      len(signal.signals),
+    )
+
+  async def publish_system_ack(self, *, subject: str, **kwargs) -> None:
+    """Reply on a worker's request inbox acknowledging that no initial
+    configuration is required (e.g. non-crypto markets)."""
+    signal = SystemWorkerConnectedAck(**kwargs)
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(subject, payload)
+    log.info(
+      "Published [SYSTEM→%s] action=%s account_id=%s",
+      subject,
+      signal.action,
+      signal.account_id,
+    )
+
+  async def publish_system_error(self, *, subject: str, **kwargs) -> None:
+    """Reply on a worker's request inbox signalling the broker could not build
+    the initial configuration; carries a human-readable ``reason``."""
+    signal = SystemWorkerConnectedError(**kwargs)
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(subject, payload)
+    log.warning(
+      "Published [SYSTEM→%s] action=%s account_id=%s reason=%s",
+      subject,
+      signal.action,
+      signal.account_id,
+      signal.reason,
+    )

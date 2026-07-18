@@ -86,6 +86,30 @@ class Settings(BaseSettings):
   # timestamps when the `notification_timezone` broker setting is unset.
   DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS: float = 7.0
 
+  # ── Signal handler retry policy ──────────────────────────────────
+  # Total attempts the JetStream handler + retry job may spend on a single
+  # signal before it is marked FAILED. Persisted as the initial ``attempts``
+  # value on every new ``signals`` row; on each failed fan-out the row's
+  # counter is decremented and re-picked up by the retry job until it hits 0.
+  # Kept here (not in ``.env.example``) because it changes retry semantics
+  # rather than deployment topology.
+  SIGNAL_MAX_ATTEMPTS: int = 3
+  # Poll cadence (seconds) of the retry job and the minimum gap between two
+  # attempts on the same row — a row whose ``last_attempt`` is newer than
+  # ``now - SIGNAL_RETRY_INTERVAL_SECONDS`` is not re-picked, which stops the
+  # job from racing an in-flight attempt.
+  SIGNAL_RETRY_INTERVAL_SECONDS: int = 15
+
+  # ── JetStream consumer (feeds handle_enqueued) ────────────────────
+  # Consumer name is durable so a broker restart resumes from the same
+  # position on the stream instead of skipping past unacked messages.
+  JETSTREAM_SIGNAL_CONSUMER: str = "broker_signal_handler"
+  # Batch size and fetch timeout picked for a single-writer webhook: even the
+  # noisiest TradingView setup rarely bursts more than a handful of alerts a
+  # second, so 10-per-fetch keeps latency low while amortising the pull round trip.
+  JETSTREAM_FETCH_BATCH: int = 10
+  JETSTREAM_FETCH_TIMEOUT_SECONDS: float = 1.0
+
   @property
   def postgres_dsn(self) -> str:
     return (
