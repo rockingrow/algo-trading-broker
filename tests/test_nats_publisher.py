@@ -85,7 +85,7 @@ async def test_publish_flat_payload_shape():
   subject, body = conn.nc.published[0]
   assert subject == "strat-x"
   # signal_id is required so workers can de-duplicate a live FLAT against the
-  # same signal replayed inside a SYSTEM.RETRY_SIGNAL bundle.
+  # same signal replayed inside a SYSTEM.RETRY_SIGNALS bundle.
   assert body == {
     "signal_id": "sig-flat-1",
     "strategy": "strat-x",
@@ -199,7 +199,7 @@ async def test_publish_system_retry_signal_broadcasts_when_no_subject():
 
   subject, body = conn.nc.published[0]
   assert subject == PublishTopicEnum.SYSTEM.value
-  assert body["action"] == SystemActionEnum.RETRY_SIGNAL.value
+  assert body["action"] == SystemActionEnum.RETRY_SIGNALS.value
   assert body["account_id"] == "FOREX-MT5-1"
   assert len(body["signals"]) == 1
   assert body["signals"][0]["signal_id"] == "sig-1"
@@ -213,5 +213,5 @@ async def test_publish_system_retry_signal_replies_directly_when_subject_set():
   )
   subject, body = conn.nc.published[0]
   assert subject == "_INBOX.reply"
-  assert body["action"] == SystemActionEnum.RETRY_SIGNAL.value
+  assert body["action"] == SystemActionEnum.RETRY_SIGNALS.value
   assert body["signals"] == []

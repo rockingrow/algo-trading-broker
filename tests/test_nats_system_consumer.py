@@ -601,7 +601,7 @@ async def test_stop_unsubscribes():
   assert conn.nc._sub.unsubscribed is True
 
 
-# ── RETRY_SIGNAL replay on WORKER_CONNECTED ────────────────────────────────
+# ── RETRY_SIGNALS replay on WORKER_CONNECTED ───────────────────────────────
 
 
 def _webhook_envelope(strategy: str, signal_id: str = "sig-1") -> dict:
@@ -648,6 +648,44 @@ async def test_retry_signal_queries_and_replays_matching_signals():
   # Payload mirrors SIGNAL exactly (symbol normalised, strategy carried).
   assert retry["signals"][0].symbol == "XAUUSD"
   assert retry["signals"][0].strategy == "wt_cross_v1"
+
+
+async def test_retry_signal_replays_across_many_strategies():
+  """A worker connecting with many strategy subjects (e.g. 10) gets every
+  matching signal back in a single RETRY_SIGNALS batch — one DB lookup and
+  one publish, not one round trip per strategy."""
+  strategies = [f"strategy_{i}" for i in range(10)]
+  envelopes = [
+    _webhook_envelope(strategy, signal_id=f"sig-{i}")
+    for i, strategy in enumerate(strategies)
+  ]
+  signals = FakeSignalRepo(envelopes=envelopes)
+  consumer, _repo, publisher = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+      CRYPTO_MAX_LEVERAGE_KEY: "10",
+    },
+    signals=signals,
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="CRYPTO-BINANCE-7654321",
+        strategies=strategies,
+      ),
+      reply="_INBOX.many",
+    )
+  )
+
+  # The full strategy list is passed to a single lookup call, not looped.
+  assert signals.calls == [(strategies, 60)]
+
+  # All matching signals come back as exactly one RETRY_SIGNALS batch.
+  assert len(publisher.retries) == 1
+  retry = publisher.retries[0]
+  assert retry["subject"] == "_INBOX.many"
+  assert len(retry["signals"]) == 10
+  assert {s.strategy for s in retry["signals"]} == set(strategies)
 
 
 async def test_retry_signal_uses_configured_timeout():
@@ -701,7 +739,7 @@ async def test_retry_signal_skipped_when_no_signal_repository():
 
 
 async def test_retry_signal_sent_alongside_crypto_leverage_init():
-  # A crypto worker gets both the RETRY_SIGNAL replay AND CRYPTO_LEVERAGE_INIT.
+  # A crypto worker gets both the RETRY_SIGNALS replay AND CRYPTO_LEVERAGE_INIT.
   signals = FakeSignalRepo(envelopes=[_webhook_envelope("wt_cross_v1")])
   consumer, _repo, publisher = _make_consumer(signals=signals)
   await consumer.handle_subject_system(

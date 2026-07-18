@@ -50,7 +50,7 @@ make dev
 - **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification). Every alert is persisted (`status=QUEUED`) and pushed onto a **NATS JetStream** stream so the HTTP request returns as soon as the message is durably queued — the fan-out to workers runs in a background consumer, which closes the `Webhook delivery failed — server closed the connection unexpectedly` failure mode from holding the request open across the pipeline.
 - **Persistence**: Logs every signal (with a `QUEUED` → `PUBLISHED` status), trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
-- **Signal replay on reconnect**: On every `WORKER_CONNECTED` handshake, the broker sends a `SYSTEM.RETRY_SIGNAL` back to the worker with every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
+- **Signal replay on reconnect**: On every `WORKER_CONNECTED` handshake, the broker sends a `SYSTEM.RETRY_SIGNALS` back to the worker with every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
@@ -143,14 +143,14 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | --------- | ------- | ------- |
 | Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
 | Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
-| Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` and `RETRY_SIGNAL` sent back after a worker announces itself |
+| Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` and `RETRY_SIGNALS` sent back after a worker announces itself |
 | Publish (broker → broker) | `SIGNALS.<strategy>` (JetStream stream `SIGNALS`) | Durable webhook envelope buffer — the webhook endpoint enqueues here, the broker's own `SignalWorker` consumes and fans out to `{strategy}` |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
 | Subscribe (workers → broker) | `SYSTEM` | `WORKER_CONNECTED` announcements published by a worker right after it connects (payload carries `account_id` in `<market>-<gateway>-<account_id>` format, plus `market`, `gateway`, and `strategies`) |
 
 Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
 
-Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside a `SYSTEM.RETRY_SIGNAL` replay bundle, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
+Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside a `SYSTEM.RETRY_SIGNALS` replay bundle, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
 
 ### `TRADE` events
 
@@ -182,7 +182,7 @@ Enable JetStream on your NATS server (`nats-server -js -sd <path>`) — the bund
 
 ### `SYSTEM` handshake
 
-When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation. `strategies` is optional; when set, it lists the strategy subjects the worker subscribes to and drives the `RETRY_SIGNAL` replay described below.
+When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation. `strategies` is optional; when set, it lists the strategy subjects the worker subscribes to and drives the `RETRY_SIGNALS` replay described below.
 
 ```json
 {
@@ -212,7 +212,7 @@ The broker answers with one of three actions:
 | Non-crypto worker | `WORKER_CONNECTED_ACK` | — (nothing to configure) |
 | Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
 
-In addition, every valid `WORKER_CONNECTED` also gets a `RETRY_SIGNAL` (see [Signal replay on reconnect](#signal-replay-on-reconnect) below) so a worker that just reconnected can catch up on broadcasts it missed while offline.
+In addition, every valid `WORKER_CONNECTED` also gets a `RETRY_SIGNALS` (see [Signal replay on reconnect](#signal-replay-on-reconnect) below) so a worker that just reconnected can catch up on broadcasts it missed while offline.
 
 For a crypto worker, the broker loads the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows and replies with `CRYPTO_LEVERAGE_INIT`:
 
@@ -245,13 +245,13 @@ The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `W
 
 #### Signal replay on reconnect
 
-Every valid `WORKER_CONNECTED` triggers a `RETRY_SIGNAL` reply carrying every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list. The payload is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler.
+Every valid `WORKER_CONNECTED` triggers a `RETRY_SIGNALS` reply carrying every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list. The payload is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler.
 
-Sent on the request's reply inbox when the worker used NATS request/reply, otherwise broadcast on the shared `SYSTEM` subject. Nothing is sent when the worker did not announce any strategies. Example: `examples/nats/system.retry_signal.json`.
+Sent on the request's reply inbox when the worker used NATS request/reply, otherwise broadcast on the shared `SYSTEM` subject. Nothing is sent when the worker did not announce any strategies. Example: `examples/nats/system.retry_signals.json`.
 
 ```json
 {
-  "action": "RETRY_SIGNAL",
+  "action": "RETRY_SIGNALS",
   "account_id": "CRYPTO-BINANCE-7654321",
   "timestamp": "2026-07-16T00:00:00+00:00",
   "signals": [
@@ -763,7 +763,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `notification_timezone` | `"7"` | `POST /admin/settings/notification-timezone` | UTC offset (hours) applied to the `Time:` line of Telegram notifications |
-| `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `SYSTEM.RETRY_SIGNAL` replay sent to a freshly-connected worker |
+| `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `SYSTEM.RETRY_SIGNALS` replay sent to a freshly-connected worker |
 
 ---
 

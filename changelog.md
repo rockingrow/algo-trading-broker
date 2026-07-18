@@ -37,6 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `format_flat_message` render an `Attempt: N` prefix only on the 2nd and
   3rd attempt on a signal (i.e. when `attempts <= 2`), so the operator sees
   a visible marker when the broker is retrying rather than firing fresh.
+- **`REJECTED` trade status** — Workers now emit a `TRADE` (`PositionEvent`) with
+  `status: "REJECTED"` when they refuse to place an order, e.g. when their
+  **MAX ORDER** limit is reached. The order is still persisted worker-side, so
+  the broker records a terminal, non-running trade instead of dropping the event
+  as an unknown status. `TradeStatusPolicy` maps `REJECTED` →
+  `TradeStatusEnum.REJECTED` (ranked below every other status, so it never
+  overwrites an existing trade for the same `ref_id`), and `is_running` is set
+  to `false`.
+- **`reject_reason` on the `TRADE` (`PositionEvent`) payload** — Optional field
+  carrying why the worker rejected the order (e.g. `"MAX ORDER limit reached"`).
+  `upsert_by_position_event` persists it onto the `trades.reject_reason` column
+  on both insert and update.
 
 ### Changed
 
@@ -45,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arg, and the published JSON includes a `signal_id` field. LONG/SHORT/TP/…
   already carried it via `TradingSignal`, so live FLAT was the last shape
   without one; adding it lets a worker de-duplicate a signal seen live
-  against the same signal replayed inside a `SYSTEM.RETRY_SIGNAL` bundle by
+  against the same signal replayed inside a `SYSTEM.RETRY_SIGNALS` bundle by
   `signal_id`. Example: `examples/nats/close.flat.json`.
 - **`SignalProcessingService` reshaped around three entry points** —
   `enqueue` (webhook fast path), `handle_enqueued` (JetStream first
@@ -73,21 +85,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes it. Costs one TCP handshake per alert, negligible at TradingView's
   alert cadence.
 
-### Added
-
-- **`REJECTED` trade status** — Workers now emit a `TRADE` (`PositionEvent`) with
-  `status: "REJECTED"` when they refuse to place an order, e.g. when their
-  **MAX ORDER** limit is reached. The order is still persisted worker-side, so
-  the broker records a terminal, non-running trade instead of dropping the event
-  as an unknown status. `TradeStatusPolicy` maps `REJECTED` →
-  `TradeStatusEnum.REJECTED` (ranked below every other status, so it never
-  overwrites an existing trade for the same `ref_id`), and `is_running` is set
-  to `false`.
-- **`reject_reason` on the `TRADE` (`PositionEvent`) payload** — Optional field
-  carrying why the worker rejected the order (e.g. `"MAX ORDER limit reached"`).
-  `upsert_by_position_event` persists it onto the `trades.reject_reason` column
-  on both insert and update.
-
 ## [1.0.7] - 2026-07-15
 
 ### Added
@@ -111,11 +108,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to deliver so an operator can audit them without re-reading raw broker logs.
 - **`WORKER_CONNECTED.strategies` field** — `SystemWorkerConnectedSignal` now
   carries a list of strategy subjects the worker subscribes to. Drives the
-  new `SYSTEM.RETRY_SIGNAL` replay so the broker only replays signals the
+  new `SYSTEM.RETRY_SIGNALS` replay so the broker only replays signals the
   worker actually consumes.
-- **`SYSTEM.RETRY_SIGNAL` action** — On every `WORKER_CONNECTED` handshake (in
+- **`SYSTEM.RETRY_SIGNALS` action** — On every `WORKER_CONNECTED` handshake (in
   addition to the existing `CRYPTO_LEVERAGE_INIT` / `WORKER_CONNECTED_ACK`
-  reply), the broker sends a `RETRY_SIGNAL` back to the worker: every signal
+  reply), the broker sends a `RETRY_SIGNALS` back to the worker: every signal
   persisted in the last `max_retry_timeout` seconds whose strategy the worker
   announced. Payload is a list of the same objects normally published on the
   strategy subject, so the worker can replay them through the same handler.
@@ -125,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (plus the matching `SignalPublisher` protocol entry).
 - **`max_retry_timeout` broker setting** — Seeded to `"60"` via Alembic
   migration `a5e6f7b8c9d0`. Time window (in seconds) used to select signals
-  for the `RETRY_SIGNAL` replay. Missing/invalid values fall back to `60`.
+  for the `RETRY_SIGNALS` replay. Missing/invalid values fall back to `60`.
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
   for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
@@ -151,7 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gains `handle_enqueued` for the consumer path; the existing `process` now
   handles only the enqueue path. `SignalRepository` grows two methods —
   `mark_published` and `list_recent_by_strategies` — used by the worker and
-  the `RETRY_SIGNAL` replay respectively.
+  the `RETRY_SIGNALS` replay respectively.
 - **Admin crypto settings now push live to each crypto worker** — `POST
   /admin/settings/crypto-allowed-symbol` and `POST
   /admin/settings/crypto-max-leverage` send a `SYSTEM` `CRYPTO_LEVERAGE_INIT`

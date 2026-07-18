@@ -260,15 +260,16 @@ class SystemEventConsumer:
       return
 
     log.info(
-      "SYSTEM WORKER_CONNECTED account_id=%s market=%s gateway=%s",
+      "SYSTEM WORKER_CONNECTED account_id=%s market=%s gateway=%s strategies=%s",
       event.account_id,
       event.market,
       event.gateway,
+      event.strategies,
     )
 
     await self._remember_worker(event)
 
-    # Every WORKER_CONNECTED gets a RETRY_SIGNAL replay of the recent signals
+    # Every WORKER_CONNECTED gets a RETRY_SIGNALS replay of the recent signals
     # matching the strategies the worker announced, so a reconnecting worker
     # can catch up on broadcasts it missed while offline. The replay is sent
     # in addition to (never instead of) the ACK / CRYPTO_LEVERAGE_INIT so
@@ -383,7 +384,7 @@ class SystemEventConsumer:
   async def _send_retry_signal(
     self, account_id: str, strategies: list[str], reply_to: str = ""
   ) -> None:
-    """Push a RETRY_SIGNAL replay of the last ``max_retry_timeout`` seconds.
+    """Push a RETRY_SIGNALS replay of the last ``max_retry_timeout`` seconds.
 
     Nothing to do when the worker announced no strategies, or when we have no
     ``SignalRepository`` wired in (the deployment opted out of the replay).
@@ -401,7 +402,7 @@ class SystemEventConsumer:
       )
     except Exception as exc:
       log.exception(
-        "SYSTEM RETRY_SIGNAL skipped account_id=%s: signals lookup failed: %s",
+        "SYSTEM RETRY_SIGNALS skipped account_id=%s: signals lookup failed: %s",
         account_id,
         exc,
       )
@@ -419,7 +420,7 @@ class SystemEventConsumer:
       except Exception as exc:
         # A single bad row must not derail the replay for the rest.
         log.warning(
-          "SYSTEM RETRY_SIGNAL skipping bad row signal_id=%s: %s", signal_id, exc
+          "SYSTEM RETRY_SIGNALS skipping bad row signal_id=%s: %s", signal_id, exc
         )
 
     try:
@@ -430,7 +431,7 @@ class SystemEventConsumer:
       )
     except Exception as exc:
       log.exception(
-        "Failed to publish RETRY_SIGNAL for account_id=%s: %s", account_id, exc
+        "Failed to publish RETRY_SIGNALS for account_id=%s: %s", account_id, exc
       )
 
   async def _get_max_retry_timeout_seconds(self) -> int:
@@ -574,7 +575,7 @@ class NatsPublisher:
 
     Carries ``signal_id`` — same field the LONG/SHORT/TP payloads (a full
     ``TradingSignal``) already do — so a worker seeing this signal live and
-    then again inside a ``SYSTEM.RETRY_SIGNAL`` replay can de-duplicate by
+    then again inside a ``SYSTEM.RETRY_SIGNALS`` replay can de-duplicate by
     id instead of by guessing on content.
     """
     payload = json.dumps(
@@ -633,7 +634,7 @@ class NatsPublisher:
   async def publish_system_retry_signal(
     self, *, subject: str | None = None, **kwargs
   ) -> None:
-    """Publish a RETRY_SIGNAL replay of recent signals to a reconnecting worker.
+    """Publish a RETRY_SIGNALS replay of recent signals to a reconnecting worker.
 
     Sent as the second half of the WORKER_CONNECTED handshake — after the
     market-specific ACK / CRYPTO_LEVERAGE_INIT — so a worker that missed

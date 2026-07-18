@@ -32,7 +32,7 @@ class SystemActionEnum(str, Enum):
   # ``max_retry_timeout`` seconds for the strategies this worker announced.
   # Delivered as part of the WORKER_CONNECTED handshake so a worker that just
   # (re)connected can catch up on signals emitted while it was offline.
-  RETRY_SIGNAL = "RETRY_SIGNAL"
+  RETRY_SIGNALS = "RETRY_SIGNALS"
 
   # Outgoing reply (broker → worker): acknowledges a WORKER_CONNECTED handshake
   # that needs no further configuration (e.g. a non-crypto worker).
@@ -163,7 +163,7 @@ class SystemWorkerConnectedSignal(SystemSignal):
   which worker connected and which market/gateway it serves before deciding what
   initial configuration to push back. ``strategies`` lists the strategy subjects
   the worker subscribes to — the broker uses them to select signals for the
-  ``RETRY_SIGNAL`` replay.
+  ``RETRY_SIGNALS`` replay.
   """
 
   model_config = ConfigDict(
@@ -186,14 +186,14 @@ class SystemWorkerConnectedSignal(SystemSignal):
   strategies: list[str] = Field(
     default_factory=list,
     description=(
-      "Strategy subjects the worker subscribes to. Drives the RETRY_SIGNAL "
+      "Strategy subjects the worker subscribes to. Drives the RETRY_SIGNALS "
       "replay: only signals whose strategy is in this list are re-sent."
     ),
   )
 
 
 class SystemRetrySignal(SystemSignal):
-  """Outbound RETRY_SIGNAL the broker sends to a freshly-connected worker.
+  """Outbound RETRY_SIGNALS the broker sends to a freshly-connected worker.
 
   Carries every SIGNAL persisted in the last ``max_retry_timeout`` seconds
   whose strategy the worker announced on WORKER_CONNECTED, formatted exactly
@@ -205,7 +205,7 @@ class SystemRetrySignal(SystemSignal):
     use_enum_values=True,
     json_schema_extra={
       "example": {
-        "action": "RETRY_SIGNAL",
+        "action": "RETRY_SIGNALS",
         "account_id": "CRYPTO-BINANCE-7654321",
         "timestamp": "2026-06-30T00:00:00+00:00",
         "signals": [
@@ -227,7 +227,7 @@ class SystemRetrySignal(SystemSignal):
     },
   )
 
-  action: SystemActionEnum = SystemActionEnum.RETRY_SIGNAL
+  action: SystemActionEnum = SystemActionEnum.RETRY_SIGNALS
   signals: list[TradingSignal] = Field(
     default_factory=list,
     description=(

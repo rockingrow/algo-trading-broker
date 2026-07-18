@@ -347,7 +347,7 @@ class SqlAlchemySignalRepository:
   ) -> list[dict]:
     """Return raw webhook payloads for recent signals matching *strategies*.
 
-    Backs the SYSTEM ``RETRY_SIGNAL`` replay a worker gets on connect: rows
+    Backs the SYSTEM ``RETRY_SIGNALS`` replay a worker gets on connect: rows
     whose ``strategy`` is in *strategies* and whose ``createdAt`` is within the
     last *since_seconds*, newest first. Only the persisted ``raw`` JSON is
     returned so callers can feed it straight through ``parse_signal`` — the

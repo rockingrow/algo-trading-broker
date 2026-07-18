@@ -1,5 +1,5 @@
 {
-  "action": "RETRY_SIGNAL",
+  "action": "RETRY_SIGNALS",
   "account_id": "CRYPTO-BINANCE-7654321",
   "timestamp": "2026-07-16T00:00:00+00:00",
   "signals": [
