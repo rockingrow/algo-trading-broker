@@ -10,15 +10,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app import emojis
+from app.handlers.link import start_link_flow
 from app.presenters import messages
-from app.services.broker_client import BrokerClient
-from app.states import LinkAccount
+from app.services.broker_client import BrokerClientUser
 
 router = Router(name="start")
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, broker: BrokerClient) -> None:
+async def cmd_start(message: Message, state: FSMContext, broker: BrokerClientUser) -> None:
   account = await broker.get_account(message.from_user.id)
   if account is not None:
     await state.clear()
@@ -30,13 +30,7 @@ async def cmd_start(message: Message, state: FSMContext, broker: BrokerClient) -
     )
     return
 
-  await state.set_state(LinkAccount.waiting_for_token)
-  await message.answer(
-    f"{emojis.WAVE} <b>Welcome!</b>\n\n"
-    "Please send me the <b>UUID code</b> your admin gave you to link your "
-    "account.\n\n"
-    "<i>Example: b5dc0374-9639-4861-acf4-2d239aa5c1b4</i>"
-  )
+  await start_link_flow(message, state, already_linked=False)
 
 
 @router.message(Command("help"))

@@ -54,6 +54,22 @@ def test_format_trades_lists_rows_with_header():
   assert "1 / 1" in out  # header range "(1–1 / 1)"
 
 
+def test_format_accounts_list_marks_active():
+  out = messages.UserMessages.format_accounts_list(
+    [
+      {"id": "a1", "account_id": "acc-1", "market_type": "FOREX", "gateway": "MT5", "is_active": True},
+      {"id": "a2", "account_id": "acc-2", "market_type": "CRYPTO", "gateway": "BINANCE", "is_active": False},
+    ]
+  )
+  assert "FOREX-MT5-acc-1" in out
+  assert "CRYPTO-BINANCE-acc-2" in out
+  assert emojis.STAR in out
+
+
+def test_format_accounts_list_empty():
+  assert "No linked accounts" in messages.UserMessages.format_accounts_list([])
+
+
 def test_format_command_result():
   out = messages.format_command_result({"action": "FLAT", "scope": "account=acc-1"})
   assert "FLAT" in out
@@ -112,3 +128,18 @@ def test_format_rotate_result():
   assert "new-tok" in out
   assert "acc-1" in out
   assert "revoked" in out
+
+
+def test_format_account_created():
+  out = messages.AdminMessages.format_account_created(
+    {
+      "account_id": "7654321",
+      "market_type": "CRYPTO",
+      "gateway": "BINANCE",
+      "telegram_link_token": "new-tok",
+    }
+  )
+  assert "7654321" in out
+  assert "CRYPTO" in out
+  assert "BINANCE" in out
+  assert "new-tok" in out

@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import MarketEnum, SignalActionEnum
 
 
@@ -93,7 +94,18 @@ class TradingSignal(BaseModel):
 
 
 class AdminSignal(BaseModel):
-  """Admin signal published to the ADMIN topic."""
+  """Admin signal broadcast on the shared ADMIN topic — every connected
+  worker receives it and is expected to filter for itself.
+
+  ``account_id`` alone no longer identifies a single account (the same bare
+  id can exist under different market/gateway pairs, see
+  ``uq_accounts_market_gateway_account_id`` on the ``accounts`` table), so
+  ``market_type``/``gateway`` are REQUIRED whenever ``account_id`` is set —
+  every account-scoped signal is fully disambiguated on the wire. Workers
+  MUST match all three (``account_id`` + ``market_type`` + ``gateway``)
+  against themselves before acting, not ``account_id`` alone, or they can
+  act on a signal meant for a different account that shares its bare id.
+  """
 
   model_config = ConfigDict(
     use_enum_values=True,
@@ -105,6 +117,8 @@ class AdminSignal(BaseModel):
         "strategy": "my_strategy",
         "symbol": "XAUUSD",
         "account_id": "123456",
+        "market_type": "FOREX",
+        "gateway": "MT5",
       }
     },
   )
@@ -114,6 +128,16 @@ class AdminSignal(BaseModel):
   strategy: Optional[str] = None
   symbol: Optional[str] = None
   account_id: Optional[str] = None
+  market_type: Optional[MarketTypeEnum] = None
+  gateway: Optional[str] = None
+
+  @model_validator(mode="after")
+  def _require_market_gateway_with_account_id(self) -> "AdminSignal":
+    if self.account_id is not None and (self.market_type is None or self.gateway is None):
+      raise ValueError(
+        "market_type and gateway are required when account_id is set"
+      )
+    return self
 
 
 class SystemSignal(BaseModel):

@@ -12,6 +12,7 @@ from typing import Any, Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app import emojis
+from app.constants import GATEWAYS_BY_MARKET, MARKETS
 from app.presenters.messages import AdminMessages
 from app.utils.pagination import build_pagination_keyboard
 
@@ -30,6 +31,24 @@ def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
       ]
     ]
   )
+
+
+def linked_accounts_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+  """One button per account linked to the caller → callback ``swacc:{id}``
+  (the account's row id — a UUID, well under the 64-byte callback-data limit,
+  so unlike ``aflat_candidates_picker`` no FSM-index indirection is needed).
+  The active account is marked with a star."""
+  rows = [
+    [
+      InlineKeyboardButton(
+        text=f"{emojis.STAR + ' ' if a.get('is_active') else ''}"
+        f"{a.get('market_type')}-{a.get('gateway') or '?'}-{a.get('account_id')}",
+        callback_data=f"swacc:{a.get('id')}",
+      )
+    ]
+    for a in accounts
+  ]
+  return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def trades_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
@@ -53,6 +72,23 @@ def accounts_picker(
       )
     ]
     for a in accounts
+  ]
+  return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def aflat_candidates_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+  """One button per account sharing a colliding account_id → callback
+  ``aflatc:{index}`` (the account itself is resolved from FSM data by index,
+  not from callback_data — see admin.py's /aflat docstring)."""
+  rows = [
+    [
+      InlineKeyboardButton(
+        text=f"{a.get('market_type')}/{a.get('gateway')} · "
+        f"{a.get('account_name') or a.get('account_id')}",
+        callback_data=f"aflatc:{i}",
+      )
+    ]
+    for i, a in enumerate(accounts)
   ]
   return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -83,6 +119,33 @@ def settings_keyboard(states: list[dict[str, Any]]) -> InlineKeyboardMarkup:
       ]
     )
   return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def market_picker() -> InlineKeyboardMarkup:
+  """One button per market → callback ``nacc:m:{market}``."""
+  return InlineKeyboardMarkup(
+    inline_keyboard=[
+      [
+        InlineKeyboardButton(text=market, callback_data=f"nacc:m:{market}")
+        for market in MARKETS
+      ]
+    ]
+  )
+
+
+def gateway_picker(market: str) -> InlineKeyboardMarkup:
+  """One button per gateway valid for *market* → callback ``nacc:g:{market}:{gateway}``."""
+  gateways = GATEWAYS_BY_MARKET.get(market, [])
+  return InlineKeyboardMarkup(
+    inline_keyboard=[
+      [
+        InlineKeyboardButton(
+          text=gateway, callback_data=f"nacc:g:{market}:{gateway}"
+        )
+      ]
+      for gateway in gateways
+    ]
+  )
 
 
 def admin_confirm(action: str, arg: str) -> InlineKeyboardMarkup:

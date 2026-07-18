@@ -16,6 +16,7 @@ from sqlalchemy import (
   Boolean,
   DateTime,
   Enum,
+  ForeignKey,
   Numeric,
   String,
   Text,
@@ -128,11 +129,24 @@ class Trade(Base):
 
   __tablename__ = "trades"
   __table_args__ = (
-    UniqueConstraint("account_id", "ref_id", name="uq_trades_account_ref_id"),
+    UniqueConstraint(
+      "market_type",
+      "gateway",
+      "account_id",
+      "ref_id",
+      name="uq_trades_market_gateway_account_ref",
+    ),
   )
 
   # Trading Account info
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+  # Denormalized from the owning accounts row at upsert time (see
+  # TradeRepository._upsert_account) — account_id alone doesn't identify an
+  # account uniquely, so these two are needed to scope trades to the right one.
+  market_type: Mapped[MarketTypeEnum | None] = mapped_column(
+    Enum(MarketTypeEnum), nullable=True
+  )
+  gateway: Mapped[str | None] = mapped_column(String(50), nullable=True)
   account_leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
   account_balance_init: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
@@ -167,8 +181,8 @@ class Trade(Base):
 
   def __repr__(self) -> str:
     return (
-      f"<Trade id={self.id} account_id={self.account_id} ref_id={self.ref_id} "
-      f"action={self.action} symbol={self.symbol}>"
+      f"<Trade id={self.id} account_id={self.account_id} gateway={self.gateway} "
+      f"ref_id={self.ref_id} action={self.action} symbol={self.symbol}>"
     )
 
 
@@ -178,7 +192,14 @@ class Account(Base):
   """
 
   __tablename__ = "accounts"
-  __table_args__ = (UniqueConstraint("account_id", name="uq_accounts_account_id"),)
+  # account_id alone is NOT unique: two different real accounts on different
+  # gateways (e.g. an MT5 login and a Binance account) can coincidentally
+  # share the same bare id. The composite key is what's actually unique.
+  __table_args__ = (
+    UniqueConstraint(
+      "market_type", "gateway", "account_id", name="uq_accounts_market_gateway_account_id"
+    ),
+  )
 
   # Trading Account info
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
@@ -202,10 +223,13 @@ class Account(Base):
   # ``telegram_link_token`` is the UUID handed to the end-user (out of band) so
   # they can claim the account from the Telegram bot. It is separate from the
   # primary key so it can be rotated/revoked without touching ``id``.
-  # ``telegram_user_id`` is the Telegram user that claimed this account; unique
-  # so a single Telegram user maps to at most one account.
+  # ``telegram_user_id`` is the Telegram user that claimed this account. NOT
+  # unique — one Telegram user may link several accounts (different
+  # market/gateway pairs). Which of them is currently "active" (the one
+  # single-account commands act on) is tracked separately in
+  # ``TelegramSession``.
   telegram_user_id: Mapped[int | None] = mapped_column(
-    BigInteger, nullable=True, unique=True, index=True
+    BigInteger, nullable=True, index=True
   )
   telegram_link_token: Mapped[uuid.UUID | None] = mapped_column(
     UUID(as_uuid=True), nullable=True, unique=True, index=True, default=uuid.uuid4
@@ -215,6 +239,33 @@ class Account(Base):
     return (
       f"<Account id={self.id} account_id={self.account_id} "
       f"market_type={self.market_type} gateway={self.gateway}>"
+    )
+
+
+class TelegramSession(Base):
+  """
+  One row per Telegram user, tracking which of their (possibly several)
+  linked accounts is currently "active" — the one single-account commands
+  (/status, /trades, /flat, ...) act on. Decoupled from
+  ``Account.telegram_user_id`` because that column is no longer unique: a
+  Telegram user can link multiple accounts, but only one is active at a time.
+  """
+
+  __tablename__ = "telegram_sessions"
+
+  telegram_user_id: Mapped[int] = mapped_column(
+    BigInteger, nullable=False, unique=True, index=True
+  )
+  active_account_id: Mapped[uuid.UUID | None] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("accounts.id", ondelete="SET NULL"),
+    nullable=True,
+  )
+
+  def __repr__(self) -> str:
+    return (
+      f"<TelegramSession telegram_user_id={self.telegram_user_id} "
+      f"active_account_id={self.active_account_id}>"
     )
 
 

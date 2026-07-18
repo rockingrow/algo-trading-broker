@@ -17,7 +17,7 @@ from app import emojis
 from app.presenters import messages
 from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
-from app.services.broker_client import BrokerClient
+from app.services.broker_client import BrokerClientUser
 
 router = Router(name="commands")
 
@@ -50,7 +50,7 @@ async def cmd_allow(message: Message, account: dict[str, Any]) -> None:
 
 
 @router.callback_query(F.data.in_({"flat:confirm", "prevent:confirm", "allow:confirm"}))
-async def cb_confirm(call: CallbackQuery, broker: BrokerClient) -> None:
+async def cb_confirm(call: CallbackQuery, broker: BrokerClientUser) -> None:
   action = call.data.split(":", 1)[0]
   tg_id = call.from_user.id
 

@@ -15,13 +15,13 @@ from app.commands import (
 
 
 def test_command_list_sizes():
-  assert len(USER_COMMANDS) == 8
-  assert len(ADMIN_EXTRA_COMMANDS) == 5
+  assert len(USER_COMMANDS) == 10
+  assert len(ADMIN_EXTRA_COMMANDS) == 6
   # Admin sees user commands plus the extras.
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)
   user_names = {c.command for c in USER_COMMANDS}
   assert user_names.issubset({c.command for c in ADMIN_COMMANDS})
-  assert {"accounts", "atrades", "aflat", "rotate", "settings"} <= {
+  assert {"accounts", "newaccount", "atrades", "aflat", "rotate", "settings"} <= {
     c.command for c in ADMIN_COMMANDS
   }
 

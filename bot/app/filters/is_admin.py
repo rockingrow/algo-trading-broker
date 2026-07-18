@@ -1,5 +1,5 @@
 """
-app/filters/admin.py — Router-level admin gate.
+app/filters/is_admin.py — Router-level admin gate.
 
 Attached to the admin router's message + callback observers so non-admins never
 reach admin handlers (their updates simply fall through to other routers).

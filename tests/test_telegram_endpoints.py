@@ -31,26 +31,60 @@ TOKEN = uuid.uuid4()
 
 
 class FakeTgAccountRepo:
-  def __init__(self, account: Account | None):
-    self._by_token = {str(account.telegram_link_token): account} if account else {}
-    self._by_tg = {}
+  """In-memory stand-in for ``AccountRepository`` supporting several accounts
+  per telegram_user_id, mirroring ``SqlAlchemyAccountRepository``'s
+  active-account model: the first account linked becomes active; later links
+  don't disturb it."""
 
-  async def get_by_telegram_user_id(self, telegram_user_id):
-    return self._by_tg.get(telegram_user_id)
+  def __init__(self, accounts: list[Account] | Account | None):
+    if accounts is None:
+      accounts = []
+    elif isinstance(accounts, Account):
+      accounts = [accounts]
+    self._by_token = {str(a.telegram_link_token): a for a in accounts}
+    self._linked: dict[int, list[Account]] = {}
+    self._active: dict[int, uuid.UUID] = {}
+
+  async def list_by_telegram_user_id(self, telegram_user_id):
+    return list(self._linked.get(telegram_user_id, []))
+
+  async def get_active_account(self, telegram_user_id):
+    linked = self._linked.get(telegram_user_id)
+    if not linked:
+      return None
+    active_id = self._active.get(telegram_user_id)
+    return next((a for a in linked if a.id == active_id), linked[0])
+
+  async def set_active_account(self, telegram_user_id, account_id):
+    linked = self._linked.get(telegram_user_id, [])
+    match = next((a for a in linked if a.id == account_id), None)
+    if match is None:
+      return None
+    self._active[telegram_user_id] = account_id
+    return match
 
   async def link_telegram(self, token, telegram_user_id):
     account = self._by_token.get(str(token))
     if account is None:
       return None
     account.telegram_user_id = telegram_user_id
-    self._by_tg[telegram_user_id] = account
+    linked = self._linked.setdefault(telegram_user_id, [])
+    if account not in linked:
+      linked.append(account)
+    self._active.setdefault(telegram_user_id, account.id)
     return account
 
   async def unlink_telegram(self, telegram_user_id):
-    account = self._by_tg.pop(telegram_user_id, None)
-    if account is None:
+    linked = self._linked.get(telegram_user_id)
+    if not linked:
       return False
-    account.telegram_user_id = None
+    active = await self.get_active_account(telegram_user_id)
+    linked.remove(active)
+    active.telegram_user_id = None
+    if linked:
+      self._active[telegram_user_id] = linked[0].id
+    else:
+      self._active.pop(telegram_user_id, None)
     return True
 
 
@@ -235,6 +269,10 @@ def test_flat_publishes_scoped_to_account(ctx):
   published = ctx["publisher"].admin_signals[-1]
   assert published["action"].value == "FLAT"
   assert published["account_id"] == "acc-1"
+  # market_type/gateway ride along so a worker that checks them can
+  # disambiguate account_id reused across gateways.
+  assert published["market_type"] == MarketTypeEnum.FOREX
+  assert published["gateway"] is None
 
 
 def test_prevent_block_publishes_block_entries(ctx):
@@ -263,6 +301,112 @@ def test_prevent_allow_publishes_allow_entries(ctx):
 def test_command_requires_link(ctx):
   resp = ctx["client"].post(
     f"/v1/telegram/{TG_ID}/commands/flat", json={}, headers=_headers()
+  )
+  assert resp.status_code == 404
+
+
+# ── accounts list / active-account switch ──────────────────────────
+
+
+TOKEN_2 = uuid.uuid4()
+
+
+def _make_account2() -> Account:
+  return Account(
+    id=uuid.uuid4(),
+    account_id="acc-2",
+    account_name="Second",
+    account_balance=500.0,
+    market_type=MarketTypeEnum.CRYPTO,
+    gateway="BINANCE",
+    last_activity_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    telegram_user_id=None,
+    telegram_link_token=TOKEN_2,
+  )
+
+
+@pytest.fixture
+def multi_ctx():
+  app = FastAPI()
+  app.include_router(get_core_router())
+
+  account_repo = FakeTgAccountRepo([_make_account(), _make_account2()])
+  app.dependency_overrides[get_account_repository] = lambda: account_repo
+  app.dependency_overrides[get_trade_repository] = lambda: FakeTradeRepo([], 0)
+  app.dependency_overrides[get_publisher] = lambda: FakePublisher()
+  app.dependency_overrides[ensure_api_key] = lambda: None
+
+  return {"client": TestClient(app), "account_repo": account_repo}
+
+
+def test_list_accounts_empty_when_not_linked(ctx):
+  resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/accounts", headers=_headers())
+  assert resp.status_code == 200
+  assert resp.json() == []
+
+
+def test_list_accounts_after_link(ctx):
+  _link(ctx)
+  resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/accounts", headers=_headers())
+  assert resp.status_code == 200
+  body = resp.json()
+  assert len(body) == 1
+  assert body[0]["account_id"] == "acc-1"
+  assert body[0]["is_active"] is True
+
+
+def _link_both(ctx):
+  ctx["client"].post(
+    "/v1/telegram/link",
+    json={"token": str(TOKEN), "telegram_user_id": TG_ID},
+    headers=_headers(),
+  )
+  ctx["client"].post(
+    "/v1/telegram/link",
+    json={"token": str(TOKEN_2), "telegram_user_id": TG_ID},
+    headers=_headers(),
+  )
+
+
+def test_second_link_does_not_disturb_active_account(multi_ctx):
+  _link_both(multi_ctx)
+  resp = multi_ctx["client"].get(f"/v1/telegram/{TG_ID}/accounts", headers=_headers())
+  body = resp.json()
+  assert len(body) == 2
+  active = [a for a in body if a["is_active"]]
+  assert len(active) == 1
+  assert active[0]["account_id"] == "acc-1"  # first-linked stays active
+
+  # single-account endpoints still resolve to the active one
+  resp = multi_ctx["client"].get(f"/v1/telegram/{TG_ID}", headers=_headers())
+  assert resp.json()["account_id"] == "acc-1"
+
+
+def test_switch_active_account(multi_ctx):
+  _link_both(multi_ctx)
+  accounts = multi_ctx["client"].get(
+    f"/v1/telegram/{TG_ID}/accounts", headers=_headers()
+  ).json()
+  second_id = next(a["id"] for a in accounts if a["account_id"] == "acc-2")
+
+  resp = multi_ctx["client"].post(
+    f"/v1/telegram/{TG_ID}/active-account",
+    json={"account_id": second_id},
+    headers=_headers(),
+  )
+  assert resp.status_code == 200
+  assert resp.json()["account_id"] == "acc-2"
+  assert resp.json()["is_active"] is True
+
+  resp = multi_ctx["client"].get(f"/v1/telegram/{TG_ID}", headers=_headers())
+  assert resp.json()["account_id"] == "acc-2"
+
+
+def test_switch_active_account_not_owned(multi_ctx):
+  resp = multi_ctx["client"].post(
+    f"/v1/telegram/{TG_ID}/active-account",
+    json={"account_id": str(uuid.uuid4())},
+    headers=_headers(),
   )
   assert resp.status_code == 404
 

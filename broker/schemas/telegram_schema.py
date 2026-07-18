@@ -32,14 +32,26 @@ class LinkedAccountResponse(BaseModel):
   the token again once linked.
   """
 
+  id: uuid.UUID
   account_id: str
   account_name: Optional[str] = None
   account_balance: Optional[float] = None
   market_type: MarketTypeEnum
+  gateway: Optional[str] = None
   last_activity_at: Optional[datetime] = None
   telegram_user_id: Optional[int] = None
+  # Whether this is the user's currently active account (the one
+  # single-account commands act on). Not an ORM column — set explicitly by
+  # the endpoint after resolving the caller's TelegramSession.
+  is_active: bool = False
 
   model_config = {"from_attributes": True}
+
+
+class SwitchAccountRequest(BaseModel):
+  """Body for ``POST /v1/telegram/{telegram_user_id}/active-account``."""
+
+  account_id: uuid.UUID = Field(..., description="Row id of the account to activate.")
 
 
 class FlatCommandRequest(BaseModel):

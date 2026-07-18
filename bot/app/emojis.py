@@ -26,6 +26,7 @@ CHART = _e(":bar_chart:")
 EMPTY_MAILBOX = _e(":open_mailbox_with_lowered_flag:")
 ARROW_LEFT = _e(":left_arrow:")
 ARROW_RIGHT = _e(":right_arrow:")
+STAR = _e(":star:")
 
 GREEN_CIRCLE = _e(":green_circle:")
 WHITE_CIRCLE = _e(":white_circle:")

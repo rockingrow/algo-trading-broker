@@ -8,10 +8,16 @@ Callback-data scheme (all well under Telegram's 64-byte limit; account_id is
 String(50) and never contains ':'):
 - atrp:{account_id}            picker → show trades
 - atr:{account_id}:{offset}    trades pagination
-- aflat:{target}:ok|no         target '*' = flat everything
+- aflat:confirm|cancel         target resolved server-side, kept in FSM data
+                                (account_id alone can't go in callback_data —
+                                the broker now requires market_type + gateway
+                                alongside it, see admin_flat's docstring)
+- aflatc:{index}               disambiguation picker → picks aflat_candidates[index]
 - arotp:{account_id}           picker → rotate confirm
 - arot:{account_id}:ok|no      rotate confirm
 - aset:{slug}                  toggle a broker setting
+- nacc:m:{market}               /newaccount → gateway picker
+- nacc:g:{market}:{gateway}     gateway picker → prompt for account_id
 """
 
 from __future__ import annotations
@@ -21,15 +27,18 @@ from typing import Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from app import emojis
 from app.config import settings
-from app.filters.admin import IsAdmin
+from app.constants import GATEWAYS_BY_MARKET, MARKETS
+from app.filters.is_admin import IsAdmin
 from app.presenters import messages
+from app.states import CreateAccount
 from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
-from app.services.broker_client import BrokerClient
+from app.services.broker_client import BrokerClientAdmin
 
 router = Router(name="admin")
 router.message.filter(IsAdmin())
@@ -42,8 +51,8 @@ PAGE_SIZE = settings.BOT_VIEW_TRADES_PER_PAGE
 
 
 @router.message(Command("accounts"))
-async def cmd_accounts(message: Message, broker: BrokerClient) -> None:
-  accounts = await broker.admin_list_accounts()
+async def cmd_accounts(message: Message, broker_admin: BrokerClientAdmin) -> None:
+  accounts = await broker_admin.admin_list_accounts()
   if accounts is None:
     await message.answer(f"{emojis.WARNING} Failed to fetch account list.")
     return
@@ -54,9 +63,9 @@ async def cmd_accounts(message: Message, broker: BrokerClient) -> None:
 
 
 async def _atrades_view(
-  broker: BrokerClient, account_id: str, offset: int
+  broker_admin: BrokerClientAdmin, account_id: str, offset: int
 ) -> tuple[Optional[str], Optional[InlineKeyboardMarkup]]:
-  payload = await broker.admin_list_trades(account_id, limit=PAGE_SIZE, offset=offset)
+  payload = await broker_admin.admin_list_trades(account_id, limit=PAGE_SIZE, offset=offset)
   if payload is None:
     return None, None
   return (
@@ -67,18 +76,18 @@ async def _atrades_view(
 
 @router.message(Command("atrades"))
 async def cmd_atrades(
-  message: Message, command: CommandObject, broker: BrokerClient
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
 ) -> None:
   arg = (command.args or "").strip()
   if arg:
-    text, kb = await _atrades_view(broker, arg, 0)
+    text, kb = await _atrades_view(broker_admin, arg, 0)
     if text is None:
       await message.answer(f"{emojis.WARNING} Failed to fetch trades for this account.")
       return
     await message.answer(text, reply_markup=kb)
     return
 
-  accounts = await broker.admin_list_accounts()
+  accounts = await broker_admin.admin_list_accounts()
   if not accounts:
     await message.answer("No accounts.")
     return
@@ -89,9 +98,9 @@ async def cmd_atrades(
 
 
 @router.callback_query(F.data.startswith("atrp:"))
-async def cb_atrades_pick(call: CallbackQuery, broker: BrokerClient) -> None:
+async def cb_atrades_pick(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
   account_id = call.data.split(":", 1)[1]
-  text, kb = await _atrades_view(broker, account_id, 0)
+  text, kb = await _atrades_view(broker_admin, account_id, 0)
   if text is None:
     await call.answer("Failed to load data", show_alert=True)
     return
@@ -100,12 +109,12 @@ async def cb_atrades_pick(call: CallbackQuery, broker: BrokerClient) -> None:
 
 
 @router.callback_query(F.data.startswith("atr:"))
-async def cb_atrades_page(call: CallbackQuery, broker: BrokerClient) -> None:
+async def cb_atrades_page(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
   parts = call.data.split(":")  # ["atr", account_id, offset]
   if len(parts) != 3 or not parts[2].isdigit():
     await call.answer()
     return
-  text, kb = await _atrades_view(broker, parts[1], int(parts[2]))
+  text, kb = await _atrades_view(broker_admin, parts[1], int(parts[2]))
   if text is None:
     await call.answer("Failed to load data", show_alert=True)
     return
@@ -114,33 +123,102 @@ async def cb_atrades_page(call: CallbackQuery, broker: BrokerClient) -> None:
 
 
 # ── /aflat ──────────────────────────────────────────────────────────
+# account_id alone no longer identifies a single account (the broker now
+# requires market_type + gateway alongside it — see FlatRequest's docstring),
+# so scoping to one account resolves those from the live account list first.
+# Because that resolved target can't safely fit in callback_data (well under
+# 64 bytes for a worst-case 50-char account_id + market/gateway), it's kept
+# in FSM data instead; only the confirm/cancel decision travels on the wire.
 
 
-@router.message(Command("aflat"))
-async def cmd_aflat(message: Message, command: CommandObject) -> None:
-  arg = (command.args or "").strip()
-  if arg:
-    scope_txt, target = f"account <code>{html.escape(arg)}</code>", arg
-  else:
-    scope_txt, target = "<b>ALL</b> accounts", "*"
-  await message.answer(
-    f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for {scope_txt}?",
-    reply_markup=inline.admin_confirm("aflat", target),
+def _aflat_confirm_text(account: dict) -> str:
+  return (
+    f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for account "
+    f"<code>{html.escape(str(account.get('account_id')))}</code> "
+    f"({html.escape(str(account.get('market_type')))}/"
+    f"{html.escape(str(account.get('gateway')))})?"
   )
 
 
-@router.callback_query(F.data.startswith("aflat:"))
-async def cb_aflat(call: CallbackQuery, broker: BrokerClient) -> None:
-  parts = call.data.split(":")  # ["aflat", target, decision]
-  if len(parts) != 3:
+@router.message(Command("aflat"))
+async def cmd_aflat(
+  message: Message,
+  command: CommandObject,
+  state: FSMContext,
+  broker_admin: BrokerClientAdmin,
+) -> None:
+  arg = (command.args or "").strip()
+  if not arg:
+    await state.update_data(aflat_target="*", aflat_candidates=None)
+    await message.answer(
+      f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for <b>ALL</b> accounts?",
+      reply_markup=inline.confirm_keyboard("aflat"),
+    )
+    return
+
+  accounts = await broker_admin.admin_list_accounts() or []
+  matches = [a for a in accounts if a.get("account_id") == arg]
+
+  if not matches:
+    await message.answer(
+      f"{emojis.WARNING} No account found with id <code>{html.escape(arg)}</code>."
+    )
+    return
+
+  if len(matches) > 1:
+    await state.update_data(aflat_target=None, aflat_candidates=matches)
+    await message.answer(
+      f"{emojis.WARNING} <code>{html.escape(arg)}</code> matches {len(matches)} accounts "
+      "on different gateways — pick the one to flat:",
+      reply_markup=inline.aflat_candidates_picker(matches),
+    )
+    return
+
+  account = matches[0]
+  await state.update_data(aflat_target=account, aflat_candidates=None)
+  await message.answer(_aflat_confirm_text(account), reply_markup=inline.confirm_keyboard("aflat"))
+
+
+@router.callback_query(F.data.startswith("aflatc:"))
+async def cb_aflat_pick(call: CallbackQuery, state: FSMContext) -> None:
+  try:
+    idx = int(call.data.split(":", 1)[1])
+  except (IndexError, ValueError):
     await call.answer()
     return
-  target, decision = parts[1], parts[2]
-  if decision != "ok":
+  data = await state.get_data()
+  candidates = data.get("aflat_candidates") or []
+  if idx < 0 or idx >= len(candidates):
+    await call.answer(f"{emojis.WARNING} Expired — run /aflat again.", show_alert=True)
+    return
+
+  account = candidates[idx]
+  await state.update_data(aflat_target=account, aflat_candidates=None)
+  await safe_edit_text(call.message, _aflat_confirm_text(account), inline.confirm_keyboard("aflat"))
+  await call.answer()
+
+
+@router.callback_query(F.data.in_({"aflat:confirm", "aflat:cancel"}))
+async def cb_aflat(call: CallbackQuery, state: FSMContext, broker_admin: BrokerClientAdmin) -> None:
+  decision = call.data.split(":", 1)[1]
+  data = await state.get_data()
+  target = data.get("aflat_target")
+  await state.update_data(aflat_target=None, aflat_candidates=None)
+
+  if decision != "confirm" or target is None:
     await safe_edit_text(call.message, "Cancelled.")
     await call.answer()
     return
-  result = await broker.admin_flat(account_id=None if target == "*" else target)
+
+  if target == "*":
+    result = await broker_admin.admin_flat()
+  else:
+    result = await broker_admin.admin_flat(
+      account_id=target.get("account_id"),
+      market_type=target.get("market_type"),
+      gateway=target.get("gateway"),
+    )
+
   if result is None:
     await safe_edit_text(call.message, f"{emojis.CROSS} FLAT failed.")
   else:
@@ -160,7 +238,7 @@ def _rotate_prompt(account_id: str) -> str:
 
 @router.message(Command("rotate"))
 async def cmd_rotate(
-  message: Message, command: CommandObject, broker: BrokerClient
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
 ) -> None:
   arg = (command.args or "").strip()
   if arg:
@@ -168,7 +246,7 @@ async def cmd_rotate(
       _rotate_prompt(arg), reply_markup=inline.admin_confirm("arot", arg)
     )
     return
-  accounts = await broker.admin_list_accounts()
+  accounts = await broker_admin.admin_list_accounts()
   if not accounts:
     await message.answer("No accounts.")
     return
@@ -188,7 +266,7 @@ async def cb_rotate_pick(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("arot:"))
-async def cb_rotate(call: CallbackQuery, broker: BrokerClient) -> None:
+async def cb_rotate(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
   parts = call.data.split(":")  # ["arot", account_id, decision]
   if len(parts) != 3:
     await call.answer()
@@ -198,7 +276,7 @@ async def cb_rotate(call: CallbackQuery, broker: BrokerClient) -> None:
     await safe_edit_text(call.message, "Cancelled.")
     await call.answer()
     return
-  result = await broker.admin_rotate_token(account_id)
+  result = await broker_admin.admin_rotate_token(account_id)
   if result is None:
     await safe_edit_text(call.message, f"{emojis.CROSS} Token rotation failed.")
   else:
@@ -206,21 +284,117 @@ async def cb_rotate(call: CallbackQuery, broker: BrokerClient) -> None:
   await call.answer()
 
 
+# ── /newaccount ─────────────────────────────────────────────────────
+# Pre-register an account (market + gateway + admin-typed suffix) before it
+# has traded, so a link token can be issued right away. account_id itself
+# stays bare in the DB — market/gateway are separate fields; the picker just
+# spares the admin from typing/misformatting the <market>-<gateway>- prefix.
+
+
+@router.message(Command("newaccount"))
+async def cmd_newaccount(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await message.answer(
+    f"{emojis.FOLDER} <b>New account</b>\n\nChoose a market:",
+    reply_markup=inline.market_picker(),
+  )
+
+
+@router.callback_query(F.data.startswith("nacc:m:"))
+async def cb_newaccount_market(call: CallbackQuery) -> None:
+  market = call.data.split(":", 2)[2]
+  if market not in MARKETS:
+    await call.answer()
+    return
+  await safe_edit_text(
+    call.message,
+    f"Market: <b>{market}</b>\n\nChoose a gateway:",
+    inline.gateway_picker(market),
+  )
+  await call.answer()
+
+
+@router.callback_query(F.data.startswith("nacc:g:"))
+async def cb_newaccount_gateway(
+  call: CallbackQuery, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  parts = call.data.split(":")  # ["nacc", "g", market, gateway]
+  market = parts[2] if len(parts) > 2 else ""
+  gateway = parts[3] if len(parts) > 3 else ""
+  if gateway not in GATEWAYS_BY_MARKET.get(market, []):
+    await call.answer()
+    return
+
+  accounts = await broker_admin.admin_list_accounts() or []
+  existing = [
+    a
+    for a in accounts
+    if a.get("market_type") == market and a.get("gateway") == gateway
+  ]
+
+  await state.update_data(market=market, gateway=gateway)
+  await state.set_state(CreateAccount.waiting_for_account_id)
+
+  text = f"Market: <b>{market}</b> · Gateway: <b>{gateway}</b>\n\n"
+  if existing:
+    ids = ", ".join(f"<code>{html.escape(str(a.get('account_id')))}</code>" for a in existing)
+    text += f"Existing account_id(s) for this pair: {ids}\n\n"
+  text += (
+    "Send the account_id to register (no market/gateway prefix — just the "
+    "raw id, no ':' or spaces):"
+  )
+  await safe_edit_text(call.message, text, None)
+  await call.answer()
+
+
+@router.message(CreateAccount.waiting_for_account_id, F.text & ~F.text.startswith("/"))
+async def receive_new_account_id(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  if not raw or len(raw) > 50 or any(ch.isspace() or ch == ":" for ch in raw):
+    await message.answer(
+      f"{emojis.WARNING} Invalid account_id (no ':' or spaces, max 50 chars). Please try again."
+    )
+    return
+
+  data = await state.get_data()
+  market, gateway = data.get("market"), data.get("gateway")
+  if not market or not gateway:
+    await state.clear()
+    await message.answer(f"{emojis.CROSS} Session expired. Run /newaccount again.")
+    return
+
+  account = await broker_admin.admin_create_account(raw, market, gateway)
+  await state.clear()
+  if account is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to create account (it may already exist). Run /newaccount to retry."
+    )
+    return
+  await message.answer(messages.AdminMessages.format_account_created(account))
+
+
+@router.message(CreateAccount.waiting_for_account_id, ~F.text)
+async def prompt_new_account_id_text(message: Message) -> None:
+  await message.answer(f"{emojis.WARNING} Please send the account_id as text.")
+
+
 # ── /settings ───────────────────────────────────────────────────────
 
 
 async def _render_settings(
-  broker: BrokerClient,
+  broker_admin: BrokerClientAdmin,
 ) -> tuple[Optional[str], Optional[InlineKeyboardMarkup]]:
-  states = await broker.admin_get_settings()
+  states = await broker_admin.admin_get_settings()
   if states is None:
     return None, None
   return messages.AdminMessages.format_settings(states), inline.settings_keyboard(states)
 
 
 @router.message(Command("settings"))
-async def cmd_settings(message: Message, broker: BrokerClient) -> None:
-  text, kb = await _render_settings(broker)
+async def cmd_settings(message: Message, broker_admin: BrokerClientAdmin) -> None:
+  text, kb = await _render_settings(broker_admin)
   if text is None:
     await message.answer(f"{emojis.WARNING} Failed to fetch broker settings.")
     return
@@ -228,10 +402,10 @@ async def cmd_settings(message: Message, broker: BrokerClient) -> None:
 
 
 @router.callback_query(F.data.startswith("aset:"))
-async def cb_settings_toggle(call: CallbackQuery, broker: BrokerClient) -> None:
+async def cb_settings_toggle(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
   slug = call.data.split(":", 1)[1]
-  await broker.admin_toggle_setting(slug)
-  text, kb = await _render_settings(broker)
+  await broker_admin.admin_toggle_setting(slug)
+  text, kb = await _render_settings(broker_admin)
   if text is None:
     await call.answer("Error", show_alert=True)
     return

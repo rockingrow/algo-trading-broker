@@ -13,7 +13,7 @@ from app.config import settings
 from app.presenters import messages
 from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
-from app.services.broker_client import BrokerClient
+from app.services.broker_client import BrokerClientUser
 
 router = Router(name="trades")
 
@@ -21,7 +21,7 @@ PAGE_SIZE = settings.BOT_VIEW_TRADES_PER_PAGE
 
 
 @router.message(Command("trades"))
-async def cmd_trades(message: Message, broker: BrokerClient) -> None:
+async def cmd_trades(message: Message, broker: BrokerClientUser) -> None:
   payload = await broker.list_trades(message.from_user.id, limit=PAGE_SIZE, offset=0)
   if payload is None:
     await message.answer(
@@ -35,7 +35,7 @@ async def cmd_trades(message: Message, broker: BrokerClient) -> None:
 
 
 @router.callback_query(F.data.startswith("trades:"))
-async def cb_trades_page(call: CallbackQuery, broker: BrokerClient) -> None:
+async def cb_trades_page(call: CallbackQuery, broker: BrokerClientUser) -> None:
   try:
     offset = int(call.data.split(":", 1)[1])
   except (IndexError, ValueError):

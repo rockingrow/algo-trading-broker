@@ -24,9 +24,15 @@ from broker.interfaces import (
   SettingRepository,
   SignalPublisher,
 )
-from broker.schemas.account_schema import MarketTypeEnum, compose_worker_id
+from broker.schemas.account_schema import (
+  AccountResponse,
+  GATEWAYS_BY_MARKET,
+  MarketTypeEnum,
+  compose_worker_id,
+)
 from broker.schemas.admin_schema import (
   AdminResponse,
+  CreateAccountRequest,
   CryptoAllowedSymbolRequest,
   CryptoMaxLeverageRequest,
   NotificationTimezoneRequest,
@@ -384,10 +390,20 @@ def get_admin_router() -> APIRouter:
     tags=["trading"],
     summary="Flat positions",
     description=(
-      "Publish a FLAT directive. Pass strategy, symbol, and/or account_id in the request body "
-      "to scope the flat. Omit all fields (or send an empty body) to flat everything."
+      "Publish a FLAT directive. Pass strategy and/or symbol to narrow scope. To scope to one "
+      "account, account_id, market_type, and gateway are all REQUIRED together (422 if only "
+      "account_id is given) — account_id alone no longer identifies a single account. Omit "
+      "all three (strategy/symbol still allowed) to flat everything.\n\n"
+      "KNOWN LIMITATION: broadcast on the shared ADMIN subject to every worker; each worker "
+      "filters for itself client-side (worker code, outside this repo). Broker now always "
+      "sends the full (account_id, market_type, gateway) triple when scoped, but a worker "
+      "that still matches on account_id alone can act on a FLAT meant for a different "
+      "account sharing that id — the worker side must be updated to check all three."
     ),
-    responses={**AUTH_RESPONSES},
+    responses={
+      **AUTH_RESPONSES,
+      422: {"description": "account_id given without market_type and gateway."},
+    },
   )
   async def flat_positions(
     body: FlatRequest,
@@ -400,12 +416,16 @@ def get_admin_router() -> APIRouter:
       strategy=body.strategy,
       symbol=body.symbol,
       account_id=body.account_id,
+      market_type=body.market_type,
+      gateway=body.gateway,
     )
 
     scope_parts = [
       f"strategy={body.strategy}" if body.strategy else None,
       f"symbol={body.symbol}" if body.symbol else None,
       f"account={body.account_id}" if body.account_id else None,
+      f"market={body.market_type.value}" if body.market_type else None,
+      f"gateway={body.gateway}" if body.gateway else None,
     ]
     scope = ", ".join(p for p in scope_parts if p) or "ALL"
     log.info("FLAT published scope=%s", scope)
@@ -415,6 +435,44 @@ def get_admin_router() -> APIRouter:
     )
 
     return AdminResponse(action="FLAT", scope=scope)
+
+  @router.post(
+    "/accounts",
+    tags=["accounts"],
+    summary="Manually register a trading account",
+    description=(
+      "Pre-register an account (market_type, gateway, account_id) before it "
+      "has traded or its worker has connected, so an admin can hand a link "
+      "token to the end-user right away."
+    ),
+    status_code=status.HTTP_201_CREATED,
+    responses={
+      **AUTH_RESPONSES,
+      409: {"description": "account_id already exists."},
+      422: {"description": "gateway is not valid for market_type."},
+    },
+  )
+  async def create_account(
+    body: CreateAccountRequest,
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> AccountResponse:
+    valid_gateways = GATEWAYS_BY_MARKET.get(body.market_type, [])
+    if body.gateway not in valid_gateways:
+      raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"gateway must be one of {valid_gateways} for market_type={body.market_type.value}",
+      )
+
+    account = await account_repo.create_account(
+      body.account_id, body.market_type, body.gateway, body.account_name
+    )
+    if account is None:
+      raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="account_id already exists",
+      )
+    log.info("Account manually created account_id=%s", body.account_id)
+    return AccountResponse.model_validate(account)
 
   @router.post(
     "/accounts/{account_id}/link-token/rotate",

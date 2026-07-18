@@ -14,7 +14,7 @@ from app import emojis
 from app.presenters import messages
 from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
-from app.services.broker_client import BrokerClient
+from app.services.broker_client import BrokerClientUser
 
 router = Router(name="account")
 
@@ -24,16 +24,54 @@ async def cmd_status(message: Message, account: dict[str, Any]) -> None:
   await message.answer(messages.UserMessages.format_account(account))
 
 
+# ── /switch — change which linked account is active ───────────────────
+# AuthMiddleware already resolved an active account before this handler runs,
+# so the caller is guaranteed to have at least one linked account.
+
+
+@router.message(Command("switch"))
+async def cmd_switch(message: Message, broker: BrokerClientUser) -> None:
+  accounts = await broker.list_accounts(message.from_user.id)
+  if accounts is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch your accounts. Try again later.")
+    return
+  if len(accounts) <= 1:
+    await message.answer(
+      "You only have one linked account — nothing to switch to. Use /link to add another."
+    )
+    return
+  await message.answer(
+    messages.UserMessages.format_accounts_list(accounts),
+    reply_markup=inline.linked_accounts_picker(accounts),
+  )
+
+
+@router.callback_query(F.data.startswith("swacc:"))
+async def cb_switch_account(call: CallbackQuery, broker: BrokerClientUser) -> None:
+  account_id = call.data.split(":", 1)[1]
+  result = await broker.switch_account(call.from_user.id, account_id)
+  if result is None:
+    await safe_edit_text(call.message, f"{emojis.CROSS} Switch failed. Try again later.")
+    await call.answer()
+    return
+  await safe_edit_text(
+    call.message,
+    f"{emojis.CHECK} Active account switched.\n\n" + messages.UserMessages.format_account(result),
+  )
+  await call.answer()
+
+
 @router.message(Command("unlink"))
 async def cmd_unlink(message: Message, account: dict[str, Any]) -> None:
   await message.answer(
-    "Are you sure you want to <b>unlink</b> your account from Telegram?",
+    "Are you sure you want to <b>unlink</b> your active account "
+    f"(<code>{account.get('account_id')}</code>) from Telegram?",
     reply_markup=inline.confirm_keyboard("unlink"),
   )
 
 
 @router.callback_query(F.data == "unlink:confirm")
-async def cb_unlink(call: CallbackQuery, broker: BrokerClient) -> None:
+async def cb_unlink(call: CallbackQuery, broker: BrokerClientUser) -> None:
   ok = await broker.unlink(call.from_user.id)
   await safe_edit_text(
     call.message,

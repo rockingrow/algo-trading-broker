@@ -17,11 +17,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from broker.db.engine import get_session
-from broker.db.models import Account, BrokerSetting, Signal, Trade
+from broker.db.models import Account, BrokerSetting, Signal, TelegramSession, Trade
 from broker.domain.trade_status import TradeStatusPolicy
 from broker.logger import get_logger
 from broker.schemas.account_schema import MarketTypeEnum
@@ -51,11 +51,20 @@ class SqlAlchemyAccountRepository:
     Inserts the row when the account is unknown (a worker that has connected but
     never traded is still addressable). Best-effort: failures are logged, never
     raised — the handshake reply matters more than this bookkeeping.
+
+    Scoped by ``account_id`` + ``market`` (not ``account_id`` alone — that no
+    longer identifies a single row, see ``uq_accounts_market_gateway_account_id``),
+    matching either the exact gateway already on file or a legacy row whose
+    gateway is still NULL (predates this column, being backfilled now).
     """
     try:
       async with get_session() as session:
         result = await session.execute(
-          select(Account).where(Account.account_id == account_id)
+          select(Account).where(
+            Account.account_id == account_id,
+            Account.market_type == market,
+            or_(Account.gateway == gateway, Account.gateway.is_(None)),
+          )
         )
         row: Optional[Account] = result.scalars().first()
 
@@ -88,6 +97,52 @@ class SqlAlchemyAccountRepository:
         exc,
       )
 
+  async def create_account(
+    self,
+    account_id: str,
+    market: MarketTypeEnum,
+    gateway: str,
+    account_name: Optional[str] = None,
+  ) -> Optional[Account]:
+    """Manually register a new account (admin-initiated, ahead of any
+    trade/handshake). Returns None if the (market, gateway, account_id) triple
+    is already taken — the same bare account_id may exist under a different
+    market/gateway (see ``uq_accounts_market_gateway_account_id``).
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(
+            Account.account_id == account_id,
+            Account.market_type == market,
+            Account.gateway == gateway,
+          )
+        )
+        if result.scalars().first() is not None:
+          return None
+
+        account = Account(
+          id=uuid.uuid4(),
+          account_id=account_id,
+          account_name=account_name,
+          market_type=market,
+          gateway=gateway,
+          last_activity_at=datetime.now(timezone.utc),
+        )
+        session.add(account)
+        await session.flush()
+        await session.refresh(account)
+        log.info(
+          "Account created account_id=%s market=%s gateway=%s",
+          account_id,
+          market.value if isinstance(market, MarketTypeEnum) else market,
+          gateway,
+        )
+        return account
+    except Exception as exc:
+      log.exception("Failed to create account_id=%s: %s", account_id, exc)
+      return None
+
   async def get_all(self) -> list[Account]:
     """Return all accounts ordered by last_activity_at desc."""
     try:
@@ -114,18 +169,154 @@ class SqlAlchemyAccountRepository:
       log.exception("Failed to fetch accounts for market=%s: %s", market, exc)
       return []
 
-  async def get_by_telegram_user_id(self, telegram_user_id: int) -> Account | None:
-    """Return the account bound to a Telegram user, or None if unbound."""
+  async def list_by_telegram_user_id(self, telegram_user_id: int) -> list[Account]:
+    """Return every account linked to a Telegram user (possibly several —
+    ``telegram_user_id`` is not unique on ``accounts``, see
+    ``TelegramSession`` for which one is currently active), ordered
+    ``last_activity_at`` desc with ``createdAt`` asc as a deterministic
+    tie-break (two admin-created accounts that haven't traded yet both have
+    ``last_activity_at IS NULL``)."""
     try:
       async with get_session() as session:
         result = await session.execute(
-          select(Account).where(Account.telegram_user_id == telegram_user_id)
+          select(Account)
+          .where(Account.telegram_user_id == telegram_user_id)
+          .order_by(Account.last_activity_at.desc(), Account.createdAt.asc())
         )
-        return result.scalars().first()
+        return list(result.scalars().all())
     except Exception as exc:
       log.exception(
-        "Failed to fetch account for telegram_user_id=%s: %s",
+        "Failed to fetch accounts for telegram_user_id=%s: %s",
         telegram_user_id,
+        exc,
+      )
+      return []
+
+  async def get_active_account(self, telegram_user_id: int) -> Account | None:
+    """Return the Telegram user's currently active account, or None if they
+    have no linked accounts at all.
+
+    Reads ``TelegramSession.active_account_id`` and validates it still
+    belongs to this user in one query (covers a stale pointer left over from
+    ``unlink_telegram``). Falls back to the first row from
+    ``list_by_telegram_user_id`` when the session is missing, its pointer is
+    NULL, or stale — self-healing the session best-effort so the next call
+    hits the fast path (failure to self-heal is logged and non-fatal; the
+    correct fallback account is still returned).
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TelegramSession).where(
+            TelegramSession.telegram_user_id == telegram_user_id
+          )
+        )
+        tg_session: Optional[TelegramSession] = result.scalars().first()
+
+        if tg_session is not None and tg_session.active_account_id is not None:
+          result = await session.execute(
+            select(Account).where(
+              Account.id == tg_session.active_account_id,
+              Account.telegram_user_id == telegram_user_id,
+            )
+          )
+          account: Optional[Account] = result.scalars().first()
+          if account is not None:
+            return account
+    except Exception as exc:
+      log.exception(
+        "Failed to fetch active account for telegram_user_id=%s: %s",
+        telegram_user_id,
+        exc,
+      )
+      return None
+
+    accounts = await self.list_by_telegram_user_id(telegram_user_id)
+    if not accounts:
+      return None
+    fallback = accounts[0]
+
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TelegramSession).where(
+            TelegramSession.telegram_user_id == telegram_user_id
+          )
+        )
+        tg_session = result.scalars().first()
+        if tg_session is None:
+          session.add(
+            TelegramSession(
+              id=uuid.uuid4(),
+              telegram_user_id=telegram_user_id,
+              active_account_id=fallback.id,
+            )
+          )
+        else:
+          tg_session.active_account_id = fallback.id
+    except Exception as exc:
+      log.warning(
+        "Failed to self-heal active session for telegram_user_id=%s: %s",
+        telegram_user_id,
+        exc,
+      )
+
+    return fallback
+
+  async def set_active_account(
+    self, telegram_user_id: int, account_id: uuid.UUID
+  ) -> Account | None:
+    """Set the Telegram user's active account. Returns the account, or None
+    if no account with that id is linked to this ``telegram_user_id``.
+
+    The ownership check (``id == account_id AND telegram_user_id ==
+    telegram_user_id``) is deliberate: unlike the rest of this class, which
+    treats ``telegram_user_id`` as a trusted, bot-verified identity,
+    ``account_id`` here is client-supplied and must be checked against it —
+    a "not found" and a "found but not yours" both return None so no
+    information about other users' account ids leaks.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(
+            Account.id == account_id, Account.telegram_user_id == telegram_user_id
+          )
+        )
+        account: Optional[Account] = result.scalars().first()
+        if account is None:
+          return None
+
+        result = await session.execute(
+          select(TelegramSession).where(
+            TelegramSession.telegram_user_id == telegram_user_id
+          )
+        )
+        tg_session: Optional[TelegramSession] = result.scalars().first()
+        if tg_session is None:
+          session.add(
+            TelegramSession(
+              id=uuid.uuid4(),
+              telegram_user_id=telegram_user_id,
+              active_account_id=account.id,
+            )
+          )
+        else:
+          tg_session.active_account_id = account.id
+
+        await session.flush()
+        await session.refresh(account)
+        log.info(
+          "Active account set telegram_user_id=%s account_id=%s",
+          telegram_user_id,
+          account.account_id,
+        )
+        return account
+    except Exception as exc:
+      log.exception(
+        "Failed to set active account for telegram_user_id=%s account_id=%s: %s",
+        telegram_user_id,
+        account_id,
         exc,
       )
       return None
@@ -135,8 +326,12 @@ class SqlAlchemyAccountRepository:
   ) -> Account | None:
     """Bind ``telegram_user_id`` to the account identified by ``token``.
 
-    A Telegram user maps to at most one account, so any prior binding for the
-    same ``telegram_user_id`` is released first (latest claim wins). Returns the
+    A Telegram user may hold several linked accounts, so this no longer
+    releases any prior binding. If the user's ``TelegramSession`` is missing
+    or has no active account yet, the newly linked account becomes active
+    (covers both "first ever link" and "relinking after a full unlink").
+    Otherwise an existing active selection is left untouched — adding a 2nd
+    or 3rd account doesn't disturb which one is currently active. Returns the
     linked account, or None if the token does not match any account.
     """
     try:
@@ -148,19 +343,25 @@ class SqlAlchemyAccountRepository:
         if account is None:
           return None
 
-        # Release the Telegram user from any other account before re-binding,
-        # otherwise the unique constraint on telegram_user_id would conflict.
-        others = await session.execute(
-          select(Account).where(
-            Account.telegram_user_id == telegram_user_id,
-            Account.id != account.id,
+        account.telegram_user_id = telegram_user_id
+
+        result = await session.execute(
+          select(TelegramSession).where(
+            TelegramSession.telegram_user_id == telegram_user_id
           )
         )
-        for other in others.scalars().all():
-          other.telegram_user_id = None
-        await session.flush()
+        tg_session: Optional[TelegramSession] = result.scalars().first()
+        if tg_session is None:
+          session.add(
+            TelegramSession(
+              id=uuid.uuid4(),
+              telegram_user_id=telegram_user_id,
+              active_account_id=account.id,
+            )
+          )
+        elif tg_session.active_account_id is None:
+          tg_session.active_account_id = account.id
 
-        account.telegram_user_id = telegram_user_id
         await session.flush()
         await session.refresh(account)
         log.info(
@@ -179,17 +380,49 @@ class SqlAlchemyAccountRepository:
       return None
 
   async def unlink_telegram(self, telegram_user_id: int) -> bool:
-    """Clear the Telegram binding for a user. Returns True if a row changed."""
+    """Clear the Telegram binding for the user's *active* account, and
+    re-point the active selection at another remaining linked account (if
+    any) or clear it. Returns True if a row changed.
+
+    Deliberately calls ``get_active_account`` (its own ``get_session()``
+    block) rather than duplicating the active-resolution + fallback-ordering
+    logic here — an extra round trip on this low-frequency, user-initiated
+    action, in exchange for one source of truth for "what's active."
+    """
+    active = await self.get_active_account(telegram_user_id)
+    if active is None:
+      return False
+
     try:
       async with get_session() as session:
-        result = await session.execute(
-          select(Account).where(Account.telegram_user_id == telegram_user_id)
-        )
+        result = await session.execute(select(Account).where(Account.id == active.id))
         account: Optional[Account] = result.scalars().first()
         if account is None:
           return False
         account.telegram_user_id = None
-        log.info("Unlinked telegram_user_id=%s", telegram_user_id)
+        await session.flush()
+
+        result = await session.execute(
+          select(Account)
+          .where(Account.telegram_user_id == telegram_user_id, Account.id != active.id)
+          .order_by(Account.last_activity_at.desc(), Account.createdAt.asc())
+        )
+        remaining: Optional[Account] = result.scalars().first()
+
+        result = await session.execute(
+          select(TelegramSession).where(
+            TelegramSession.telegram_user_id == telegram_user_id
+          )
+        )
+        tg_session: Optional[TelegramSession] = result.scalars().first()
+        if tg_session is not None:
+          tg_session.active_account_id = remaining.id if remaining is not None else None
+
+        log.info(
+          "Unlinked telegram_user_id=%s from account_id=%s",
+          telegram_user_id,
+          account.account_id,
+        )
         return True
     except Exception as exc:
       log.exception("Failed to unlink telegram_user_id=%s: %s", telegram_user_id, exc)
@@ -199,6 +432,15 @@ class SqlAlchemyAccountRepository:
     """Issue a fresh link token for an account (revokes the old one).
 
     Returns the new token, or None if the account does not exist.
+
+    KNOWN LIMITATION: resolves by bare ``account_id`` alone, which is no
+    longer guaranteed unique (see ``uq_accounts_market_gateway_account_id`` —
+    the same id can exist under different market/gateway pairs). If it
+    collides, this rotates whichever matching row Postgres returns first,
+    non-deterministically. Not fixed here: doing so needs the admin-facing
+    callers (bot ``/rotate``, ``POST /admin/accounts/{account_id}/...``) to
+    also pass market_type + gateway, which is a wider UX change than this
+    schema migration. Avoid reusing account_id across gateways until then.
     """
     try:
       async with get_session() as session:
@@ -497,9 +739,19 @@ class SqlAlchemyTradeRepository:
 
   async def _upsert_account(self, session: AsyncSession, event: PositionEvent) -> None:
     """Upsert the accounts row within an existing session. Always refreshes
-    last_activity_at."""
+    last_activity_at.
+
+    Scoped by account_id + market_type (see ``upsert_gateway`` for why
+    account_id alone isn't enough), matching either the exact gateway already
+    on file or a legacy row whose gateway is still NULL.
+    """
+    market_type = MarketTypeEnum(event.market_type)
     result = await session.execute(
-      select(Account).where(Account.account_id == event.account_id)
+      select(Account).where(
+        Account.account_id == event.account_id,
+        Account.market_type == market_type,
+        or_(Account.gateway == event.gateway, Account.gateway.is_(None)),
+      )
     )
     row: Optional[Account] = result.scalars().first()
     now = datetime.now(timezone.utc)
@@ -507,7 +759,7 @@ class SqlAlchemyTradeRepository:
     if row is not None:
       if event.account_name is not None:
         row.account_name = event.account_name
-      row.market_type = MarketTypeEnum(event.market_type)
+      row.market_type = market_type
       if event.gateway is not None:
         row.gateway = event.gateway
       if event.account_balance is not None:
@@ -520,7 +772,7 @@ class SqlAlchemyTradeRepository:
           account_id=event.account_id,
           account_name=event.account_name,
           account_balance=event.account_balance,
-          market_type=MarketTypeEnum(event.market_type),
+          market_type=market_type,
           gateway=event.gateway,
           last_activity_at=now,
         )
@@ -528,8 +780,10 @@ class SqlAlchemyTradeRepository:
 
   async def upsert_by_position_event(self, event: PositionEvent) -> Trade | None:
     """Apply a PositionEvent received from the worker (via NATS TRADE) to the
-    broker's `trades` table. Performs an upsert keyed by (account_id, ref_id):
-    updates the row if it exists, otherwise inserts a new one. Idempotent."""
+    broker's `trades` table. Performs an upsert keyed by (market_type, gateway,
+    account_id, ref_id) — account_id alone doesn't identify an account
+    uniquely (see ``uq_accounts_market_gateway_account_id``); updates the row
+    if it exists, otherwise inserts a new one. Idempotent."""
     trade_status = self._policy.to_trade_status(event.status)
     if trade_status is None:
       log.warning("upsert_by_position_event: unknown position status=%s", event.status)
@@ -537,6 +791,7 @@ class SqlAlchemyTradeRepository:
 
     is_running = self._policy.is_open(event.status)
     price = event.closed_price if event.closed_price is not None else event.opened_price
+    market_type = MarketTypeEnum(event.market_type)
 
     async with get_session() as session:
       await self._upsert_account(session, event)
@@ -545,6 +800,8 @@ class SqlAlchemyTradeRepository:
         select(Trade).where(
           Trade.account_id == event.account_id,
           Trade.ref_id == event.ref_source_id,
+          Trade.market_type == market_type,
+          or_(Trade.gateway == event.gateway, Trade.gateway.is_(None)),
         )
       )
       row: Optional[Trade] = result.scalars().first()
@@ -564,6 +821,9 @@ class SqlAlchemyTradeRepository:
         row.is_running = is_running
         row.price = price
         row.quantity = event.volume
+        row.market_type = market_type
+        if event.gateway is not None:
+          row.gateway = event.gateway
         if event.reject_reason is not None:
           row.reject_reason = event.reject_reason
         if event.comment is not None:
@@ -586,6 +846,8 @@ class SqlAlchemyTradeRepository:
       new_row = Trade(
         id=uuid.uuid4(),
         account_id=event.account_id,
+        market_type=market_type,
+        gateway=event.gateway,
         account_leverage=event.account_leverage,
         account_balance_init=event.account_balance,
         account_balance=event.account_balance,
@@ -626,7 +888,15 @@ class SqlAlchemyTradeRepository:
     order: str = "desc",
     order_by: str = "updatedAt",
   ) -> list[Trade]:
-    """Return trades for an account with offset/limit pagination and configurable sort."""
+    """Return trades for an account with offset/limit pagination and configurable sort.
+
+    KNOWN LIMITATION: filters by bare ``account_id`` only, which can now match
+    trades from more than one account if the id was reused across gateways
+    (see ``rotate_link_token``'s docstring). Not scoped to market_type/gateway
+    here — the admin-facing callers (bot ``/atrades``, ``GET
+    /v1/{account_id}/trades``) would need to pass those too, a wider change
+    than this migration covers.
+    """
     _sortable = {
       "updatedAt": Trade.updatedAt,
       "createdAt": Trade.createdAt,
@@ -650,7 +920,10 @@ class SqlAlchemyTradeRepository:
       return []
 
   async def count_by_account(self, account_id: str) -> int:
-    """Return the total number of trades for an account."""
+    """Return the total number of trades for an account.
+
+    Same bare-``account_id`` limitation as ``list_by_account``.
+    """
     try:
       async with get_session() as session:
         result = await session.execute(

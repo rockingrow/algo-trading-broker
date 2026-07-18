@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminActionEnum,
@@ -114,11 +115,26 @@ def test_admin_signal_json_roundtrip():
     action=AdminActionEnum.FLAT,
     timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
     account_id="acc",
+    market_type=MarketTypeEnum.FOREX,
+    gateway="MT5",
   )
   body = json.loads(sig.model_dump_json())
   assert body["action"] == "FLAT"
   assert body["account_id"] == "acc"
+  assert body["market_type"] == "FOREX"
+  assert body["gateway"] == "MT5"
   assert body["strategy"] is None
+
+
+def test_admin_signal_requires_market_and_gateway_with_account_id():
+  with pytest.raises(ValidationError):
+    AdminSignal(action=AdminActionEnum.FLAT, account_id="acc")
+
+
+def test_admin_signal_allows_no_account_id_without_market_and_gateway():
+  # Global scope (flat/block everything) needs no account identification.
+  sig = AdminSignal(action=AdminActionEnum.FLAT)
+  assert sig.account_id is None
 
 
 def test_publish_topic_enum_values():

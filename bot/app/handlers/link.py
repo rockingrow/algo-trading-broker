@@ -7,21 +7,51 @@ from __future__ import annotations
 import uuid
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app import emojis
 from app.presenters import messages
-from app.services.broker_client import BrokerClient
+from app.services.broker_client import BrokerClientUser
 from app.states import LinkAccount
 
 router = Router(name="link")
 
 
+async def start_link_flow(
+  message: Message, state: FSMContext, *, already_linked: bool
+) -> None:
+  """Enter the "waiting for UUID token" FSM state, with wording that differs
+  for a first-time linker vs. someone adding another account. Shared by
+  ``start.py``'s onboarding path and ``/link`` below."""
+  await state.set_state(LinkAccount.waiting_for_token)
+  if already_linked:
+    await message.answer(
+      "Send the <b>UUID code</b> for the account you'd like to add.\n\n"
+      "<i>Example: b5dc0374-9639-4861-acf4-2d239aa5c1b4</i>"
+    )
+  else:
+    await message.answer(
+      f"{emojis.WAVE} <b>Welcome!</b>\n\n"
+      "Please send me the <b>UUID code</b> your admin gave you to link your "
+      "account.\n\n"
+      "<i>Example: b5dc0374-9639-4861-acf4-2d239aa5c1b4</i>"
+    )
+
+
+@router.message(Command("link"))
+async def cmd_link(
+  message: Message, state: FSMContext, broker: BrokerClientUser
+) -> None:
+  account = await broker.get_account(message.from_user.id)
+  await start_link_flow(message, state, already_linked=account is not None)
+
+
 # Only treat non-command text as a candidate token while onboarding.
 @router.message(LinkAccount.waiting_for_token, F.text & ~F.text.startswith("/"))
 async def receive_token(
-  message: Message, state: FSMContext, broker: BrokerClient
+  message: Message, state: FSMContext, broker: BrokerClientUser
 ) -> None:
   raw = (message.text or "").strip()
   try:
@@ -40,8 +70,15 @@ async def receive_token(
     return
 
   await state.clear()
+  headline = (
+    f"{emojis.CHECK} <b>Linked successfully!</b>"
+    if account.get("is_active")
+    else f"{emojis.CHECK} <b>Account added.</b> Still using another account as "
+    "active — use /switch to change."
+  )
   await message.answer(
-    f"{emojis.CHECK} <b>Linked successfully!</b>\n\n"
+    headline
+    + "\n\n"
     + messages.UserMessages.format_account(account)
     + "\n\n"
     + messages.UserMessages.COMMANDS_HINT

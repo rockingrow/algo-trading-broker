@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from app.services.broker_client import BrokerClient
+from app.services.broker_client import BrokerClientUser
 
 _NOT_LINKED = "You haven't linked an account yet. Type /start to link using your UUID code."
 
@@ -26,7 +26,7 @@ class AuthMiddleware(BaseMiddleware):
     event: TelegramObject,
     data: dict[str, Any],
   ) -> Any:
-    broker: BrokerClient = data["broker"]
+    broker: BrokerClientUser = data["broker"]
     user = data.get("event_from_user")
     if user is None:
       return await handler(event, data)

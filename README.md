@@ -156,7 +156,7 @@ Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHOR
 
 ### `TRADE` events
 
-Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(account_id, ref_id)`, translating the worker's position status into a broker trade `status`:
+Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(market_type, gateway, account_id, ref_id)` — not `account_id` alone, since the same bare `account_id` can exist under a different market/gateway (see [`accounts` table](#accounts-table)) — translating the worker's position status into a broker trade `status`:
 
 | Worker position status | Broker trade `status` | Running? |
 | ---------------------- | --------------------- | -------- |
@@ -446,6 +446,8 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/accounts/{account_id}/link-token/rotate` | `X-API-KEY` |
 | `POST /v1/telegram/link` | `X-API-KEY` |
 | `GET /v1/telegram/{telegram_user_id}` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/accounts` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/active-account` | `X-API-KEY` |
 | `GET /v1/telegram/{telegram_user_id}/trades` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/flat` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/prevent` | `X-API-KEY` |
@@ -540,13 +542,38 @@ Returns all trading accounts ordered by most recent activity. Requires the `X-AP
 ]
 ```
 
-Accounts are automatically created or updated each time a `TRADE` event arrives from a worker. `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market_type` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
+Accounts are automatically created or updated each time a `TRADE` event arrives from a worker (or manually via `POST /admin/accounts`, below). `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market_type` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
+
+`account_id` alone is **not** unique — the same bare id can exist under a different `market_type`/`gateway` pair (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). The unique key is the full `(market_type, gateway, account_id)` triple.
+
+---
+
+### POST `/admin/accounts`
+
+Manually registers an account — `market_type`, `gateway`, and an `account_id` chosen by the admin — before it has ever traded or its worker has connected, so a link token can be handed to the end-user right away. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "market_type": "CRYPTO",
+  "gateway": "BINANCE",
+  "account_id": "7654321",
+  "account_name": "Main Crypto"
+}
+```
+
+`gateway` must be valid for `market_type` (currently `FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or the request is rejected with `422`. `account_id` may not contain `:` or whitespace (it's embedded verbatim in the Telegram bot's callback data) and must be at most 50 characters. Returns `409` if the `(market_type, gateway, account_id)` triple already exists — reusing the same `account_id` under a *different* gateway is allowed and creates a distinct account.
+
+**Response** (`201`): the created account, shaped like a row in [`GET /v1/accounts`](#get-v1accounts) — including a freshly generated `telegram_link_token`.
 
 ---
 
 ### GET `/v1/{account_id}/trades`
 
 Returns a paginated list of trades for the given account. Requires the `X-API-KEY` header.
+
+> **Note:** filters by bare `account_id` only. If that id has been reused across gateways (see above), this can match trades from more than one account — pass a `account_id` you know is unambiguous, or avoid reusing ids across gateways.
 
 **Query Parameters:**
 
@@ -680,11 +707,15 @@ Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subje
 {
   "strategy": "wt_cross_v1",
   "symbol": "XAUUSD",
-  "account_id": "MT5-12345678"
+  "account_id": "MT5-12345678",
+  "market_type": "FOREX",
+  "gateway": "MT5"
 }
 ```
 
 Omit all fields (or send an empty body `{}`) to flat every open position across all workers.
+
+`market_type`/`gateway` optionally narrow `account_id` further and are forwarded onto the broadcast `AdminSignal`. This is broadcast on the shared `ADMIN` subject to **every** connected worker; each worker filters for itself client-side (worker-side code, outside this repo). Since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), pass `market_type`/`gateway` when scoping to an account whose id might collide with one on another gateway — but this only helps once the worker side is updated to check them too. A worker that still matches on `account_id` alone can act on a FLAT meant for a different account that happens to share that id.
 
 ---
 
@@ -706,15 +737,33 @@ gets an extended admin menu (`/accounts`, `/atrades`, `/aflat`, `/rotate`,
    reads it from `GET /v1/accounts` (or rotates it via
    `POST /admin/accounts/{account_id}/link-token/rotate`) and hands it to the user.
 2. The user sends `/start` to the bot and pastes the token. The bot calls
-   `POST /v1/telegram/link`, which binds their `telegram_user_id` to the account
-   (the "session"). One Telegram user maps to at most one account.
+   `POST /v1/telegram/link`, which binds their `telegram_user_id` to the account.
 3. Linked users can then query trades (`/trades`) and issue control commands.
+
+**Multiple accounts per user (active account)**
+
+One Telegram user may link **several** accounts — typically one per
+market/gateway pair (e.g. an MT5 forex account and a Binance crypto account).
+Exactly one of them is **active** at a time, and every single-account command
+(`/status`, `/trades`, `/flat`, `/prevent`, `/allow`, `/unlink`) acts on
+whichever one that is.
+
+- `/link` — add another account (paste a second token). The first account
+  linked becomes active automatically; adding more does not change the
+  active one.
+- `/switch` — list the linked accounts as `market-gateway-account_id`
+  buttons (the active one is starred) and tap one to activate it.
+
+The selection lives in the broker's `telegram_sessions` table, not in bot
+memory, so it survives bot restarts. If it ever points at an account that was
+unlinked, the broker falls back to the user's most recently active account and
+repairs the row.
 
 **Control commands** publish `ADMIN`-subject directives via the broker:
 
 | Command | Admin action | Notes |
 | ------- | ------------ | ----- |
-| `/flat` | `FLAT` | Close positions for the user's `account_id`. |
+| `/flat` | `FLAT` | Close positions for the **active** account. |
 | `/prevent` | `BLOCK_ENTRIES` | Block new entries (worker must honor it). |
 | `/allow` | `ALLOW_ENTRIES` | Re-enable new entries. |
 
@@ -760,6 +809,8 @@ for configuration and local development.
 | ----------------------- | ------------ | ------------------------------------------ |
 | `id` | UUID (PK) | Unique record identifier |
 | `account_id` | String(50) | Worker's broker account ID |
+| `market_type` | Enum (nullable) | `FOREX` or `CRYPTO`, copied from the owning `accounts` row |
+| `gateway` | String(50) (nullable) | Exchange the account trades through, copied from the owning `accounts` row |
 | `account_leverage` | Integer | Account leverage at time of trade |
 | `account_balance_init` | Numeric(20,8) | Account balance before trade (nullable) |
 | `account_balance` | Numeric(20,8) | Account balance after trade (nullable) |
@@ -785,16 +836,40 @@ for configuration and local development.
 | Column | Type | Description |
 | ------------------- | ------------ | ------------------------------------------ |
 | `id` | UUID (PK) | Unique record identifier |
-| `account_id` | String(50) | Worker's broker account ID (unique) |
+| `account_id` | String(50) | Worker's broker account ID (unique together with `market_type` + `gateway` — **not** unique alone; see note below) |
 | `account_name` | String(255) | Display name of the account (nullable) |
 | `account_balance` | Numeric(20,8) | Most recent account balance (nullable) |
 | `market_type` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
-| `telegram_user_id` | BigInteger (Nullable) | Linked Telegram user (unique) |
+| `telegram_user_id` | BigInteger (Nullable) | Linked Telegram user — **not** unique: one user may link several accounts (see [`telegram_sessions`](#telegram_sessions-table)) |
 | `telegram_link_token` | UUID (Nullable) | Token handed to the user to link the bot (unique) |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
+
+**Unique constraint:** `(market_type, gateway, account_id)` — a bare `account_id` can exist under more than one market/gateway (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). Endpoints and repository methods that take only `account_id` (`POST /admin/accounts/{account_id}/link-token/rotate`, `GET /v1/{account_id}/trades`, the `account_id` scope on `POST /admin/flat`) resolve/match on that bare id and can be ambiguous if it's reused across gateways — avoid deliberately reusing an `account_id` across gateways until those callers are updated to also pass `market_type`/`gateway`.
+
+### `telegram_sessions` table
+
+One row per Telegram user, tracking which of their linked accounts is currently
+**active** — the one every single-account bot command (`/status`, `/trades`,
+`/flat`, `/prevent`, `/allow`, `/unlink`) acts on. Kept separate from
+`accounts.telegram_user_id` because that column is no longer unique: a user may
+link several accounts, but only one is active at a time.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `telegram_user_id` | BigInteger | Telegram user this session belongs to (unique) |
+| `active_account_id` | UUID (Nullable) | FK → `accounts.id`, `ON DELETE SET NULL`. The active account, or `NULL` once the user has unlinked everything |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+The row is created on first link and updated by
+`POST /v1/telegram/{telegram_user_id}/active-account` (the bot's `/switch`).
+If `active_account_id` ever points at an account that is no longer linked to
+the user, the broker falls back to their most recently active account and
+self-heals the row on the next read.
 
 ### `broker_settings` table
 

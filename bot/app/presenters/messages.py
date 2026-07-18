@@ -67,7 +67,9 @@ class UserMessages:
     "/prevent — Block new orders\n"
     "/allow — Allow new orders\n"
     "/status — Account info\n"
-    "/unlink — Unlink account"
+    "/link — Add another account\n"
+    "/switch — Change active account\n"
+    "/unlink — Unlink active account"
   )
 
   HELP_TEXT = (
@@ -88,6 +90,22 @@ class UserMessages:
       f"• Market: {_esc(account.get('market_type'))}\n"
       f"• Status: {linked}"
     )
+
+  @staticmethod
+  def format_accounts_list(accounts: list[dict[str, Any]]) -> str:
+    """Caption for the /switch account picker — one line per linked account,
+    marking the currently active one."""
+    if not accounts:
+      return f"{emojis.EMPTY_MAILBOX} No linked accounts."
+    lines = [f"<b>{emojis.FOLDER} Your accounts</b> ({len(accounts)})", ""]
+    for a in accounts:
+      dot = emojis.STAR if a.get("is_active") else "•"
+      lines.append(
+        f"{dot} <code>{_esc(a.get('market_type'))}-{_esc(a.get('gateway') or '?')}-"
+        f"{_esc(a.get('account_id'))}</code>"
+      )
+    lines.append("\n<i>Tap an account below to make it active.</i>")
+    return "\n".join(lines)
 
   @staticmethod
   def format_trades(payload: dict[str, Any]) -> str:
@@ -152,6 +170,18 @@ class AdminMessages:
       lines.append(f"{dot} {_esc(label)}: <b>{_esc(s.get('state'))}</b>")
     lines.append("\n<i>Tap a button below to toggle.</i>")
     return "\n".join(lines)
+
+  @staticmethod
+  def format_account_created(account: dict[str, Any]) -> str:
+    return (
+      f"{emojis.CHECK} <b>Account created</b>\n"
+      f"• ID: <code>{_esc(account.get('account_id'))}</code>\n"
+      f"• Market: {_esc(account.get('market_type'))}\n"
+      f"• Gateway: {_esc(account.get('gateway'))}\n\n"
+      f"{emojis.KEY} Link token:\n"
+      f"<tg-spoiler><code>{_esc(account.get('telegram_link_token'))}</code></tg-spoiler>\n\n"
+      "<i>Send this token to the end user so they can link via /start.</i>"
+    )
 
   @staticmethod
   def format_rotate_result(result: dict[str, Any]) -> str:

@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - Unreleased
+
+### Added
+
+- **Telegram bot service** (`bot/`) — A new, self-contained **aiogram v3**
+  service serving two roles from one process: endusers and admins. It is a
+  thin HTTP client of the broker (authenticated with `X-API-KEY`) and never
+  touches PostgreSQL or NATS directly. Ships its own `pyproject` / `Dockerfile`
+  / `uv.lock` and a `bot` service in `docker-compose.yml`. Run it with
+  `docker compose up -d bot`; see [`bot/README.md`](bot/README.md).
+- **UUID-based account linking** — Every `accounts` row carries a
+  `telegram_link_token` (UUID, migration `d4f1a2c3b5e6`). An admin hands it to
+  an end user, who pastes it into the bot's `/start` FSM flow; the bot calls
+  `POST /v1/telegram/link` to bind their `telegram_user_id` to the account.
+- **`/v1/telegram/*` endpoints** — `link`, `{id}` (active account), `{id}/accounts`,
+  `{id}/active-account`, `{id}/trades`, `{id}/commands/flat`,
+  `{id}/commands/prevent`, `{id}/unlink`. All behind `X-API-KEY`: the bot is the
+  only caller, and the end-user identity is the `telegram_user_id` taken from a
+  verified Telegram update — never from user-typed text.
+- **Multiple accounts per Telegram user, with an active account** — One
+  Telegram user may now link several accounts (typically one per
+  market/gateway pair). A new `telegram_sessions` table (migration
+  `e1f2a3b4c5d6`) holds one row per user pointing at the **active** account;
+  every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
+  `/allow`, `/unlink`) acts on whichever that is. New bot commands `/link`
+  (add another account) and `/switch` (pick the active one from an inline
+  keyboard labelled `market-gateway-account_id`, active one starred). The
+  selection is stored broker-side, so it survives bot restarts; a pointer left
+  stale by an unlink falls back to the user's most recently active account and
+  self-heals on the next read.
+- **Admin role and scoped command menus** — Telegram command **scopes** give
+  endusers the default menu while each id in `TELEGRAM_ADMIN_IDS` gets an
+  extended one, re-initialised on every startup (and tolerating admins who have
+  not messaged the bot yet). Admin commands: `/accounts`, `/newaccount`,
+  `/atrades`, `/aflat`, `/rotate`, `/settings`.
+- **`POST /admin/accounts`** — Manually register an account ahead of any trade
+  or worker handshake, so a link token can be issued immediately. `gateway`
+  must be valid for `market_type` (`FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or
+  the request is rejected with `422`; returns `409` if the
+  `(market_type, gateway, account_id)` triple already exists.
+- **`POST /admin/accounts/{account_id}/link-token/rotate`** — Issue a fresh
+  link token for an account, revoking the old one.
+- **`GET /admin/settings`** — Read the runtime toggles (previously POST-only),
+  backing the bot's `/settings` screen.
+- **`BLOCK_ENTRIES` / `ALLOW_ENTRIES` admin actions** — `AdminActionEnum` grows
+  two per-account directives, published on the `ADMIN` subject by the bot's
+  `/prevent` and `/allow`. Enforcement is the **worker's** responsibility —
+  worker code lives outside this repo, so the broker only publishes them.
+- **`trades.market_type` and `trades.gateway` columns** — Added via migration
+  `c9d8e7f6a5b4` and denormalised from the owning `accounts` row at upsert
+  time, so a trade can be attributed to the right account now that
+  `account_id` alone no longer identifies one.
+
+### Changed
+
+- **`accounts` unique constraint: `account_id` → `(market_type, gateway, account_id)`** —
+  Two unrelated real accounts on different gateways can coincidentally share a
+  bare id (an MT5 login `100234` and a Binance account `100234`), which the old
+  single-column constraint made impossible to register. `trades` gets the
+  matching treatment: `(account_id, ref_id)` →
+  `(market_type, gateway, account_id, ref_id)`.
+  **Known limitation:** admin-facing lookups that take a bare `account_id` —
+  `POST /admin/accounts/{account_id}/link-token/rotate` and
+  `GET /v1/{account_id}/trades` — still resolve/match on that id alone and can
+  be ambiguous if it is reused across gateways. Avoid deliberately reusing an
+  `account_id` across gateways until those callers pass `market_type` /
+  `gateway` too.
+- **`accounts.telegram_user_id` is no longer unique** — Its unique index is
+  replaced with a plain one so a single Telegram user can hold several linked
+  accounts. Which one is active moved to `telegram_sessions`.
+- **`AdminSignal` requires `market_type` + `gateway` alongside `account_id`** —
+  Account-scoped admin signals are now fully disambiguated on the wire, and
+  `POST /admin/flat` returns `422` if `account_id` is given without both.
+  **Workers must match all three** (`account_id` + `market_type` + `gateway`)
+  against themselves before acting; a worker still matching on `account_id`
+  alone can act on a directive meant for a different account sharing that id.
+- **Bot copy is English-only, emoji via named constants** — Vietnamese strings
+  replaced, and raw glyphs pulled out of source into `app/emojis.py`.
+- **Bot formatters reorganised into presenters** — Message-formatting functions
+  grouped into `UserMessages` / `AdminMessages` under `app/presenters`, with
+  reusable cross-handler logic (`safe_edit_text`, pagination keyboard building)
+  extracted to `app/utils`.
+
 ## [1.1.0] - 2026-07-18
 
 ### Added

@@ -34,6 +34,7 @@ from broker.schemas.telegram_schema import (
   LinkedAccountResponse,
   LinkRequest,
   PreventCommandRequest,
+  SwitchAccountRequest,
 )
 from broker.schemas.trade_schema import PageMeta, TradeListResponse, TradeResponse
 from broker.security.ensure_api_key import ensure_api_key
@@ -47,8 +48,13 @@ async def get_linked_account(
   telegram_user_id: int,
   account_repo: AccountRepository = Depends(get_account_repository),
 ) -> Account:
-  """Resolve the account bound to ``telegram_user_id`` or raise 404."""
-  account = await account_repo.get_by_telegram_user_id(telegram_user_id)
+  """Resolve the *active* account for ``telegram_user_id`` or raise 404.
+
+  A Telegram user may have several linked accounts; single-account endpoints
+  (trades, flat, prevent, unlink, status) all act on whichever one is
+  currently active — see ``AccountRepository.get_active_account``.
+  """
+  account = await account_repo.get_active_account(telegram_user_id)
   if account is None:
     raise HTTPException(
       status_code=status.HTTP_404_NOT_FOUND,
@@ -88,18 +94,65 @@ def get_telegram_router() -> APIRouter:
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Invalid link token",
       )
-    return LinkedAccountResponse.model_validate(account)
+    active = await account_repo.get_active_account(body.telegram_user_id)
+    resp = LinkedAccountResponse.model_validate(account)
+    resp.is_active = active is not None and active.id == account.id
+    return resp
 
   @router.get(
     "/{telegram_user_id}",
-    summary="Get the account currently linked to a Telegram user",
+    summary="Get the account currently active for a Telegram user",
     response_model=LinkedAccountResponse,
     responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
   )
   async def get_account(
     account: Account = Depends(get_linked_account),
   ) -> LinkedAccountResponse:
-    return LinkedAccountResponse.model_validate(account)
+    resp = LinkedAccountResponse.model_validate(account)
+    resp.is_active = True
+    return resp
+
+  @router.get(
+    "/{telegram_user_id}/accounts",
+    summary="List every account linked to a Telegram user",
+    response_model=list[LinkedAccountResponse],
+    responses=AUTH_RESPONSES,
+  )
+  async def list_accounts(
+    telegram_user_id: int,
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> list[LinkedAccountResponse]:
+    accounts, active = await asyncio.gather(
+      account_repo.list_by_telegram_user_id(telegram_user_id),
+      account_repo.get_active_account(telegram_user_id),
+    )
+    result: list[LinkedAccountResponse] = []
+    for a in accounts:
+      resp = LinkedAccountResponse.model_validate(a)
+      resp.is_active = active is not None and active.id == a.id
+      result.append(resp)
+    return result
+
+  @router.post(
+    "/{telegram_user_id}/active-account",
+    summary="Switch which of a Telegram user's linked accounts is active",
+    response_model=LinkedAccountResponse,
+    responses={**AUTH_RESPONSES, 404: {"description": "Account not found or not linked to this Telegram user."}},
+  )
+  async def set_active_account(
+    telegram_user_id: int,
+    body: SwitchAccountRequest,
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> LinkedAccountResponse:
+    account = await account_repo.set_active_account(telegram_user_id, body.account_id)
+    if account is None:
+      raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Account not found or not linked to this Telegram user",
+      )
+    resp = LinkedAccountResponse.model_validate(account)
+    resp.is_active = True
+    return resp
 
   @router.post(
     "/{telegram_user_id}/unlink",
@@ -164,6 +217,8 @@ def get_telegram_router() -> APIRouter:
       strategy=body.strategy,
       symbol=body.symbol,
       account_id=account.account_id,
+      market_type=account.market_type,
+      gateway=account.gateway,
     )
     scope = _scope(account.account_id, strategy=body.strategy, symbol=body.symbol)
     log.info("Telegram FLAT published scope=%s", scope)
@@ -187,6 +242,8 @@ def get_telegram_router() -> APIRouter:
       action=action,
       timestamp=datetime.now(timezone.utc),
       account_id=account.account_id,
+      market_type=account.market_type,
+      gateway=account.gateway,
     )
     scope = _scope(account.account_id, strategy=None, symbol=None)
     log.info("Telegram %s published scope=%s", action.value, scope)

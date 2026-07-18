@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 
 from broker.db import repository as repo_mod
-from broker.db.models import Account, BrokerSetting, Trade
+from broker.db.models import Account, BrokerSetting, TelegramSession, Trade
 from broker.db.repository import (
   SqlAlchemyAccountRepository,
   SqlAlchemySettingRepository,
@@ -539,41 +539,127 @@ async def test_upsert_gateway_swallows_db_error(monkeypatch):
   )
 
 
+# ── AccountRepository.create_account (admin manual registration) ──────
+
+
+async def test_create_account_inserts_new_row(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  account = await SqlAlchemyAccountRepository().create_account(
+    "7654321", MarketTypeEnum.CRYPTO, "BINANCE", "Main Crypto"
+  )
+
+  assert len(session.added) == 1
+  row = session.added[0]
+  assert row.account_id == "7654321"
+  assert row.market_type == MarketTypeEnum.CRYPTO
+  assert row.gateway == "BINANCE"
+  assert row.account_name == "Main Crypto"
+  assert row.last_activity_at is not None
+  assert account is row
+  assert session.refreshed == [row]
+
+
+async def test_create_account_returns_none_when_account_id_taken(monkeypatch):
+  # Same (market_type, gateway, account_id) triple already exists.
+  existing = Account(
+    account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+
+  account = await SqlAlchemyAccountRepository().create_account(
+    "7654321", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+
+  assert account is None
+  assert session.added == []
+
+
+async def test_create_account_swallows_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+  account = await SqlAlchemyAccountRepository().create_account(
+    "7654321", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+  assert account is None
+
+
 # ── AccountRepository telegram binding ──────────────────────────────
 
 
 import uuid  # noqa: E402
 
 
-async def test_link_telegram_binds_user(monkeypatch):
+async def test_link_telegram_binds_user_and_activates_first_account(monkeypatch):
   token = uuid.uuid4()
   account = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_link_token=token
+    id=uuid.uuid4(),
+    account_id="acc-1",
+    market_type=MarketTypeEnum.FOREX,
+    telegram_link_token=token,
   )
-  # 1st execute: lookup by token → account; 2nd: other accounts with this tg id → none
+  # 1st execute: lookup by token → account; 2nd: session lookup → none → insert
   session = FakeSession(results=[[account], []])
   _patch_session(monkeypatch, session)
 
   result = await SqlAlchemyAccountRepository().link_telegram(token, 555)
   assert result is account
   assert account.telegram_user_id == 555
+  new_session = next(o for o in session.added if isinstance(o, TelegramSession))
+  assert new_session.telegram_user_id == 555
+  assert new_session.active_account_id == account.id
 
 
-async def test_link_telegram_releases_previous_account(monkeypatch):
+async def test_link_telegram_does_not_release_previous_account(monkeypatch):
+  """Multi-account support: linking a 2nd account must NOT clear the 1st's
+  telegram_user_id (replaces the old 1:1 "latest claim wins" behavior)."""
   token = uuid.uuid4()
   target = Account(
-    account_id="acc-2", market_type=MarketTypeEnum.FOREX, telegram_link_token=token
+    id=uuid.uuid4(),
+    account_id="acc-2",
+    market_type=MarketTypeEnum.FOREX,
+    telegram_link_token=token,
   )
   previous = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+    id=uuid.uuid4(),
+    account_id="acc-1",
+    market_type=MarketTypeEnum.FOREX,
+    telegram_user_id=555,
   )
-  session = FakeSession(results=[[target], [previous]])
+  existing_session = TelegramSession(
+    telegram_user_id=555, active_account_id=previous.id
+  )
+  # 1st execute: lookup by token → target; 2nd: session lookup → existing, active
+  session = FakeSession(results=[[target], [existing_session]])
   _patch_session(monkeypatch, session)
 
   result = await SqlAlchemyAccountRepository().link_telegram(token, 555)
   assert result is target
   assert target.telegram_user_id == 555
-  assert previous.telegram_user_id is None  # latest claim wins
+  assert previous.telegram_user_id == 555  # untouched
+  assert existing_session.active_account_id == previous.id  # active unchanged
+
+
+async def test_link_telegram_activates_when_session_has_no_active(monkeypatch):
+  token = uuid.uuid4()
+  account = Account(
+    id=uuid.uuid4(),
+    account_id="acc-1",
+    market_type=MarketTypeEnum.FOREX,
+    telegram_link_token=token,
+  )
+  # Session row exists (e.g. after a full unlink) but has no active account.
+  empty_session = TelegramSession(telegram_user_id=555, active_account_id=None)
+  session = FakeSession(results=[[account], [empty_session]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().link_telegram(token, 555)
+  assert empty_session.active_account_id == account.id
 
 
 async def test_link_telegram_invalid_token_returns_none(monkeypatch):
@@ -584,20 +670,130 @@ async def test_link_telegram_invalid_token_returns_none(monkeypatch):
   assert result is None
 
 
-async def test_unlink_telegram(monkeypatch):
+# ── AccountRepository.list_by_telegram_user_id / get_active_account /
+#    set_active_account ────────────────────────────────────────────
+
+
+async def test_list_by_telegram_user_id_returns_rows(monkeypatch):
+  a1 = Account(account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555)
+  a2 = Account(account_id="acc-2", market_type=MarketTypeEnum.CRYPTO, telegram_user_id=555)
+  session = FakeSession(results=[[a1, a2]])
+  _patch_session(monkeypatch, session)
+
+  rows = await SqlAlchemyAccountRepository().list_by_telegram_user_id(555)
+  assert rows == [a1, a2]
+
+
+async def test_get_active_account_fast_path(monkeypatch):
   account = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
   )
-  session = FakeSession(results=[[account]])
+  tg_session = TelegramSession(telegram_user_id=555, active_account_id=account.id)
+  session = FakeSession(results=[[tg_session], [account]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_active_account(555)
+  assert result is account
+
+
+async def test_get_active_account_falls_back_and_self_heals(monkeypatch):
+  # No session row at all → fall back to the first linked account (its own
+  # list_by_telegram_user_id call) and self-heal a new session row.
+  account = Account(
+    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+  )
+  session = FakeSession(results=[[], [account], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_active_account(555)
+  assert result is account
+  healed = next(o for o in session.added if isinstance(o, TelegramSession))
+  assert healed.active_account_id == account.id
+
+
+async def test_get_active_account_returns_none_when_unlinked(monkeypatch):
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_active_account(555)
+  assert result is None
+  assert session.added == []
+
+
+async def test_set_active_account_owned(monkeypatch):
+  account = Account(
+    id=uuid.uuid4(), account_id="acc-2", market_type=MarketTypeEnum.CRYPTO, telegram_user_id=555
+  )
+  tg_session = TelegramSession(telegram_user_id=555, active_account_id=uuid.uuid4())
+  session = FakeSession(results=[[account], [tg_session]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().set_active_account(555, account.id)
+  assert result is account
+  assert tg_session.active_account_id == account.id
+
+
+async def test_set_active_account_not_owned_returns_none(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().set_active_account(555, uuid.uuid4())
+  assert result is None
+
+
+# ── AccountRepository.unlink_telegram ───────────────────────────────
+
+
+async def test_unlink_telegram_clears_active_and_reassigns(monkeypatch):
+  active = Account(
+    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+  )
+  remaining = Account(
+    id=uuid.uuid4(), account_id="acc-2", market_type=MarketTypeEnum.CRYPTO, telegram_user_id=555
+  )
+  tg_session_a = TelegramSession(telegram_user_id=555, active_account_id=active.id)
+  tg_session_b = TelegramSession(telegram_user_id=555, active_account_id=active.id)
+  session = FakeSession(
+    results=[
+      [tg_session_a],  # get_active_account: session lookup
+      [active],  # get_active_account: ownership-validated account lookup
+      [active],  # unlink: re-fetch account by id
+      [remaining],  # unlink: remaining linked accounts
+      [tg_session_b],  # unlink: session lookup to re-point active
+    ]
+  )
   _patch_session(monkeypatch, session)
 
   ok = await SqlAlchemyAccountRepository().unlink_telegram(555)
   assert ok is True
-  assert account.telegram_user_id is None
+  assert active.telegram_user_id is None
+  assert tg_session_b.active_account_id == remaining.id
+
+
+async def test_unlink_telegram_clears_session_when_last_account(monkeypatch):
+  active = Account(
+    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+  )
+  tg_session_a = TelegramSession(telegram_user_id=555, active_account_id=active.id)
+  tg_session_b = TelegramSession(telegram_user_id=555, active_account_id=active.id)
+  session = FakeSession(
+    results=[
+      [tg_session_a],
+      [active],
+      [active],
+      [],  # no remaining accounts
+      [tg_session_b],
+    ]
+  )
+  _patch_session(monkeypatch, session)
+
+  ok = await SqlAlchemyAccountRepository().unlink_telegram(555)
+  assert ok is True
+  assert tg_session_b.active_account_id is None
 
 
 async def test_unlink_telegram_no_account(monkeypatch):
-  session = FakeSession(results=[[]])
+  session = FakeSession(results=[[], []])  # get_active_account finds nothing
   _patch_session(monkeypatch, session)
   assert await SqlAlchemyAccountRepository().unlink_telegram(555) is False
 

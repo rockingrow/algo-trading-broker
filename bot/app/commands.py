@@ -26,12 +26,15 @@ USER_COMMANDS = [
   BotCommand(command="prevent", description="Block new orders"),
   BotCommand(command="allow", description="Allow new orders"),
   BotCommand(command="status", description="Account info"),
-  BotCommand(command="unlink", description="Unlink account"),
+  BotCommand(command="link", description="Add another account"),
+  BotCommand(command="switch", description="Change active account"),
+  BotCommand(command="unlink", description="Unlink active account"),
   BotCommand(command="help", description="Help"),
 ]
 
 ADMIN_EXTRA_COMMANDS = [
   BotCommand(command="accounts", description="[ADMIN] Account list"),
+  BotCommand(command="newaccount", description="[ADMIN] Register a new account"),
   BotCommand(command="atrades", description="[ADMIN] Trades for an account"),
   BotCommand(command="aflat", description="[ADMIN] FLAT system-wide / account"),
   BotCommand(command="rotate", description="[ADMIN] Rotate link token"),

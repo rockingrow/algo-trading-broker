@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.config import settings
-from app.filters.admin import IsAdmin
+from app.filters.is_admin import IsAdmin
 
 
 class FakeUser:

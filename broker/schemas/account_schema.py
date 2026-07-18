@@ -21,6 +21,15 @@ class MarketTypeEnum(str, Enum):
   CRYPTO = "CRYPTO"
 
 
+# Gateways an admin may register an account under, per market. The broker is
+# the source of truth for this mapping — it's mirrored (for keyboard display
+# only) in the bot's app/constants.py, which never validates against it.
+GATEWAYS_BY_MARKET: dict[MarketTypeEnum, list[str]] = {
+  MarketTypeEnum.FOREX: ["MT5"],
+  MarketTypeEnum.CRYPTO: ["BINANCE"],
+}
+
+
 def compose_worker_id(market_type: str, gateway: str, account_id: str) -> str:
   """Build the ``<market>-<gateway>-<account_id>`` worker addressing id used on
   the SYSTEM subject from an account's parts (e.g. ``CRYPTO-BINANCE-7654321``).

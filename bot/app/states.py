@@ -11,3 +11,10 @@ class LinkAccount(StatesGroup):
   """Onboarding flow: waiting for the user to send their account UUID."""
 
   waiting_for_token = State()
+
+
+class CreateAccount(StatesGroup):
+  """Admin flow: market + gateway picked via inline keyboard, then the
+  account_id suffix is typed as free text."""
+
+  waiting_for_account_id = State()

@@ -108,6 +108,20 @@ class FakeAccountRepo:
   async def get_by_market(self, market):
     return [a for a in self.accounts if a.market_type == market]
 
+  async def create_account(self, account_id, market, gateway, account_name=None):
+    # account_id alone isn't unique — only the full (market, gateway, account_id)
+    # triple is (see uq_accounts_market_gateway_account_id).
+    if any(
+      a.account_id == account_id and a.market_type == market and a.gateway == gateway
+      for a in self.accounts
+    ):
+      return None
+    account = _make_account(
+      account_id=account_id, account_name=account_name, market_type=market, gateway=gateway
+    )
+    self.accounts.append(account)
+    return account
+
 
 class FakeTradeRepo:
   def __init__(self, trades, total):
@@ -294,6 +308,65 @@ def test_list_accounts(ctx):
   assert len(data) == 1
   assert data[0]["account_id"] == "acc-1"
   assert data[0]["market_type"] == "FOREX"
+
+
+# ── Create account (admin) ─────────────────────────────────────────
+
+
+def test_create_account_success(ctx):
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market_type": "CRYPTO", "gateway": "BINANCE", "account_id": "7654321"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 201
+  body = resp.json()
+  assert body["account_id"] == "7654321"
+  assert body["market_type"] == "CRYPTO"
+  assert body["gateway"] == "BINANCE"
+
+
+def test_create_account_rejects_invalid_gateway_for_market(ctx):
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market_type": "FOREX", "gateway": "BINANCE", "account_id": "7654321"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_create_account_conflict_on_duplicate_id(ctx):
+  # Seed account "acc-1" already has market/gateway set — same triple posted
+  # again should conflict.
+  ctx["account_repo"].accounts[0].gateway = "MT5"
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market_type": "FOREX", "gateway": "MT5", "account_id": "acc-1"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 409
+
+
+def test_create_account_allows_same_account_id_on_different_gateway(ctx):
+  # "acc-1" already exists as a FOREX/MT5 account; the same bare account_id
+  # under a different market/gateway is a distinct account and must succeed.
+  ctx["account_repo"].accounts[0].gateway = "MT5"
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market_type": "CRYPTO", "gateway": "BINANCE", "account_id": "acc-1"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 201
+  assert resp.json()["gateway"] == "BINANCE"
+
+
+def test_create_account_rejects_colon_in_account_id(ctx):
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market_type": "FOREX", "gateway": "MT5", "account_id": "bad:id"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
 
 
 # ── Trades ──────────────────────────────────────────────────────────
@@ -655,6 +728,39 @@ def test_flat_scoped(ctx):
   published = ctx["publisher"].admin_signals[0]
   assert published["strategy"] == "s"
   assert published["symbol"] == "XAUUSD"
+
+
+def test_flat_scoped_by_market_and_gateway(ctx):
+  resp = ctx["client"].post(
+    "/admin/flat",
+    json={"account_id": "acc-1", "market_type": "CRYPTO", "gateway": "BINANCE"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  body = resp.json()
+  assert "market=CRYPTO" in body["scope"]
+  assert "gateway=BINANCE" in body["scope"]
+  published = ctx["publisher"].admin_signals[0]
+  assert published["market_type"] == MarketTypeEnum.CRYPTO
+  assert published["gateway"] == "BINANCE"
+
+
+def test_flat_rejects_account_id_without_market_and_gateway(ctx):
+  resp = ctx["client"].post(
+    "/admin/flat",
+    json={"account_id": "acc-1"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+  assert ctx["publisher"].admin_signals == []
+
+
+def test_flat_rejects_account_id_with_only_gateway(ctx):
+  resp = ctx["client"].post(
+    "/admin/flat",
+    json={"account_id": "acc-1", "gateway": "MT5"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
 
 
 # ── Auth enforcement (ensure_api_key NOT overridden) ───────────────

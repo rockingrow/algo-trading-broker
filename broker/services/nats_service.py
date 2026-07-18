@@ -606,6 +606,8 @@ class NatsPublisher:
       signal.strategy,
       signal.symbol,
       signal.account_id,
+      signal.market_type,
+      signal.gateway,
     )
 
   async def publish_system_signal(

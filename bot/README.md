@@ -35,6 +35,7 @@ gets an extended chat-scoped menu.
 | Command | Action | Broker endpoint |
 | ------- | ------ | --------------- |
 | `/accounts` | List accounts + link status + link token (spoiler) | `GET /v1/accounts` |
+| `/newaccount` | Register an account (pick market → gateway → type id) | `POST /admin/accounts` |
 | `/atrades [account_id]` | Trades of any account (picker if no arg) | `GET /v1/{account_id}/trades` |
 | `/aflat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |
 | `/rotate [account_id]` | Rotate a link token (revokes old, confirm) | `POST /admin/accounts/{id}/link-token/rotate` |
@@ -56,7 +57,7 @@ app/
 ├── helpers.py         # safe_edit_text (ignores "message is not modified")
 ├── logger.py          # console + daily rolling file
 ├── states.py          # FSM: LinkAccount.waiting_for_token
-├── filters/           # admin.py — IsAdmin router gate
+├── filters/           # is_admin.py — IsAdmin router gate
 ├── services/          # broker_client.py — httpx client (enduser + admin calls)
 ├── middlewares/       # deps.py (DI), auth.py (require-linked guard)
 ├── handlers/          # start, link, trades, commands, account, admin

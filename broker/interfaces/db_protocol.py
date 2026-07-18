@@ -48,11 +48,25 @@ class AccountRepository(Protocol):
     self, account_id: str, market: MarketTypeEnum, gateway: str
   ) -> None: ...
 
+  async def create_account(
+    self,
+    account_id: str,
+    market: MarketTypeEnum,
+    gateway: str,
+    account_name: str | None = None,
+  ) -> Account | None: ...
+
   async def get_all(self) -> list[Account]: ...
 
   async def get_by_market(self, market: MarketTypeEnum) -> list[Account]: ...
 
-  async def get_by_telegram_user_id(self, telegram_user_id: int) -> Account | None: ...
+  async def list_by_telegram_user_id(self, telegram_user_id: int) -> list[Account]: ...
+
+  async def get_active_account(self, telegram_user_id: int) -> Account | None: ...
+
+  async def set_active_account(
+    self, telegram_user_id: int, account_id: uuid.UUID
+  ) -> Account | None: ...
 
   async def link_telegram(
     self, token: uuid.UUID, telegram_user_id: int
