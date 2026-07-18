@@ -22,9 +22,10 @@ class BotSettings(BaseSettings):
     extra="ignore",
   )
 
-  # Telegram — shared with the broker's notification bot. Only this service
-  # polls (getUpdates); the broker only sends, so there is no 409 conflict.
-  TELEGRAM_BOT_TOKEN: str
+  # Telegram — this bot is a separate BotFather bot from the broker's
+  # notification bot (TELEGRAM_BOT_TOKEN in broker/settings.py), so it can
+  # poll (getUpdates) without any risk of a 409 conflict with broker sends.
+  BOT_TELEGRAM_TOKEN: str
 
   # Comma-separated Telegram user IDs granted admin commands (e.g. "123,456").
   TELEGRAM_ADMIN_IDS: str = ""

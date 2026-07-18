@@ -69,7 +69,7 @@ app/
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
-| `TELEGRAM_BOT_TOKEN` | — | Bot token (shared with broker notifications). |
+| `BOT_TELEGRAM_TOKEN` | — | Bot token for this bot (separate BotFather bot from the broker's notification bot). |
 | `TELEGRAM_ADMIN_IDS` | `""` | Comma-separated admin Telegram IDs (e.g. `123,456`). |
 | `BROKER_API_KEY` | — | `X-API-KEY` used to call the broker. |
 | `BROKER_API_PREFIX` | `""` | Secret URL segment, if the broker uses one. |
@@ -93,5 +93,6 @@ uv run python -m app
 uv run pytest
 ```
 
-Uses **long-polling** (no inbound port). Only this service polls Telegram, so
-sharing `TELEGRAM_BOT_TOKEN` with the broker's send-only notifier is safe.
+Uses **long-polling** (no inbound port). This bot has its own BotFather token
+(`BOT_TELEGRAM_TOKEN`), separate from the broker's send-only notifier
+(`TELEGRAM_BOT_TOKEN`), so the two never conflict.

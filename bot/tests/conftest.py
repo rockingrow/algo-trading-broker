@@ -3,7 +3,7 @@
 
 import os
 
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123:test-token")
+os.environ.setdefault("BOT_TELEGRAM_TOKEN", "123:test-token")
 os.environ.setdefault("BROKER_API_KEY", "test-api-key")
 os.environ.setdefault("TELEGRAM_ADMIN_IDS", "")
 os.environ.setdefault("BOT_LOG_LEVEL", "WARNING")

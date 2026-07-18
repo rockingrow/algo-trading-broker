@@ -28,7 +28,7 @@ log = get_logger("bot")
 
 async def main() -> None:
   bot = Bot(
-    token=settings.TELEGRAM_BOT_TOKEN,
+    token=settings.BOT_TELEGRAM_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
   )
   broker_kwargs = dict(
