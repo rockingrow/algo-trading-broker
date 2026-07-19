@@ -11,7 +11,11 @@ from broker.constants import (
   SILENT_SIGNAL,
 )
 from broker.helpers import emoji_constants as em
-from broker.helpers.timezone_helper import format_offset_value, format_utc_label
+from broker.helpers.timezone_helper import (
+  format_offset_value,
+  format_utc_label,
+  parse_offset_hours,
+)
 from broker.providers import (
   get_account_repository,
   get_admin_notifier,
@@ -24,12 +28,19 @@ from broker.interfaces import (
   SettingRepository,
   SignalPublisher,
 )
-from broker.schemas.account_schema import MarketTypeEnum, compose_worker_id
+from broker.schemas.account_schema import (
+  AccountResponse,
+  GATEWAYS_BY_MARKET,
+  MarketTypeEnum,
+  compose_worker_id,
+)
 from broker.schemas.admin_schema import (
   AdminResponse,
+  CreateAccountRequest,
   CryptoAllowedSymbolRequest,
   CryptoMaxLeverageRequest,
   NotificationTimezoneRequest,
+  RotateTokenResponse,
   SettingToggleResponse,
   SettingValueResponse,
   FlatRequest,
@@ -115,7 +126,7 @@ async def _push_crypto_leverage_init(
       continue
 
     worker_id = compose_worker_id(
-      account.market_type, account.gateway, account.account_id
+      account.market, account.gateway, account.account_id
     )
     try:
       await publisher.publish_system_signal(
@@ -130,6 +141,25 @@ async def _push_crypto_leverage_init(
 
 def get_admin_router() -> APIRouter:
   router = APIRouter(dependencies=[Depends(ensure_api_key)])
+
+  @router.get(
+    "/settings",
+    tags=["settings"],
+    summary="Read broker toggle settings",
+    response_model=list[SettingToggleResponse],
+    responses=AUTH_RESPONSES,
+  )
+  async def get_settings(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> list[SettingToggleResponse]:
+    """Return the current state of the runtime broker toggles (unset = '0')."""
+    keys = (SIGNAL_BLOCKED, SILENT_SIGNAL, NOTIFICATION_INCLUDE_SIGNAL_RAW)
+    results: list[SettingToggleResponse] = []
+    for key in keys:
+      value = await setting_repo.get(key) or "0"
+      state_label = "ENABLED" if value == "1" else "DISABLED"
+      results.append(SettingToggleResponse(setting=key, value=value, state=state_label))
+    return results
 
   @router.post(
     "/settings/block-signal",
@@ -325,6 +355,23 @@ def get_admin_router() -> APIRouter:
 
     return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
 
+  @router.get(
+    "/settings/notification-timezone",
+    tags=["settings"],
+    summary="Get the notification display timezone",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_notification_timezone(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Current NOTIFICATION_TIMEZONE_KEY UTC offset (in hours), falling back
+    to UTC+7 when unset — the same default `format_notification_time` uses."""
+    hours = parse_offset_hours(await setting_repo.get(NOTIFICATION_TIMEZONE_KEY))
+    return SettingValueResponse(
+      setting=NOTIFICATION_TIMEZONE_KEY, value=format_offset_value(hours)
+    )
+
   @router.post(
     "/settings/notification-timezone",
     tags=["settings"],
@@ -364,10 +411,20 @@ def get_admin_router() -> APIRouter:
     tags=["trading"],
     summary="Flat positions",
     description=(
-      "Publish a FLAT directive. Pass strategy, symbol, and/or account_id in the request body "
-      "to scope the flat. Omit all fields (or send an empty body) to flat everything."
+      "Publish a FLAT directive. Pass strategy and/or symbol to narrow scope. To scope to one "
+      "account, account_id, market, and gateway are all REQUIRED together (422 if only "
+      "account_id is given) — account_id alone no longer identifies a single account. Omit "
+      "all three (strategy/symbol still allowed) to flat everything.\n\n"
+      "KNOWN LIMITATION: broadcast on the shared ADMIN subject to every worker; each worker "
+      "filters for itself client-side (worker code, outside this repo). Broker now always "
+      "sends the full (account_id, market, gateway) triple when scoped, but a worker "
+      "that still matches on account_id alone can act on a FLAT meant for a different "
+      "account sharing that id — the worker side must be updated to check all three."
     ),
-    responses={**AUTH_RESPONSES},
+    responses={
+      **AUTH_RESPONSES,
+      422: {"description": "account_id given without market and gateway."},
+    },
   )
   async def flat_positions(
     body: FlatRequest,
@@ -380,12 +437,16 @@ def get_admin_router() -> APIRouter:
       strategy=body.strategy,
       symbol=body.symbol,
       account_id=body.account_id,
+      market=body.market,
+      gateway=body.gateway,
     )
 
     scope_parts = [
       f"strategy={body.strategy}" if body.strategy else None,
       f"symbol={body.symbol}" if body.symbol else None,
       f"account={body.account_id}" if body.account_id else None,
+      f"market={body.market.value}" if body.market else None,
+      f"gateway={body.gateway}" if body.gateway else None,
     ]
     scope = ", ".join(p for p in scope_parts if p) or "ALL"
     log.info("FLAT published scope=%s", scope)
@@ -395,5 +456,78 @@ def get_admin_router() -> APIRouter:
     )
 
     return AdminResponse(action="FLAT", scope=scope)
+
+  @router.post(
+    "/accounts",
+    tags=["accounts"],
+    summary="Manually register a trading account",
+    description=(
+      "Pre-register an account (market, gateway, account_id) before it "
+      "has traded or its worker has connected, so an admin can hand a link "
+      "token to the end-user right away."
+    ),
+    status_code=status.HTTP_201_CREATED,
+    responses={
+      **AUTH_RESPONSES,
+      409: {"description": "account_id already exists."},
+      422: {"description": "gateway is not valid for market."},
+    },
+  )
+  async def create_account(
+    body: CreateAccountRequest,
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> AccountResponse:
+    valid_gateways = GATEWAYS_BY_MARKET.get(body.market, [])
+    if body.gateway not in valid_gateways:
+      raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"gateway must be one of {valid_gateways} for market={body.market.value}",
+      )
+
+    account = await account_repo.create_account(
+      body.account_id, body.market, body.gateway, body.account_name
+    )
+    if account is None:
+      raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="account_id already exists",
+      )
+    log.info("Account manually created account_id=%s", body.account_id)
+    resp = AccountResponse.model_validate(account)
+    # create_account also mints the account's first link token; surface it so
+    # the admin can hand it out without a second round trip.
+    summary = (await account_repo.get_link_summaries([account.id])).get(account.id)
+    if summary is not None:
+      resp.link_token = summary.link_token
+      resp.linked_user_ids = summary.linked_user_ids
+    return resp
+
+  @router.post(
+    "/accounts/{account_id}/link-token/rotate",
+    tags=["accounts"],
+    summary="Rotate an account's bot link token",
+    description=(
+      "Issue a fresh link token for the account, revoking every token that "
+      "was still valid. Hand the new token to the end-user so they can link "
+      "the bot. Already-linked users keep their access — a token only grants "
+      "the initial claim."
+    ),
+    responses={
+      **AUTH_RESPONSES,
+      404: {"description": "Account not found."},
+    },
+  )
+  async def rotate_link_token(
+    account_id: str,
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> RotateTokenResponse:
+    new_token = await account_repo.rotate_link_token(account_id)
+    if new_token is None:
+      raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Account not found",
+      )
+    log.info("Link token rotated for account_id=%s", account_id)
+    return RotateTokenResponse(account_id=account_id, link_token=new_token)
 
   return router

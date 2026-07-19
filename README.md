@@ -43,6 +43,16 @@ make run
 make dev
 ```
 
+### 6. (Optional) Run the Telegram Bot
+
+```bash
+docker compose up -d bot
+```
+
+The bot is a separate service under [`bot/`](bot/) with its own BotFather token
+and uv project. It reads the same root `.env`. See
+[`bot/README.md`](bot/README.md) for setup and local development.
+
 ---
 
 ## ✨ Features
@@ -105,14 +115,15 @@ graph TD
 ```text
 algo-trading-broker/
 ├── broker/
-│   ├── api/             # FastAPI routers: api.py (v1), admin.py, webhook.py
+│   ├── api/             # FastAPI routers: api.py (v1), admin.py, telegram.py, webhook.py
 │   ├── db/              # SQLAlchemy models, async engine, repository
 │   ├── domain/          # Domain policies (e.g. trade-status state machine)
 │   ├── helpers/         # Signal, timeframe, and message-formatting utilities
 │   ├── interfaces/      # Protocols for DI (DB, notifier, publisher)
 │   ├── schemas/         # Pydantic schemas (webhook, publisher, subscriber, trade, account, admin)
 │   ├── security/        # Auth guard (ensure_api_key — X-API-KEY)
-│   ├── services/        # nats_service, notification, signal_processing
+│   ├── services/        # nats_service, notification_service,
+│   │                    #   signal_processing_service (+ SignalWorker), signal_retry_job
 │   ├── app.py           # FastAPI application factory
 │   ├── main.py          # Entrypoint (uvicorn runner)
 │   ├── router.py        # Aggregates sub-routers under /v1, /admin, /secret
@@ -122,6 +133,9 @@ algo-trading-broker/
 │   ├── constants.py     # Broker setting keys
 │   ├── logger.py        # Logging configuration
 │   └── settings.py      # Pydantic settings loaded from .env
+├── bot/                 # Telegram bot service (aiogram v3) — see bot/README.md
+│   ├── app/             # handlers, services, middlewares, keyboards, presenters, utils
+│   └── tests/           # Bot pytest suite (own pyproject.toml / uv project)
 ├── alembic/             # Alembic migration environment and version scripts
 ├── bruno/               # Bruno API client collections
 ├── examples/            # Example webhook / NATS / worker JSON payloads
@@ -154,7 +168,7 @@ Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHOR
 
 ### `TRADE` events
 
-Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(account_id, ref_id)`, translating the worker's position status into a broker trade `status`:
+Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(market, gateway, account_id, ref_id)` — not `account_id` alone, since the same bare `account_id` can exist under a different market/gateway (see [`accounts` table](#accounts-table)) — translating the worker's position status into a broker trade `status`:
 
 | Worker position status | Broker trade `status` | Running? |
 | ---------------------- | --------------------- | -------- |
@@ -171,7 +185,7 @@ Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their lo
 The webhook endpoint is a fast enqueue-only path. Everything else runs from a background handler, with a retry loop that can re-try failed signals a bounded number of times.
 
 1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
-2. **`SignalWorker`** (`broker/services/signal_worker.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
+2. **`SignalWorker`** (`broker/services/signal_processing_service.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
 3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
 4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.SIGNAL_RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
 5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
@@ -276,7 +290,7 @@ Sent on the request's reply inbox when the worker used NATS request/reply, other
 
 The handshake pushes crypto config when a worker *connects*. To also update workers that are **already connected**, `POST /admin/settings/crypto-allowed-symbol` and `POST /admin/settings/crypto-max-leverage` send a `CRYPTO_LEVERAGE_INIT` on the shared `SYSTEM` subject right after persisting the change, so the new value applies immediately instead of waiting for the next reconnect (up to the ~30s settings cache).
 
-The broker looks up every **crypto account** in the `accounts` table and addresses one message per account to its `<market>-<gateway>-<account_id>` worker id — built from the account's `market_type`, `gateway`, and `account_id` — so each worker filters by its own id:
+The broker looks up every **crypto account** in the `accounts` table and addresses one message per account to its `<market>-<gateway>-<account_id>` worker id — built from the account's `market`, `gateway`, and `account_id` — so each worker filters by its own id:
 
 ```json
 {
@@ -294,35 +308,46 @@ Both `symbols` and `default_leverage` are read back from `BrokerSetting`, so whi
 
 ## ⚙️ Configuration (`.env`)
 
+Start from [`.env.example`](.env.example) (`cp .env.example .env`). One file
+configures **both** services — the broker reads it directly, and
+`docker-compose.yml` passes the same file to the `bot` container.
+
 ```env
 # ── Server ───────────────────────────────────────────
 BROKER_PUBLIC_URL=server_ip_or_domain
 
+# Secret URL prefix — all routes are mounted under /<BROKER_API_PREFIX>/
+# e.g. "abc123xyz" → /abc123xyz/v1/..., /abc123xyz/admin/..., etc.
+# Leave blank to use the default paths without a prefix.
+BROKER_API_PREFIX=
+
+# API key for authenticating requests to the broker API (X-API-KEY header).
+# The bot reuses this value to call the broker.
+BROKER_API_KEY=api_key
+
 # ── Webhook ──────────────────────────────────────────
 WEBHOOK_HOST=0.0.0.0
-WEBHOOK_PORT=80
+WEBHOOK_PORT=80            # docker-compose defaults this to 8080 instead
+
+# Seconds an idle keep-alive connection is held open. Must exceed the gap
+# between TradingView alerts: TradingView reuses pooled connections and
+# uvicorn's 5s default closes them first, so the alert fails with
+# "server closed the connection unexpectedly".
+WEBHOOK_KEEPALIVE_TIMEOUT=120
 
 # Optional HMAC secret — set the same value in TradingView alert header
 # X-Signature: <sha256-hex-of-body>
 # Leave blank to disable validation.
 WEBHOOK_SECRET=
 
-# Callback API key for authenticating requests to the broker API
-BROKER_API_KEY=api_key
-
-# Secret URL prefix — all routes are mounted under /<BROKER_API_PREFIX>/
-# e.g. set to "abc123xyz" → endpoints become /abc123xyz/v1/..., /abc123xyz/admin/..., etc.
-# Leave blank to use the default paths without a prefix.
-BROKER_API_PREFIX=
-
 # ── NATS ─────────────────────────────────────────────
 NATS_HOST=localhost        # overridden to "nats" inside Docker
 NATS_PORT=4222
-NATS_MONITOR_PORT=8222
-NATS_TOKEN=changeme       # shared secret; leave blank = no auth
+NATS_MONITOR_PORT=8222     # HTTP monitoring dashboard (compose only)
+NATS_TOKEN=changeme        # shared secret; leave blank = no auth
 
 # ── PostgreSQL ────────────────────────────────────────
-POSTGRES_HOST=localhost
+POSTGRES_HOST=localhost    # overridden to "postgres" inside Docker
 POSTGRES_PORT=5432
 POSTGRES_DB=algo_trading_broker
 POSTGRES_USER=algo_trading
@@ -335,7 +360,7 @@ LOG_LEVEL=INFO
 # Set to false in production to hide /docs, /redoc and /openapi.json.
 DOCS_ENABLED=false
 
-# ── Telegram (optional) ──────────────────────────────
+# ── Telegram notifier (broker → chat, send-only) ─────
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
@@ -346,7 +371,32 @@ TELEGRAM_LOG_ERRORS_ENABLED=false
 TELEGRAM_LOG_DEDUP_WINDOW=60   # seconds — suppress identical messages
 TELEGRAM_LOG_BOT_TOKEN=        # dedicated log bot (falls back to TELEGRAM_BOT_TOKEN)
 TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_CHAT_ID)
+
+# ── Telegram bot service (interactive, ./bot) ────────
+# A *second* BotFather bot, separate from TELEGRAM_BOT_TOKEN above.
+# Full reference: bot/README.md → Configuration
+BOT_TELEGRAM_TOKEN=
+TELEGRAM_ADMIN_IDS=            # comma-separated admin user ids, e.g. 123,456
+BOT_BROKER_BASE_URL=http://localhost:8080   # → http://broker:8080 in Docker
+BOT_LOG_LEVEL=INFO
+BOT_REQUEST_TIMEOUT=10.0
+BOT_VIEW_TRADES_PER_PAGE=50
 ```
+
+### Not in `.env`
+
+A few knobs live in [`broker/settings.py`](broker/settings.py) only, because they
+change behaviour rather than deployment topology. Override them via the
+environment if you really need to:
+
+| Setting | Default | Effect |
+| ------- | ------- | ------ |
+| `SIGNAL_MAX_ATTEMPTS` | `3` | Total fan-out attempts before a signal is marked `FAILED` |
+| `SIGNAL_RETRY_INTERVAL_SECONDS` | `15` | Retry-job tick, and the minimum gap between two attempts on one row |
+| `JETSTREAM_SIGNAL_CONSUMER` | `broker_signal_handler` | Durable consumer name on the `SIGNALS` stream |
+| `JETSTREAM_FETCH_BATCH` | `10` | Envelopes pulled per fetch |
+| `JETSTREAM_FETCH_TIMEOUT_SECONDS` | `1.0` | Pull-fetch timeout |
+| `DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS` | `7.0` | Fallback offset when the `notification_timezone` broker setting is unset |
 
 ---
 
@@ -365,6 +415,7 @@ TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_CHAT
 | `make stop` | Stop Docker stack |
 | `make logs` | Tail broker container logs (last 500 lines) |
 | `make logging` | Follow broker container logs live |
+| `make simulate-nats` | Replay an example NATS payload against the running stack |
 | `make format` | Format code with Ruff |
 | `make lint` | Run Ruff check |
 | `make check` | Alias for `make lint` |
@@ -432,6 +483,7 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `GET /v1/health` | None |
 | `POST /secret/webhook` | In-payload `token` (+ optional HMAC) |
 | `GET /v1/accounts` | `X-API-KEY` |
+| `POST /admin/accounts` | `X-API-KEY` |
 | `GET /v1/{account_id}/trades` | `X-API-KEY` |
 | `POST /admin/settings/block-signal` | `X-API-KEY` |
 | `POST /admin/settings/silent-signal` | `X-API-KEY` |
@@ -439,7 +491,18 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
 | `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
 | `POST /admin/settings/notification-timezone` | `X-API-KEY` |
+| `GET /admin/settings/notification-timezone` | `X-API-KEY` |
+| `GET /admin/settings` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
+| `POST /admin/accounts/{account_id}/link-token/rotate` | `X-API-KEY` |
+| `POST /v1/telegram/link` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/accounts` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/active-account` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/trades` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/commands/flat` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/commands/prevent` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/unlink` | `X-API-KEY` |
 
 ---
 
@@ -521,22 +584,55 @@ Returns all trading accounts ordered by most recent activity. Requires the `X-AP
     "account_id": "12345678",
     "account_name": "Demo Account",
     "account_balance": 10000.0,
-    "market_type": "FOREX",
+    "market": "FOREX",
     "gateway": "MT5",
     "last_activity_at": "2024-03-20T10:05:00Z",
+    "link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
+    "linked_user_ids": ["123456789"],
     "createdAt": "2024-03-01T00:00:00Z",
     "updatedAt": "2024-03-20T10:05:00Z"
   }
 ]
 ```
 
-Accounts are automatically created or updated each time a `TRADE` event arrives from a worker. `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market_type` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
+`link_token` is the account's currently valid invite secret (joined in from
+`account_link_tokens`) — hand it to a user so they can link the bot.
+`linked_user_ids` lists every bot user already linked to the account (from
+`account_bot_links`); it is empty for an unclaimed account, and can hold more
+than one id since an account may be managed by several people.
+
+Accounts are automatically created or updated each time a `TRADE` event arrives from a worker (or manually via `POST /admin/accounts`, below). `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
+
+`account_id` alone is **not** unique — the same bare id can exist under a different `market`/`gateway` pair (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). The unique key is the full `(market, gateway, account_id)` triple.
+
+---
+
+### POST `/admin/accounts`
+
+Manually registers an account — `market`, `gateway`, and an `account_id` chosen by the admin — before it has ever traded or its worker has connected, so a link token can be handed to the end-user right away. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "market": "CRYPTO",
+  "gateway": "BINANCE",
+  "account_id": "7654321",
+  "account_name": "Main Crypto"
+}
+```
+
+`gateway` must be valid for `market` (currently `FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or the request is rejected with `422`. `account_id` may not contain `:` or whitespace (it's embedded verbatim in the Telegram bot's callback data) and must be at most 50 characters. Returns `409` if the `(market, gateway, account_id)` triple already exists — reusing the same `account_id` under a *different* gateway is allowed and creates a distinct account.
+
+**Response** (`201`): the created account, shaped like a row in [`GET /v1/accounts`](#get-v1accounts) — including a freshly generated `link_token`.
 
 ---
 
 ### GET `/v1/{account_id}/trades`
 
 Returns a paginated list of trades for the given account. Requires the `X-API-KEY` header.
+
+> **Note:** filters by bare `account_id` only. If that id has been reused across gateways (see above), this can match trades from more than one account — pass a `account_id` you know is unambiguous, or avoid reusing ids across gateways.
 
 **Query Parameters:**
 
@@ -660,6 +756,23 @@ Sets the `notification_timezone` broker setting: the UTC offset (in hours) appli
 
 ---
 
+### GET `/admin/settings/notification-timezone`
+
+Reads the current `notification_timezone` offset. Requires the `X-API-KEY` header.
+
+**Response:**
+
+```json
+{
+  "setting": "notification_timezone",
+  "value": "7"
+}
+```
+
+Returns the default `"7"` when the setting is unset or holds an unparseable value, so the caller always gets the offset actually in effect. This is what lets the [Telegram bot](#-telegram-bot) render times in the same zone as broker-sent notifications — the bot talks only to the HTTP API and never reads `broker_settings` itself.
+
+---
+
 ### POST `/admin/flat`
 
 Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
@@ -670,11 +783,97 @@ Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subje
 {
   "strategy": "wt_cross_v1",
   "symbol": "XAUUSD",
-  "account_id": "MT5-12345678"
+  "account_id": "MT5-12345678",
+  "market": "FOREX",
+  "gateway": "MT5"
 }
 ```
 
 Omit all fields (or send an empty body `{}`) to flat every open position across all workers.
+
+`market`/`gateway` optionally narrow `account_id` further and are forwarded onto the broadcast `AdminSignal`. This is broadcast on the shared `ADMIN` subject to **every** connected worker; each worker filters for itself client-side (worker-side code, outside this repo). Since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), pass `market`/`gateway` when scoping to an account whose id might collide with one on another gateway — but this only helps once the worker side is updated to check them too. A worker that still matches on `account_id` alone can act on a FLAT meant for a different account that happens to share that id.
+
+---
+
+## 🤖 Telegram Bot
+
+An interactive bot lives in [`bot/`](bot/) (built with **aiogram v3**), serving
+**two roles** from one process — endusers and admins. It is a **thin HTTP
+client** of the broker — it never touches PostgreSQL or NATS directly, calling
+broker endpoints with the broker `X-API-KEY`.
+
+> 📖 **Full documentation — commands, rendering, architecture, configuration and
+> local development — lives in [`bot/README.md`](bot/README.md).** This section
+> only covers what the *broker* side needs to know: the data model backing the
+> bot and the endpoints it calls.
+
+Command menus are role-aware (Telegram command **scopes**) and re-initialised on
+every startup: endusers get the default menu; each id in `TELEGRAM_ADMIN_IDS`
+gets an extended admin menu (`/accounts`, `/newaccount`, `/atrades`, `/aflat`,
+`/rotate`, `/settings`).
+
+**Onboarding / auth flow**
+
+1. Every account has at least one link token (UUID) in `account_link_tokens`. An
+   admin reads it as `link_token` from `GET /v1/accounts` (or rotates it via
+   `POST /admin/accounts/{account_id}/link-token/rotate`) and hands it to the user.
+2. The user sends `/start` to the bot and pastes the token. The bot calls
+   `POST /v1/telegram/link`, which records an `account_bot_links` row joining
+   their Telegram id to the account.
+3. Linked users can then query trades (`/trades`) and issue control commands.
+
+**Many-to-many: accounts ↔ bot users**
+
+`account_bot_links` is a join table, so both directions are open:
+
+- One user may link **several** accounts — typically one per market/gateway
+  pair (e.g. an MT5 forex account and a Binance crypto account).
+- One account may be linked by **several** users — e.g. an owner and an
+  assistant. There is no role distinction yet: every linked user has the same
+  rights over the account.
+
+Linking never removes an existing link in either direction, and `/unlink` only
+drops the caller's own.
+
+**Active account**
+
+For each user, exactly one of their linked accounts is **active** at a time, and
+every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
+`/allow`, `/unlink`) acts on whichever one that is.
+
+- `/link` — add another account (paste a second token). The first account
+  linked becomes active automatically; adding more does not change the
+  active one.
+- `/myaccounts` — list the linked accounts read-only, without the picker.
+- `/switch` — the same list, paired with one button per account; tap one to
+  activate it.
+
+The selection lives in the broker's `bot_sessions` table, not in bot memory, so
+it survives bot restarts. If it ever points at an account the user no longer
+holds a link to, the broker falls back to their most recently active account and
+repairs the row.
+
+**Control commands** publish `ADMIN`-subject directives via the broker:
+
+| Command | Admin action | Notes |
+| ------- | ------------ | ----- |
+| `/flat` | `FLAT` | Close positions for the **active** account. |
+| `/prevent` | `BLOCK_ENTRIES` | Block new entries (worker must honor it). |
+| `/allow` | `ALLOW_ENTRIES` | Re-enable new entries. |
+
+> `BLOCK_ENTRIES` / `ALLOW_ENTRIES` are scoped by `account_id` in the `AdminSignal`
+> payload. Enforcement is the **worker's** responsibility — worker code lives
+> outside this repo, so the bot/broker only publish the directive.
+
+**Presentation** — list commands reply with monospace tables, and every
+timestamp is rendered in the `notification_timezone` broker setting (read over
+HTTP from `GET /admin/settings/notification-timezone`, since the bot has no DB
+access, falling back to UTC+7). Details in
+[`bot/README.md` → Rendering](bot/README.md#rendering).
+
+Run it with the stack: `docker compose up -d bot`. See
+[`bot/README.md`](bot/README.md) for the full command reference, configuration
+and local development.
 
 ---
 
@@ -711,6 +910,8 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | ----------------------- | ------------ | ------------------------------------------ |
 | `id` | UUID (PK) | Unique record identifier |
 | `account_id` | String(50) | Worker's broker account ID |
+| `market` | Enum (nullable) | `FOREX` or `CRYPTO`, copied from the owning `accounts` row |
+| `gateway` | String(50) (nullable) | Exchange the account trades through, copied from the owning `accounts` row |
 | `account_leverage` | Integer | Account leverage at time of trade |
 | `account_balance_init` | Numeric(20,8) | Account balance before trade (nullable) |
 | `account_balance` | Numeric(20,8) | Account balance after trade (nullable) |
@@ -736,14 +937,88 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | Column | Type | Description |
 | ------------------- | ------------ | ------------------------------------------ |
 | `id` | UUID (PK) | Unique record identifier |
-| `account_id` | String(50) | Worker's broker account ID (unique) |
+| `account_id` | String(50) | Worker's broker account ID (unique together with `market` + `gateway` — **not** unique alone; see note below) |
 | `account_name` | String(255) | Display name of the account (nullable) |
 | `account_balance` | Numeric(20,8) | Most recent account balance (nullable) |
-| `market_type` | Enum | `FOREX` or `CRYPTO` |
+| `market` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
+
+**Unique constraint:** `(market, gateway, account_id)` — a bare `account_id` can exist under more than one market/gateway (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). Endpoints and repository methods that take only `account_id` (`POST /admin/accounts/{account_id}/link-token/rotate`, `GET /v1/{account_id}/trades`, the `account_id` scope on `POST /admin/flat`) resolve/match on that bare id and can be ambiguous if it's reused across gateways — avoid deliberately reusing an `account_id` across gateways until those callers are updated to also pass `market`/`gateway`.
+
+> The `accounts` table deliberately carries **no** bot/chat-platform columns: an
+> account is a trading domain object. Who may drive it from a bot lives in
+> `account_bot_links`, the invite secrets in `account_link_tokens`, and the
+> per-user active selection in `bot_sessions`. All three are keyed by
+> `platform` (`BotPlatformTypeEnum`, currently only `TELEGRAM`) so adding
+> Discord/Slack is a new enum member, not a migration.
+
+### `account_bot_links` table
+
+Many-to-many join between accounts and chat-platform users: an account may be
+managed by several people, and a person may hold several accounts. There is no
+role/permission column — every linked user has the same rights.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `account_id` | UUID | FK → `accounts.id`, `ON DELETE CASCADE` |
+| `platform` | Enum | `TELEGRAM` |
+| `platform_user_id` | String(64) | The bot user's platform id. Stored as text, not a number: Telegram/Discord ids are numeric but Slack/Matrix ids are opaque strings |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+**Unique constraint:** `(platform, platform_user_id, account_id)`.
+
+### `account_link_tokens` table
+
+Invite secrets that let a bot user claim an account. Split out of `accounts` so
+an account can have several outstanding tokens (invite two people with two
+separately revocable secrets) and so revocation is a state change rather than an
+overwrite.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `account_id` | UUID | FK → `accounts.id`, `ON DELETE CASCADE` |
+| `token` | UUID | The bearer secret handed to the end-user (unique) |
+| `expires_at` | DateTime (Nullable) | `NULL` = never expires. Nothing issues a deadline today |
+| `revoked_at` | DateTime (Nullable) | Set by `/rotate` on every previously valid token |
+| `last_used_at` | DateTime (Nullable) | Audit only — a token stays reusable after a successful link |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+A token is **valid** when `revoked_at IS NULL AND (expires_at IS NULL OR
+expires_at > now())`. One is minted automatically whenever an account row is
+created. Rotating revokes the old ones but never evicts anyone already linked —
+a token only grants the initial claim.
+
+### `bot_sessions` table
+
+One row per `(platform, bot user)`, tracking which of their linked accounts is
+currently **active** — the one every single-account bot command (`/status`,
+`/trades`, `/flat`, `/prevent`, `/allow`, `/unlink`) acts on. Kept separate from
+`account_bot_links` because "may drive" and "is currently driving" are different
+facts: a user has N links but exactly one active selection.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `platform` | Enum | `TELEGRAM` |
+| `platform_user_id` | String(64) | The bot user this session belongs to |
+| `active_account_id` | UUID (Nullable) | FK → `accounts.id`, `ON DELETE SET NULL`. The active account, or `NULL` once the user has unlinked everything |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+**Unique constraint:** `(platform, platform_user_id)`.
+
+The row is created on first link and updated by
+`POST /v1/telegram/{telegram_user_id}/active-account` (the bot's `/switch`).
+If `active_account_id` ever points at an account the user no longer holds a link
+to, the broker falls back to their most recently active account and self-heals
+the row on the next read.
 
 ### `broker_settings` table
 
@@ -762,7 +1037,7 @@ Omit all fields (or send an empty body `{}`) to flat every open position across 
 | `notification_include_signal_raw` | `"0"` | `POST /admin/settings/include-signal-raw` | Append indicators/inputs to notifications |
 | `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
-| `notification_timezone` | `"7"` | `POST /admin/settings/notification-timezone` | UTC offset (hours) applied to the `Time:` line of Telegram notifications |
+| `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `SYSTEM.RETRY_SIGNALS` replay sent to a freshly-connected worker |
 
 ---
@@ -776,6 +1051,12 @@ uv run pytest
 ```
 
 The suite (`tests/`) covers the signal helper, the signal-processing service, and the trade-status policy. `pytest-asyncio` runs in `auto` mode, so async tests need no extra decorators.
+
+The bot is a **separate uv project** with its own suite — run it from `bot/`:
+
+```bash
+cd bot && uv run pytest
+```
 
 ### Manual API testing (Bruno)
 

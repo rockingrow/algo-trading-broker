@@ -1,0 +1,61 @@
+"""
+app/logger.py — Logging setup mirroring the broker's style (console + daily
+rolling file). Reads ``BOT_LOG_LEVEL`` from the environment directly so the
+module is import-safe without full settings validation (useful in tests).
+"""
+
+from __future__ import annotations
+
+import datetime
+import logging
+import os
+import sys
+from pathlib import Path
+
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class _DailyFileHandler(logging.FileHandler):
+  """FileHandler that rolls over to a new dated file at midnight."""
+
+  def __init__(self, directory: Path, mode: str = "a", encoding: str = "utf-8"):
+    self.directory = directory
+    self.current_date = datetime.datetime.now().strftime("%Y%m%d")
+    super().__init__(directory / f"bot-{self.current_date}.log", mode, encoding)
+
+  def emit(self, record: logging.LogRecord) -> None:
+    new_date = datetime.datetime.now().strftime("%Y%m%d")
+    if new_date != self.current_date:
+      self.close()
+      self.current_date = new_date
+      self.baseFilename = str(self.directory / f"bot-{new_date}.log")
+      self.stream = self._open()
+    super().emit(record)
+
+
+def get_logger(name: str) -> logging.Logger:
+  logger = logging.getLogger(name)
+
+  if not logger.handlers:
+    level = getattr(logging, os.getenv("BOT_LOG_LEVEL", "INFO").upper(), logging.INFO)
+    logger.setLevel(level)
+
+    fmt = logging.Formatter(
+      fmt="%(asctime)s | %(levelname)-8s | %(process)d | %(name)s | %(message)s",
+      datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(fmt)
+
+    file_handler = _DailyFileHandler(LOGS_DIR)
+    file_handler.setLevel(level)
+    file_handler.setFormatter(fmt)
+
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    logger.propagate = False
+
+  return logger

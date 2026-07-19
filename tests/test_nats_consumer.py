@@ -30,7 +30,7 @@ class FakeMsg:
 def _valid_event_dict() -> dict:
   return {
     "event": "CREATED",
-    "market_type": "FOREX",
+    "market": "FOREX",
     "strategy": "strat",
     "id": 1,
     "ref_source_id": "rs-1",
