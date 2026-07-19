@@ -36,7 +36,7 @@ class LinkedAccountResponse(BaseModel):
   account_id: str
   account_name: Optional[str] = None
   account_balance: Optional[float] = None
-  market_type: MarketTypeEnum
+  market: MarketTypeEnum
   gateway: Optional[str] = None
   last_activity_at: Optional[datetime] = None
   telegram_user_id: Optional[int] = None

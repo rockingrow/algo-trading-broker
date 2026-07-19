@@ -207,7 +207,7 @@ async def test_admin_create_account_success():
       201,
       json={
         "account_id": "7654321",
-        "market_type": "CRYPTO",
+        "market": "CRYPTO",
         "gateway": "BINANCE",
         "telegram_link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
       },
@@ -270,10 +270,10 @@ async def test_admin_flat_scoped_body_includes_market_and_gateway():
     return httpx.Response(200, json={"action": "FLAT", "scope": "account=acc-1"})
 
   client = _admin_client(handler)
-  await client.admin_flat(account_id="acc-1", market_type="CRYPTO", gateway="BINANCE")
+  await client.admin_flat(account_id="acc-1", market="CRYPTO", gateway="BINANCE")
   body = captured["body"].replace(" ", "")
   assert '"account_id":"acc-1"' in body
-  assert '"market_type":"CRYPTO"' in body
+  assert '"market":"CRYPTO"' in body
   assert '"gateway":"BINANCE"' in body
   await client.aclose()
 

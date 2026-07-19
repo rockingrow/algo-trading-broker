@@ -606,7 +606,7 @@ class NatsPublisher:
       signal.strategy,
       signal.symbol,
       signal.account_id,
-      signal.market_type,
+      signal.market,
       signal.gateway,
     )
 

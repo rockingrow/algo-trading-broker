@@ -217,7 +217,7 @@ def get_telegram_router() -> APIRouter:
       strategy=body.strategy,
       symbol=body.symbol,
       account_id=account.account_id,
-      market_type=account.market_type,
+      market=account.market,
       gateway=account.gateway,
     )
     scope = _scope(account.account_id, strategy=body.strategy, symbol=body.symbol)
@@ -242,7 +242,7 @@ def get_telegram_router() -> APIRouter:
       action=action,
       timestamp=datetime.now(timezone.utc),
       account_id=account.account_id,
-      market_type=account.market_type,
+      market=account.market,
       gateway=account.gateway,
     )
     scope = _scope(account.account_id, strategy=None, symbol=None)

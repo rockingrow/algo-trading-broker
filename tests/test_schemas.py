@@ -115,13 +115,13 @@ def test_admin_signal_json_roundtrip():
     action=AdminActionEnum.FLAT,
     timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
     account_id="acc",
-    market_type=MarketTypeEnum.FOREX,
+    market=MarketTypeEnum.FOREX,
     gateway="MT5",
   )
   body = json.loads(sig.model_dump_json())
   assert body["action"] == "FLAT"
   assert body["account_id"] == "acc"
-  assert body["market_type"] == "FOREX"
+  assert body["market"] == "FOREX"
   assert body["gateway"] == "MT5"
   assert body["strategy"] is None
 
@@ -149,7 +149,7 @@ def test_publish_topic_enum_values():
 def _event_dict(**overrides):
   base = {
     "event": "CREATED",
-    "market_type": "FOREX",
+    "market": "FOREX",
     "strategy": "strat",
     "id": 1,
     "ref_source_id": "rs-1",
@@ -188,6 +188,6 @@ def test_position_event_missing_required_rejected():
     PositionEvent(**d)
 
 
-def test_position_event_invalid_market_type_rejected():
+def test_position_event_invalid_market_rejected():
   with pytest.raises(ValidationError):
-    PositionEvent(**_event_dict(market_type="STOCKS"))
+    PositionEvent(**_event_dict(market="STOCKS"))

@@ -230,7 +230,7 @@ class BrokerClientAdmin(BrokerClient):
   async def admin_create_account(
     self,
     account_id: str,
-    market_type: str,
+    market: str,
     gateway: str,
     account_name: Optional[str] = None,
   ) -> Optional[dict[str, Any]]:
@@ -243,7 +243,7 @@ class BrokerClientAdmin(BrokerClient):
         self._path(self.ENDPOINTS.ACCOUNTS),
         json={
           "account_id": account_id,
-          "market_type": market_type,
+          "market": market,
           "gateway": gateway,
           "account_name": account_name,
         },
@@ -267,12 +267,12 @@ class BrokerClientAdmin(BrokerClient):
     strategy: Optional[str] = None,
     symbol: Optional[str] = None,
     account_id: Optional[str] = None,
-    market_type: Optional[str] = None,
+    market: Optional[str] = None,
     gateway: Optional[str] = None,
   ) -> Optional[dict[str, Any]]:
     """Publish a FLAT directive (all fields None = flat everything).
 
-    The broker requires market_type + gateway together with account_id (422
+    The broker requires market + gateway together with account_id (422
     otherwise) — account_id alone no longer identifies a single account.
     """
     return self._json_or_none(
@@ -283,7 +283,7 @@ class BrokerClientAdmin(BrokerClient):
           "strategy": strategy,
           "symbol": symbol,
           "account_id": account_id,
-          "market_type": market_type,
+          "market": market,
           "gateway": gateway,
         },
       )

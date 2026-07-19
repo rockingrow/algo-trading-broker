@@ -130,7 +130,7 @@ class Trade(Base):
   __tablename__ = "trades"
   __table_args__ = (
     UniqueConstraint(
-      "market_type",
+      "market",
       "gateway",
       "account_id",
       "ref_id",
@@ -143,7 +143,7 @@ class Trade(Base):
   # Denormalized from the owning accounts row at upsert time (see
   # TradeRepository._upsert_account) — account_id alone doesn't identify an
   # account uniquely, so these two are needed to scope trades to the right one.
-  market_type: Mapped[MarketTypeEnum | None] = mapped_column(
+  market: Mapped[MarketTypeEnum | None] = mapped_column(
     Enum(MarketTypeEnum), nullable=True
   )
   gateway: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -197,7 +197,7 @@ class Account(Base):
   # share the same bare id. The composite key is what's actually unique.
   __table_args__ = (
     UniqueConstraint(
-      "market_type", "gateway", "account_id", name="uq_accounts_market_gateway_account_id"
+      "market", "gateway", "account_id", name="uq_accounts_market_gateway_account_id"
     ),
   )
 
@@ -205,11 +205,11 @@ class Account(Base):
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   account_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
-  market_type: Mapped[MarketTypeEnum] = mapped_column(
+  market: Mapped[MarketTypeEnum] = mapped_column(
     Enum(MarketTypeEnum), nullable=False
   )
   # Exchange/gateway the account trades through, e.g. MT5 (forex) or BINANCE
-  # (crypto). Combined with market_type + account_id it forms the worker
+  # (crypto). Combined with market + account_id it forms the worker
   # addressing id <market>-<gateway>-<account_id> used on the SYSTEM subject.
   # Nullable so rows predating this column (or workers that don't report it)
   # remain valid.
@@ -238,7 +238,7 @@ class Account(Base):
   def __repr__(self) -> str:
     return (
       f"<Account id={self.id} account_id={self.account_id} "
-      f"market_type={self.market_type} gateway={self.gateway}>"
+      f"market={self.market} gateway={self.gateway}>"
     )
 
 

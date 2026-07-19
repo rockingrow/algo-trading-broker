@@ -35,10 +35,10 @@ class CreateAccountRequest(BaseModel):
   """Request body for POST /admin/accounts — manually register an account
   ahead of any trade/handshake, e.g. so an admin can hand a link token to the
   end-user before they've placed a trade. ``gateway`` must be valid for
-  ``market_type`` per ``GATEWAYS_BY_MARKET``. ``account_id`` may not contain
+  ``market`` per ``GATEWAYS_BY_MARKET``. ``account_id`` may not contain
   ':' or whitespace — it's embedded verbatim in Telegram callback data."""
 
-  market_type: MarketTypeEnum
+  market: MarketTypeEnum
   gateway: str = Field(..., min_length=1, max_length=50)
   account_id: str = Field(..., min_length=1, max_length=50, pattern=r"^[^:\s]+$")
   account_name: Optional[str] = None
@@ -49,7 +49,7 @@ class FlatRequest(BaseModel):
 
   ``account_id`` alone no longer identifies a single account (the same bare
   id can exist under a different market/gateway, see
-  ``uq_accounts_market_gateway_account_id``), so ``market_type`` and
+  ``uq_accounts_market_gateway_account_id``), so ``market`` and
   ``gateway`` are REQUIRED together with it — scoping a FLAT to one account
   without them is rejected. Omit all three to flat everything (no scoping
   needed). Forwarded onto the broadcast ``AdminSignal``; see that schema's
@@ -59,14 +59,14 @@ class FlatRequest(BaseModel):
   strategy: Optional[str] = None
   symbol: Optional[str] = None
   account_id: Optional[str] = None
-  market_type: Optional[MarketTypeEnum] = None
+  market: Optional[MarketTypeEnum] = None
   gateway: Optional[str] = None
 
   @model_validator(mode="after")
   def _require_market_gateway_with_account_id(self) -> "FlatRequest":
-    if self.account_id is not None and (self.market_type is None or self.gateway is None):
+    if self.account_id is not None and (self.market is None or self.gateway is None):
       raise ValueError(
-        "market_type and gateway are required when account_id is given "
+        "market and gateway are required when account_id is given "
         "(account_id alone no longer identifies a single account)"
       )
     return self

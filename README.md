@@ -156,7 +156,7 @@ Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHOR
 
 ### `TRADE` events
 
-Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(market_type, gateway, account_id, ref_id)` — not `account_id` alone, since the same bare `account_id` can exist under a different market/gateway (see [`accounts` table](#accounts-table)) — translating the worker's position status into a broker trade `status`:
+Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(market, gateway, account_id, ref_id)` — not `account_id` alone, since the same bare `account_id` can exist under a different market/gateway (see [`accounts` table](#accounts-table)) — translating the worker's position status into a broker trade `status`:
 
 | Worker position status | Broker trade `status` | Running? |
 | ---------------------- | --------------------- | -------- |
@@ -278,7 +278,7 @@ Sent on the request's reply inbox when the worker used NATS request/reply, other
 
 The handshake pushes crypto config when a worker *connects*. To also update workers that are **already connected**, `POST /admin/settings/crypto-allowed-symbol` and `POST /admin/settings/crypto-max-leverage` send a `CRYPTO_LEVERAGE_INIT` on the shared `SYSTEM` subject right after persisting the change, so the new value applies immediately instead of waiting for the next reconnect (up to the ~30s settings cache).
 
-The broker looks up every **crypto account** in the `accounts` table and addresses one message per account to its `<market>-<gateway>-<account_id>` worker id — built from the account's `market_type`, `gateway`, and `account_id` — so each worker filters by its own id:
+The broker looks up every **crypto account** in the `accounts` table and addresses one message per account to its `<market>-<gateway>-<account_id>` worker id — built from the account's `market`, `gateway`, and `account_id` — so each worker filters by its own id:
 
 ```json
 {
@@ -533,7 +533,7 @@ Returns all trading accounts ordered by most recent activity. Requires the `X-AP
     "account_id": "12345678",
     "account_name": "Demo Account",
     "account_balance": 10000.0,
-    "market_type": "FOREX",
+    "market": "FOREX",
     "gateway": "MT5",
     "last_activity_at": "2024-03-20T10:05:00Z",
     "createdAt": "2024-03-01T00:00:00Z",
@@ -542,28 +542,28 @@ Returns all trading accounts ordered by most recent activity. Requires the `X-AP
 ]
 ```
 
-Accounts are automatically created or updated each time a `TRADE` event arrives from a worker (or manually via `POST /admin/accounts`, below). `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market_type` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
+Accounts are automatically created or updated each time a `TRADE` event arrives from a worker (or manually via `POST /admin/accounts`, below). `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
 
-`account_id` alone is **not** unique — the same bare id can exist under a different `market_type`/`gateway` pair (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). The unique key is the full `(market_type, gateway, account_id)` triple.
+`account_id` alone is **not** unique — the same bare id can exist under a different `market`/`gateway` pair (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). The unique key is the full `(market, gateway, account_id)` triple.
 
 ---
 
 ### POST `/admin/accounts`
 
-Manually registers an account — `market_type`, `gateway`, and an `account_id` chosen by the admin — before it has ever traded or its worker has connected, so a link token can be handed to the end-user right away. Requires the `X-API-KEY` header.
+Manually registers an account — `market`, `gateway`, and an `account_id` chosen by the admin — before it has ever traded or its worker has connected, so a link token can be handed to the end-user right away. Requires the `X-API-KEY` header.
 
 **Request Body:**
 
 ```json
 {
-  "market_type": "CRYPTO",
+  "market": "CRYPTO",
   "gateway": "BINANCE",
   "account_id": "7654321",
   "account_name": "Main Crypto"
 }
 ```
 
-`gateway` must be valid for `market_type` (currently `FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or the request is rejected with `422`. `account_id` may not contain `:` or whitespace (it's embedded verbatim in the Telegram bot's callback data) and must be at most 50 characters. Returns `409` if the `(market_type, gateway, account_id)` triple already exists — reusing the same `account_id` under a *different* gateway is allowed and creates a distinct account.
+`gateway` must be valid for `market` (currently `FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or the request is rejected with `422`. `account_id` may not contain `:` or whitespace (it's embedded verbatim in the Telegram bot's callback data) and must be at most 50 characters. Returns `409` if the `(market, gateway, account_id)` triple already exists — reusing the same `account_id` under a *different* gateway is allowed and creates a distinct account.
 
 **Response** (`201`): the created account, shaped like a row in [`GET /v1/accounts`](#get-v1accounts) — including a freshly generated `telegram_link_token`.
 
@@ -708,14 +708,14 @@ Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subje
   "strategy": "wt_cross_v1",
   "symbol": "XAUUSD",
   "account_id": "MT5-12345678",
-  "market_type": "FOREX",
+  "market": "FOREX",
   "gateway": "MT5"
 }
 ```
 
 Omit all fields (or send an empty body `{}`) to flat every open position across all workers.
 
-`market_type`/`gateway` optionally narrow `account_id` further and are forwarded onto the broadcast `AdminSignal`. This is broadcast on the shared `ADMIN` subject to **every** connected worker; each worker filters for itself client-side (worker-side code, outside this repo). Since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), pass `market_type`/`gateway` when scoping to an account whose id might collide with one on another gateway — but this only helps once the worker side is updated to check them too. A worker that still matches on `account_id` alone can act on a FLAT meant for a different account that happens to share that id.
+`market`/`gateway` optionally narrow `account_id` further and are forwarded onto the broadcast `AdminSignal`. This is broadcast on the shared `ADMIN` subject to **every** connected worker; each worker filters for itself client-side (worker-side code, outside this repo). Since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), pass `market`/`gateway` when scoping to an account whose id might collide with one on another gateway — but this only helps once the worker side is updated to check them too. A worker that still matches on `account_id` alone can act on a FLAT meant for a different account that happens to share that id.
 
 ---
 
@@ -809,7 +809,7 @@ for configuration and local development.
 | ----------------------- | ------------ | ------------------------------------------ |
 | `id` | UUID (PK) | Unique record identifier |
 | `account_id` | String(50) | Worker's broker account ID |
-| `market_type` | Enum (nullable) | `FOREX` or `CRYPTO`, copied from the owning `accounts` row |
+| `market` | Enum (nullable) | `FOREX` or `CRYPTO`, copied from the owning `accounts` row |
 | `gateway` | String(50) (nullable) | Exchange the account trades through, copied from the owning `accounts` row |
 | `account_leverage` | Integer | Account leverage at time of trade |
 | `account_balance_init` | Numeric(20,8) | Account balance before trade (nullable) |
@@ -836,10 +836,10 @@ for configuration and local development.
 | Column | Type | Description |
 | ------------------- | ------------ | ------------------------------------------ |
 | `id` | UUID (PK) | Unique record identifier |
-| `account_id` | String(50) | Worker's broker account ID (unique together with `market_type` + `gateway` — **not** unique alone; see note below) |
+| `account_id` | String(50) | Worker's broker account ID (unique together with `market` + `gateway` — **not** unique alone; see note below) |
 | `account_name` | String(255) | Display name of the account (nullable) |
 | `account_balance` | Numeric(20,8) | Most recent account balance (nullable) |
-| `market_type` | Enum | `FOREX` or `CRYPTO` |
+| `market` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
 | `telegram_user_id` | BigInteger (Nullable) | Linked Telegram user — **not** unique: one user may link several accounts (see [`telegram_sessions`](#telegram_sessions-table)) |
@@ -847,7 +847,7 @@ for configuration and local development.
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
-**Unique constraint:** `(market_type, gateway, account_id)` — a bare `account_id` can exist under more than one market/gateway (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). Endpoints and repository methods that take only `account_id` (`POST /admin/accounts/{account_id}/link-token/rotate`, `GET /v1/{account_id}/trades`, the `account_id` scope on `POST /admin/flat`) resolve/match on that bare id and can be ambiguous if it's reused across gateways — avoid deliberately reusing an `account_id` across gateways until those callers are updated to also pass `market_type`/`gateway`.
+**Unique constraint:** `(market, gateway, account_id)` — a bare `account_id` can exist under more than one market/gateway (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). Endpoints and repository methods that take only `account_id` (`POST /admin/accounts/{account_id}/link-token/rotate`, `GET /v1/{account_id}/trades`, the `account_id` scope on `POST /admin/flat`) resolve/match on that bare id and can be ambiguous if it's reused across gateways — avoid deliberately reusing an `account_id` across gateways until those callers are updated to also pass `market`/`gateway`.
 
 ### `telegram_sessions` table
 

@@ -40,7 +40,7 @@ examples:
               "account_id": "413652379",
               "account_name": "WangDemo1",
               "account_balance": 708.42,
-              "market_type": "FOREX",
+              "market": "FOREX",
               "last_activity_at": "2026-05-23T13:52:56.885421Z",
               "createdAt": "2026-05-23T13:47:35.574796Z",
               "updatedAt": "2026-05-23T13:52:56.884832Z"

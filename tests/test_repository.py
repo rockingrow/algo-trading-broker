@@ -250,7 +250,7 @@ async def test_list_retryable_swallows_db_error(monkeypatch):
 def _event(**overrides) -> PositionEvent:
   base = dict(
     event="CREATED",
-    market_type="FOREX",
+    market="FOREX",
     strategy="strat",
     id=1,
     ref_source_id="rs-1",
@@ -300,17 +300,17 @@ async def test_upsert_persists_gateway_on_new_account(monkeypatch):
   _patch_session(monkeypatch, session)
 
   await SqlAlchemyTradeRepository().upsert_by_position_event(
-    _event(market_type="CRYPTO", gateway="BINANCE")
+    _event(market="CRYPTO", gateway="BINANCE")
   )
 
   account = next(o for o in session.added if isinstance(o, Account))
   assert account.gateway == "BINANCE"
-  assert account.market_type == MarketTypeEnum.CRYPTO
+  assert account.market == MarketTypeEnum.CRYPTO
 
 
 async def test_upsert_updates_gateway_on_existing_account(monkeypatch):
   existing_account = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway="OLD"
+    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway="OLD"
   )
   existing_trade = Trade(
     account_id="acc-1",
@@ -363,7 +363,7 @@ async def test_upsert_inserts_rejected_trade_with_reason(monkeypatch):
 
 
 async def test_upsert_updates_existing_trade(monkeypatch):
-  existing_account = Account(account_id="acc-1", market_type=MarketTypeEnum.FOREX)
+  existing_account = Account(account_id="acc-1", market=MarketTypeEnum.FOREX)
   existing_trade = Trade(
     account_id="acc-1",
     ref_id="rs-1",
@@ -390,7 +390,7 @@ async def test_upsert_updates_existing_trade(monkeypatch):
 
 
 async def test_upsert_ignores_status_downgrade(monkeypatch):
-  existing_account = Account(account_id="acc-1", market_type=MarketTypeEnum.FOREX)
+  existing_account = Account(account_id="acc-1", market=MarketTypeEnum.FOREX)
   existing_trade = Trade(
     account_id="acc-1",
     ref_id="rs-1",
@@ -482,7 +482,7 @@ async def test_upsert_gateway_backfills_existing_account(monkeypatch):
   # The row predates the gateway column (or has only ever seen gateway-less
   # TRADE events), so the handshake is what fills it in.
   existing = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway=None
+    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway=None
   )
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
@@ -507,14 +507,14 @@ async def test_upsert_gateway_inserts_unknown_account(monkeypatch):
   assert len(session.added) == 1
   row = session.added[0]
   assert row.account_id == "acc-2"
-  assert row.market_type == MarketTypeEnum.FOREX
+  assert row.market == MarketTypeEnum.FOREX
   assert row.gateway == "MT5"
   assert row.last_activity_at is not None
 
 
 async def test_upsert_gateway_is_noop_when_unchanged(monkeypatch):
   existing = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
   )
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
@@ -553,7 +553,7 @@ async def test_create_account_inserts_new_row(monkeypatch):
   assert len(session.added) == 1
   row = session.added[0]
   assert row.account_id == "7654321"
-  assert row.market_type == MarketTypeEnum.CRYPTO
+  assert row.market == MarketTypeEnum.CRYPTO
   assert row.gateway == "BINANCE"
   assert row.account_name == "Main Crypto"
   assert row.last_activity_at is not None
@@ -562,9 +562,9 @@ async def test_create_account_inserts_new_row(monkeypatch):
 
 
 async def test_create_account_returns_none_when_account_id_taken(monkeypatch):
-  # Same (market_type, gateway, account_id) triple already exists.
+  # Same (market, gateway, account_id) triple already exists.
   existing = Account(
-    account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+    account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
   )
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
@@ -600,7 +600,7 @@ async def test_link_telegram_binds_user_and_activates_first_account(monkeypatch)
   account = Account(
     id=uuid.uuid4(),
     account_id="acc-1",
-    market_type=MarketTypeEnum.FOREX,
+    market=MarketTypeEnum.FOREX,
     telegram_link_token=token,
   )
   # 1st execute: lookup by token → account; 2nd: session lookup → none → insert
@@ -622,13 +622,13 @@ async def test_link_telegram_does_not_release_previous_account(monkeypatch):
   target = Account(
     id=uuid.uuid4(),
     account_id="acc-2",
-    market_type=MarketTypeEnum.FOREX,
+    market=MarketTypeEnum.FOREX,
     telegram_link_token=token,
   )
   previous = Account(
     id=uuid.uuid4(),
     account_id="acc-1",
-    market_type=MarketTypeEnum.FOREX,
+    market=MarketTypeEnum.FOREX,
     telegram_user_id=555,
   )
   existing_session = TelegramSession(
@@ -650,7 +650,7 @@ async def test_link_telegram_activates_when_session_has_no_active(monkeypatch):
   account = Account(
     id=uuid.uuid4(),
     account_id="acc-1",
-    market_type=MarketTypeEnum.FOREX,
+    market=MarketTypeEnum.FOREX,
     telegram_link_token=token,
   )
   # Session row exists (e.g. after a full unlink) but has no active account.
@@ -675,8 +675,8 @@ async def test_link_telegram_invalid_token_returns_none(monkeypatch):
 
 
 async def test_list_by_telegram_user_id_returns_rows(monkeypatch):
-  a1 = Account(account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555)
-  a2 = Account(account_id="acc-2", market_type=MarketTypeEnum.CRYPTO, telegram_user_id=555)
+  a1 = Account(account_id="acc-1", market=MarketTypeEnum.FOREX, telegram_user_id=555)
+  a2 = Account(account_id="acc-2", market=MarketTypeEnum.CRYPTO, telegram_user_id=555)
   session = FakeSession(results=[[a1, a2]])
   _patch_session(monkeypatch, session)
 
@@ -686,7 +686,7 @@ async def test_list_by_telegram_user_id_returns_rows(monkeypatch):
 
 async def test_get_active_account_fast_path(monkeypatch):
   account = Account(
-    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+    id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX, telegram_user_id=555
   )
   tg_session = TelegramSession(telegram_user_id=555, active_account_id=account.id)
   session = FakeSession(results=[[tg_session], [account]])
@@ -700,7 +700,7 @@ async def test_get_active_account_falls_back_and_self_heals(monkeypatch):
   # No session row at all → fall back to the first linked account (its own
   # list_by_telegram_user_id call) and self-heal a new session row.
   account = Account(
-    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+    id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX, telegram_user_id=555
   )
   session = FakeSession(results=[[], [account], []])
   _patch_session(monkeypatch, session)
@@ -722,7 +722,7 @@ async def test_get_active_account_returns_none_when_unlinked(monkeypatch):
 
 async def test_set_active_account_owned(monkeypatch):
   account = Account(
-    id=uuid.uuid4(), account_id="acc-2", market_type=MarketTypeEnum.CRYPTO, telegram_user_id=555
+    id=uuid.uuid4(), account_id="acc-2", market=MarketTypeEnum.CRYPTO, telegram_user_id=555
   )
   tg_session = TelegramSession(telegram_user_id=555, active_account_id=uuid.uuid4())
   session = FakeSession(results=[[account], [tg_session]])
@@ -746,10 +746,10 @@ async def test_set_active_account_not_owned_returns_none(monkeypatch):
 
 async def test_unlink_telegram_clears_active_and_reassigns(monkeypatch):
   active = Account(
-    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+    id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX, telegram_user_id=555
   )
   remaining = Account(
-    id=uuid.uuid4(), account_id="acc-2", market_type=MarketTypeEnum.CRYPTO, telegram_user_id=555
+    id=uuid.uuid4(), account_id="acc-2", market=MarketTypeEnum.CRYPTO, telegram_user_id=555
   )
   tg_session_a = TelegramSession(telegram_user_id=555, active_account_id=active.id)
   tg_session_b = TelegramSession(telegram_user_id=555, active_account_id=active.id)
@@ -772,7 +772,7 @@ async def test_unlink_telegram_clears_active_and_reassigns(monkeypatch):
 
 async def test_unlink_telegram_clears_session_when_last_account(monkeypatch):
   active = Account(
-    id=uuid.uuid4(), account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_user_id=555
+    id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX, telegram_user_id=555
   )
   tg_session_a = TelegramSession(telegram_user_id=555, active_account_id=active.id)
   tg_session_b = TelegramSession(telegram_user_id=555, active_account_id=active.id)
@@ -801,7 +801,7 @@ async def test_unlink_telegram_no_account(monkeypatch):
 async def test_rotate_link_token_issues_new_token(monkeypatch):
   old = uuid.uuid4()
   account = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.FOREX, telegram_link_token=old
+    account_id="acc-1", market=MarketTypeEnum.FOREX, telegram_link_token=old
   )
   session = FakeSession(results=[[account]])
   _patch_session(monkeypatch, session)

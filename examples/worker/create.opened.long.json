@@ -1,6 +1,6 @@
 {
   "account_id": "12345678",
-  "market_type": "FOREX",
+  "market": "FOREX",
   "gateway": "MT5",
   "account_leverage": 100,
   "account_balance_init": 10000.00,

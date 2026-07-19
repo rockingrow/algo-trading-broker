@@ -62,23 +62,23 @@ class SqlAlchemyAccountRepository:
         result = await session.execute(
           select(Account).where(
             Account.account_id == account_id,
-            Account.market_type == market,
+            Account.market == market,
             or_(Account.gateway == gateway, Account.gateway.is_(None)),
           )
         )
         row: Optional[Account] = result.scalars().first()
 
         if row is not None:
-          if row.market_type == market and row.gateway == gateway:
+          if row.market == market and row.gateway == gateway:
             return
-          row.market_type = market
+          row.market = market
           row.gateway = gateway
         else:
           session.add(
             Account(
               id=uuid.uuid4(),
               account_id=account_id,
-              market_type=market,
+              market=market,
               gateway=gateway,
               last_activity_at=datetime.now(timezone.utc),
             )
@@ -114,7 +114,7 @@ class SqlAlchemyAccountRepository:
         result = await session.execute(
           select(Account).where(
             Account.account_id == account_id,
-            Account.market_type == market,
+            Account.market == market,
             Account.gateway == gateway,
           )
         )
@@ -125,7 +125,7 @@ class SqlAlchemyAccountRepository:
           id=uuid.uuid4(),
           account_id=account_id,
           account_name=account_name,
-          market_type=market,
+          market=market,
           gateway=gateway,
           last_activity_at=datetime.now(timezone.utc),
         )
@@ -161,7 +161,7 @@ class SqlAlchemyAccountRepository:
       async with get_session() as session:
         result = await session.execute(
           select(Account)
-          .where(Account.market_type == market)
+          .where(Account.market == market)
           .order_by(Account.last_activity_at.desc())
         )
         return list(result.scalars().all())
@@ -439,7 +439,7 @@ class SqlAlchemyAccountRepository:
     collides, this rotates whichever matching row Postgres returns first,
     non-deterministically. Not fixed here: doing so needs the admin-facing
     callers (bot ``/rotate``, ``POST /admin/accounts/{account_id}/...``) to
-    also pass market_type + gateway, which is a wider UX change than this
+    also pass market + gateway, which is a wider UX change than this
     schema migration. Avoid reusing account_id across gateways until then.
     """
     try:
@@ -741,15 +741,15 @@ class SqlAlchemyTradeRepository:
     """Upsert the accounts row within an existing session. Always refreshes
     last_activity_at.
 
-    Scoped by account_id + market_type (see ``upsert_gateway`` for why
+    Scoped by account_id + market (see ``upsert_gateway`` for why
     account_id alone isn't enough), matching either the exact gateway already
     on file or a legacy row whose gateway is still NULL.
     """
-    market_type = MarketTypeEnum(event.market_type)
+    market = MarketTypeEnum(event.market)
     result = await session.execute(
       select(Account).where(
         Account.account_id == event.account_id,
-        Account.market_type == market_type,
+        Account.market == market,
         or_(Account.gateway == event.gateway, Account.gateway.is_(None)),
       )
     )
@@ -759,7 +759,7 @@ class SqlAlchemyTradeRepository:
     if row is not None:
       if event.account_name is not None:
         row.account_name = event.account_name
-      row.market_type = market_type
+      row.market = market
       if event.gateway is not None:
         row.gateway = event.gateway
       if event.account_balance is not None:
@@ -772,7 +772,7 @@ class SqlAlchemyTradeRepository:
           account_id=event.account_id,
           account_name=event.account_name,
           account_balance=event.account_balance,
-          market_type=market_type,
+          market=market,
           gateway=event.gateway,
           last_activity_at=now,
         )
@@ -780,7 +780,7 @@ class SqlAlchemyTradeRepository:
 
   async def upsert_by_position_event(self, event: PositionEvent) -> Trade | None:
     """Apply a PositionEvent received from the worker (via NATS TRADE) to the
-    broker's `trades` table. Performs an upsert keyed by (market_type, gateway,
+    broker's `trades` table. Performs an upsert keyed by (market, gateway,
     account_id, ref_id) — account_id alone doesn't identify an account
     uniquely (see ``uq_accounts_market_gateway_account_id``); updates the row
     if it exists, otherwise inserts a new one. Idempotent."""
@@ -791,7 +791,7 @@ class SqlAlchemyTradeRepository:
 
     is_running = self._policy.is_open(event.status)
     price = event.closed_price if event.closed_price is not None else event.opened_price
-    market_type = MarketTypeEnum(event.market_type)
+    market = MarketTypeEnum(event.market)
 
     async with get_session() as session:
       await self._upsert_account(session, event)
@@ -800,7 +800,7 @@ class SqlAlchemyTradeRepository:
         select(Trade).where(
           Trade.account_id == event.account_id,
           Trade.ref_id == event.ref_source_id,
-          Trade.market_type == market_type,
+          Trade.market == market,
           or_(Trade.gateway == event.gateway, Trade.gateway.is_(None)),
         )
       )
@@ -821,7 +821,7 @@ class SqlAlchemyTradeRepository:
         row.is_running = is_running
         row.price = price
         row.quantity = event.volume
-        row.market_type = market_type
+        row.market = market
         if event.gateway is not None:
           row.gateway = event.gateway
         if event.reject_reason is not None:
@@ -846,7 +846,7 @@ class SqlAlchemyTradeRepository:
       new_row = Trade(
         id=uuid.uuid4(),
         account_id=event.account_id,
-        market_type=market_type,
+        market=market,
         gateway=event.gateway,
         account_leverage=event.account_leverage,
         account_balance_init=event.account_balance,
@@ -892,7 +892,7 @@ class SqlAlchemyTradeRepository:
 
     KNOWN LIMITATION: filters by bare ``account_id`` only, which can now match
     trades from more than one account if the id was reused across gateways
-    (see ``rotate_link_token``'s docstring). Not scoped to market_type/gateway
+    (see ``rotate_link_token``'s docstring). Not scoped to market/gateway
     here — the admin-facing callers (bot ``/atrades``, ``GET
     /v1/{account_id}/trades``) would need to pass those too, a wider change
     than this migration covers.

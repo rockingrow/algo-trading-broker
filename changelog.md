@@ -42,9 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/atrades`, `/aflat`, `/rotate`, `/settings`.
 - **`POST /admin/accounts`** — Manually register an account ahead of any trade
   or worker handshake, so a link token can be issued immediately. `gateway`
-  must be valid for `market_type` (`FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or
+  must be valid for `market` (`FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or
   the request is rejected with `422`; returns `409` if the
-  `(market_type, gateway, account_id)` triple already exists.
+  `(market, gateway, account_id)` triple already exists.
 - **`POST /admin/accounts/{account_id}/link-token/rotate`** — Issue a fresh
   link token for an account, revoking the old one.
 - **`GET /admin/settings`** — Read the runtime toggles (previously POST-only),
@@ -53,32 +53,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two per-account directives, published on the `ADMIN` subject by the bot's
   `/prevent` and `/allow`. Enforcement is the **worker's** responsibility —
   worker code lives outside this repo, so the broker only publishes them.
-- **`trades.market_type` and `trades.gateway` columns** — Added via migration
+- **`trades.market` and `trades.gateway` columns** — Added via migration
   `c9d8e7f6a5b4` and denormalised from the owning `accounts` row at upsert
   time, so a trade can be attributed to the right account now that
   `account_id` alone no longer identifies one.
 
 ### Changed
 
-- **`accounts` unique constraint: `account_id` → `(market_type, gateway, account_id)`** —
+- **`accounts` unique constraint: `account_id` → `(market, gateway, account_id)`** —
   Two unrelated real accounts on different gateways can coincidentally share a
   bare id (an MT5 login `100234` and a Binance account `100234`), which the old
   single-column constraint made impossible to register. `trades` gets the
   matching treatment: `(account_id, ref_id)` →
-  `(market_type, gateway, account_id, ref_id)`.
+  `(market, gateway, account_id, ref_id)`.
   **Known limitation:** admin-facing lookups that take a bare `account_id` —
   `POST /admin/accounts/{account_id}/link-token/rotate` and
   `GET /v1/{account_id}/trades` — still resolve/match on that id alone and can
   be ambiguous if it is reused across gateways. Avoid deliberately reusing an
-  `account_id` across gateways until those callers pass `market_type` /
+  `account_id` across gateways until those callers pass `market` /
   `gateway` too.
 - **`accounts.telegram_user_id` is no longer unique** — Its unique index is
   replaced with a plain one so a single Telegram user can hold several linked
   accounts. Which one is active moved to `telegram_sessions`.
-- **`AdminSignal` requires `market_type` + `gateway` alongside `account_id`** —
+- **`AdminSignal` requires `market` + `gateway` alongside `account_id`** —
   Account-scoped admin signals are now fully disambiguated on the wire, and
   `POST /admin/flat` returns `422` if `account_id` is given without both.
-  **Workers must match all three** (`account_id` + `market_type` + `gateway`)
+  **Workers must match all three** (`account_id` + `market` + `gateway`)
   against themselves before acting; a worker still matching on `account_id`
   alone can act on a directive meant for a different account sharing that id.
 - **Bot copy is English-only, emoji via named constants** — Vietnamese strings
@@ -209,7 +209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
   for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
-  `TRADE` event, and surfaced on `GET /v1/accounts`. Combined with `market_type`
+  `TRADE` event, and surfaced on `GET /v1/accounts`. Combined with `market`
   and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id used
   to address `SYSTEM` messages.
 - **`gateway` on the `TRADE` (`PositionEvent`) payload** — Workers may report the
@@ -421,7 +421,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **PositionEvent v2 ingestion** — The broker now consumes the worker's v2 `TRADE` event shape. `source_ticket`/`ticket` → `ref_source_id`/`ref_id`, `mt5_retcode` → `gateway_return_code`, `magic` → `strategy_code`; `market_type` is now a typed `MarketTypeEnum`; `account_name` is optional; and signal-derived fields (`sl`, `tp1`, `tp2`, `risk_percent`, `signal_id`) are promoted to first-class fields.
+- **PositionEvent v2 ingestion** — The broker now consumes the worker's v2 `TRADE` event shape. `source_ticket`/`ticket` → `ref_source_id`/`ref_id`, `mt5_retcode` → `gateway_return_code`, `magic` → `strategy_code`; `market` is now a typed `MarketTypeEnum`; `account_name` is optional; and signal-derived fields (`sl`, `tp1`, `tp2`, `risk_percent`, `signal_id`) are promoted to first-class fields.
 - **Persist `gateway_return_code`** — The gateway return code carried on each `TRADE` event is now stored on `Trade` and exposed in the `GET /v1/{account_id}/trades` response (`TradeResponse`).
 
 ### Fixed

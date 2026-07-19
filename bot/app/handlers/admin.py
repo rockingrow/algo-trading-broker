@@ -10,7 +10,7 @@ String(50) and never contains ':'):
 - atr:{account_id}:{offset}    trades pagination
 - aflat:confirm|cancel         target resolved server-side, kept in FSM data
                                 (account_id alone can't go in callback_data —
-                                the broker now requires market_type + gateway
+                                the broker now requires market + gateway
                                 alongside it, see admin_flat's docstring)
 - aflatc:{index}               disambiguation picker → picks aflat_candidates[index]
 - arotp:{account_id}           picker → rotate confirm
@@ -124,7 +124,7 @@ async def cb_atrades_page(call: CallbackQuery, broker_admin: BrokerClientAdmin) 
 
 # ── /aflat ──────────────────────────────────────────────────────────
 # account_id alone no longer identifies a single account (the broker now
-# requires market_type + gateway alongside it — see FlatRequest's docstring),
+# requires market + gateway alongside it — see FlatRequest's docstring),
 # so scoping to one account resolves those from the live account list first.
 # Because that resolved target can't safely fit in callback_data (well under
 # 64 bytes for a worst-case 50-char account_id + market/gateway), it's kept
@@ -135,7 +135,7 @@ def _aflat_confirm_text(account: dict) -> str:
   return (
     f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for account "
     f"<code>{html.escape(str(account.get('account_id')))}</code> "
-    f"({html.escape(str(account.get('market_type')))}/"
+    f"({html.escape(str(account.get('market')))}/"
     f"{html.escape(str(account.get('gateway')))})?"
   )
 
@@ -215,7 +215,7 @@ async def cb_aflat(call: CallbackQuery, state: FSMContext, broker_admin: BrokerC
   else:
     result = await broker_admin.admin_flat(
       account_id=target.get("account_id"),
-      market_type=target.get("market_type"),
+      market=target.get("market"),
       gateway=target.get("gateway"),
     )
 
@@ -329,7 +329,7 @@ async def cb_newaccount_gateway(
   existing = [
     a
     for a in accounts
-    if a.get("market_type") == market and a.get("gateway") == gateway
+    if a.get("market") == market and a.get("gateway") == gateway
   ]
 
   await state.update_data(market=market, gateway=gateway)

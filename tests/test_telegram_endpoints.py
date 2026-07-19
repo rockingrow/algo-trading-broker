@@ -114,7 +114,7 @@ def _make_account() -> Account:
     account_id="acc-1",
     account_name="Main",
     account_balance=1000.0,
-    market_type=MarketTypeEnum.FOREX,
+    market=MarketTypeEnum.FOREX,
     last_activity_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     telegram_user_id=None,
     telegram_link_token=TOKEN,
@@ -269,9 +269,9 @@ def test_flat_publishes_scoped_to_account(ctx):
   published = ctx["publisher"].admin_signals[-1]
   assert published["action"].value == "FLAT"
   assert published["account_id"] == "acc-1"
-  # market_type/gateway ride along so a worker that checks them can
+  # market/gateway ride along so a worker that checks them can
   # disambiguate account_id reused across gateways.
-  assert published["market_type"] == MarketTypeEnum.FOREX
+  assert published["market"] == MarketTypeEnum.FOREX
   assert published["gateway"] is None
 
 
@@ -317,7 +317,7 @@ def _make_account2() -> Account:
     account_id="acc-2",
     account_name="Second",
     account_balance=500.0,
-    market_type=MarketTypeEnum.CRYPTO,
+    market=MarketTypeEnum.CRYPTO,
     gateway="BINANCE",
     last_activity_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
     telegram_user_id=None,

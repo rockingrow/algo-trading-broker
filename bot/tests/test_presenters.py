@@ -12,7 +12,7 @@ def test_format_account_shows_id_and_balance():
       "account_id": "acc-1",
       "account_name": "Main",
       "account_balance": 1234.5,
-      "market_type": "FOREX",
+      "market": "FOREX",
       "telegram_user_id": 7,
     }
   )
@@ -23,7 +23,7 @@ def test_format_account_shows_id_and_balance():
 
 def test_format_account_escapes_html():
   out = messages.UserMessages.format_account(
-    {"account_id": "<b>x</b>", "account_name": None, "market_type": "FOREX"}
+    {"account_id": "<b>x</b>", "account_name": None, "market": "FOREX"}
   )
   assert "<b>x</b>" not in out
   assert "&lt;b&gt;x&lt;/b&gt;" in out
@@ -57,8 +57,8 @@ def test_format_trades_lists_rows_with_header():
 def test_format_accounts_list_marks_active():
   out = messages.UserMessages.format_accounts_list(
     [
-      {"id": "a1", "account_id": "acc-1", "market_type": "FOREX", "gateway": "MT5", "is_active": True},
-      {"id": "a2", "account_id": "acc-2", "market_type": "CRYPTO", "gateway": "BINANCE", "is_active": False},
+      {"id": "a1", "account_id": "acc-1", "market": "FOREX", "gateway": "MT5", "is_active": True},
+      {"id": "a2", "account_id": "acc-2", "market": "CRYPTO", "gateway": "BINANCE", "is_active": False},
     ]
   )
   assert "FOREX-MT5-acc-1" in out
@@ -86,14 +86,14 @@ def test_format_accounts_admin():
         "account_name": "Main",
         "account_id": "acc-1",
         "account_balance": 100.0,
-        "market_type": "FOREX",
+        "market": "FOREX",
         "telegram_user_id": 5,
         "telegram_link_token": "tok-123",
       },
       {
         "account_name": None,
         "account_id": "acc-2",
-        "market_type": "CRYPTO",
+        "market": "CRYPTO",
         "telegram_user_id": None,
         "telegram_link_token": "tok-456",
       },
@@ -134,7 +134,7 @@ def test_format_account_created():
   out = messages.AdminMessages.format_account_created(
     {
       "account_id": "7654321",
-      "market_type": "CRYPTO",
+      "market": "CRYPTO",
       "gateway": "BINANCE",
       "telegram_link_token": "new-tok",
     }

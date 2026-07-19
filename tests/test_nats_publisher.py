@@ -104,7 +104,7 @@ async def test_publish_admin_signal_to_admin_subject():
     strategy="s",
     symbol="XAUUSD",
     account_id="acc-1",
-    market_type=MarketTypeEnum.FOREX,
+    market=MarketTypeEnum.FOREX,
     gateway="MT5",
   )
 
@@ -113,7 +113,7 @@ async def test_publish_admin_signal_to_admin_subject():
   # use_enum_values=True means the action is serialised as its string value.
   assert body["action"] == "FLAT"
   assert body["account_id"] == "acc-1"
-  assert body["market_type"] == "FOREX"
+  assert body["market"] == "FOREX"
   assert body["gateway"] == "MT5"
 
 

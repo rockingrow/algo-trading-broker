@@ -42,7 +42,7 @@ def linked_accounts_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMark
     [
       InlineKeyboardButton(
         text=f"{emojis.STAR + ' ' if a.get('is_active') else ''}"
-        f"{a.get('market_type')}-{a.get('gateway') or '?'}-{a.get('account_id')}",
+        f"{a.get('market')}-{a.get('gateway') or '?'}-{a.get('account_id')}",
         callback_data=f"swacc:{a.get('id')}",
       )
     ]
@@ -83,7 +83,7 @@ def aflat_candidates_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMar
   rows = [
     [
       InlineKeyboardButton(
-        text=f"{a.get('market_type')}/{a.get('gateway')} · "
+        text=f"{a.get('market')}/{a.get('gateway')} · "
         f"{a.get('account_name') or a.get('account_id')}",
         callback_data=f"aflatc:{i}",
       )

@@ -30,20 +30,18 @@ GATEWAYS_BY_MARKET: dict[MarketTypeEnum, list[str]] = {
 }
 
 
-def compose_worker_id(market_type: str, gateway: str, account_id: str) -> str:
+def compose_worker_id(market: str, gateway: str, account_id: str) -> str:
   """Build the ``<market>-<gateway>-<account_id>`` worker addressing id used on
   the SYSTEM subject from an account's parts (e.g. ``CRYPTO-BINANCE-7654321``).
 
-  ``market_type`` may be a :class:`MarketTypeEnum` or its string value; both
+  ``market`` may be a :class:`MarketTypeEnum` or its string value; both
   render to the bare market name.
   """
-  market = (
-    market_type.value if isinstance(market_type, MarketTypeEnum) else str(market_type)
-  )
+  market = market.value if isinstance(market, MarketTypeEnum) else str(market)
   return f"{market}-{gateway}-{account_id}"
 
 
-def decompose_worker_id(worker_id: str, market_type: str, gateway: str) -> str:
+def decompose_worker_id(worker_id: str, market: str, gateway: str) -> str:
   """Inverse of :func:`compose_worker_id`: recover the bare ``account_id`` (the
   one stored in the ``accounts`` table) from a worker id.
 
@@ -52,9 +50,7 @@ def decompose_worker_id(worker_id: str, market_type: str, gateway: str) -> str:
   ``account_id`` (``7654321``). A worker that sends the bare id instead carries
   no prefix to strip, so it passes through unchanged.
   """
-  market = (
-    market_type.value if isinstance(market_type, MarketTypeEnum) else str(market_type)
-  )
+  market = market.value if isinstance(market, MarketTypeEnum) else str(market)
   return worker_id.removeprefix(f"{market}-{gateway}-")
 
 
@@ -65,7 +61,7 @@ class AccountResponse(BaseModel):
   account_id: str
   account_name: Optional[str]
   account_balance: Optional[float]
-  market_type: MarketTypeEnum
+  market: MarketTypeEnum
   gateway: Optional[str]
   last_activity_at: Optional[datetime]
   # Telegram binding. ``telegram_link_token`` is exposed here only because this
@@ -83,7 +79,7 @@ class AccountResponse(BaseModel):
         "account_id": "12345678",
         "account_name": "Main Forex",
         "account_balance": 10250.75,
-        "market_type": "FOREX",
+        "market": "FOREX",
         "gateway": "MT5",
         "last_activity_at": "2026-06-02T09:30:00Z",
         "telegram_user_id": None,

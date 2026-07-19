@@ -4,6 +4,6 @@
   "strategy": "my_strategy",
   "symbol": "XAUUSD",
   "account_id": "123456",
-  "market_type": "FOREX",
+  "market": "FOREX",
   "gateway": "MT5"
 }

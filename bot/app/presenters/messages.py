@@ -87,7 +87,7 @@ class UserMessages:
       f"• ID: <code>{_esc(account.get('account_id'))}</code>\n"
       f"• Name: {_esc(account.get('account_name'))}\n"
       f"• Balance: <b>{_fmt_num(account.get('account_balance'))}</b>\n"
-      f"• Market: {_esc(account.get('market_type'))}\n"
+      f"• Market: {_esc(account.get('market'))}\n"
       f"• Status: {linked}"
     )
 
@@ -101,7 +101,7 @@ class UserMessages:
     for a in accounts:
       dot = emojis.STAR if a.get("is_active") else "•"
       lines.append(
-        f"{dot} <code>{_esc(a.get('market_type'))}-{_esc(a.get('gateway') or '?')}-"
+        f"{dot} <code>{_esc(a.get('market'))}-{_esc(a.get('gateway') or '?')}-"
         f"{_esc(a.get('account_id'))}</code>"
       )
     lines.append("\n<i>Tap an account below to make it active.</i>")
@@ -146,7 +146,7 @@ class AdminMessages:
       lines.append(
         f"{linked} <b>{_esc(a.get('account_name'))}</b> "
         f"<code>{_esc(a.get('account_id'))}</code>\n"
-        f"   balance {_fmt_num(a.get('account_balance'))} · {_esc(a.get('market_type'))}"
+        f"   balance {_fmt_num(a.get('account_balance'))} · {_esc(a.get('market'))}"
       )
       token = a.get("telegram_link_token")
       if token:
@@ -176,7 +176,7 @@ class AdminMessages:
     return (
       f"{emojis.CHECK} <b>Account created</b>\n"
       f"• ID: <code>{_esc(account.get('account_id'))}</code>\n"
-      f"• Market: {_esc(account.get('market_type'))}\n"
+      f"• Market: {_esc(account.get('market'))}\n"
       f"• Gateway: {_esc(account.get('gateway'))}\n\n"
       f"{emojis.KEY} Link token:\n"
       f"<tg-spoiler><code>{_esc(account.get('telegram_link_token'))}</code></tg-spoiler>\n\n"
