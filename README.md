@@ -441,6 +441,7 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
 | `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
 | `POST /admin/settings/notification-timezone` | `X-API-KEY` |
+| `GET /admin/settings/notification-timezone` | `X-API-KEY` |
 | `GET /admin/settings` | `X-API-KEY` |
 | `POST /admin/flat` | `X-API-KEY` |
 | `POST /admin/accounts/{account_id}/link-token/rotate` | `X-API-KEY` |
@@ -705,6 +706,23 @@ Sets the `notification_timezone` broker setting: the UTC offset (in hours) appli
 
 ---
 
+### GET `/admin/settings/notification-timezone`
+
+Reads the current `notification_timezone` offset. Requires the `X-API-KEY` header.
+
+**Response:**
+
+```json
+{
+  "setting": "notification_timezone",
+  "value": "7"
+}
+```
+
+Returns the default `"7"` when the setting is unset or holds an unparseable value, so the caller always gets the offset actually in effect. This is what lets the [Telegram bot](#-telegram-bot) render times in the same zone as broker-sent notifications — the bot talks only to the HTTP API and never reads `broker_settings` itself.
+
+---
+
 ### POST `/admin/flat`
 
 Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
@@ -771,8 +789,9 @@ every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
 - `/link` — add another account (paste a second token). The first account
   linked becomes active automatically; adding more does not change the
   active one.
-- `/switch` — list the linked accounts as `market-gateway-account_id`
-  buttons (the active one is starred) and tap one to activate it.
+- `/myaccounts` — list the linked accounts read-only, without the picker.
+- `/switch` — the same list, paired with one button per account; tap one to
+  activate it.
 
 The selection lives in the broker's `bot_sessions` table, not in bot memory, so
 it survives bot restarts. If it ever points at an account the user no longer
@@ -790,6 +809,36 @@ repairs the row.
 > `BLOCK_ENTRIES` / `ALLOW_ENTRIES` are scoped by `account_id` in the `AdminSignal`
 > payload. Enforcement is the **worker's** responsibility — worker code lives
 > outside this repo, so the bot/broker only publish the directive.
+
+**Lists render as tables**
+
+`/myaccounts`, `/switch`, `/trades` and `/atrades` reply with a monospace
+table (a Telegram `<pre>` block) rather than a run-together string per row:
+
+```text
+📊 Trades (1–3 / 20) · times in UTC+7
+
+SYMBOL   ACTION  STATUS       PRICE    QTY    BALANCE  TIME
+──────────────────────────────────────────────────────────────────
+XAUUSD   LONG    OPEN      2,345.68   1.00  10,102.50  01-01 07:00
+BTCUSDT  SHORT   PARTIAL  65,000.00   0.50  10,250.75  01-02 20:45
+EURUSD   LONG    CLOSED        1.09  10.00   9,980.00  01-04 13:30
+```
+
+Because monospace alignment breaks on double-width glyphs, markers inside a
+table are text rather than emoji: the active account is `★` (U+2605), and a
+trade's status is abbreviated (`OPEN`, `PARTIAL`, `REJECT`) instead of the
+colour-coded circle. Inline keyboard buttons are not monospace and keep the
+emoji.
+
+**Times are shown in the configured timezone**
+
+Every timestamp the bot displays is converted to the `notification_timezone`
+broker setting — the same offset applied to broker-sent notifications — and the
+zone is always named (once in the table header, e.g. `· times in UTC+7`). The
+bot has no DB access, so it reads the offset from
+`GET /admin/settings/notification-timezone` and falls back to UTC+7, the
+broker's own default, if that call fails.
 
 Run it with the stack: `docker compose up -d bot`. See [`bot/README.md`](bot/README.md)
 for configuration and local development.
@@ -956,7 +1005,7 @@ the row on the next read.
 | `notification_include_signal_raw` | `"0"` | `POST /admin/settings/include-signal-raw` | Append indicators/inputs to notifications |
 | `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
-| `notification_timezone` | `"7"` | `POST /admin/settings/notification-timezone` | UTC offset (hours) applied to the `Time:` line of Telegram notifications |
+| `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `SYSTEM.RETRY_SIGNALS` replay sent to a freshly-connected worker |
 
 ---

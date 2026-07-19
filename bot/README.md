@@ -22,9 +22,15 @@ gets an extended chat-scoped menu.
 
 ### Enduser commands
 
-`/start` (link), `/trades`, `/flat`, `/prevent`, `/allow`, `/status`, `/unlink`, `/help`.
+`/start` (link), `/trades`, `/flat`, `/prevent`, `/allow`, `/status`,
+`/myaccounts`, `/link`, `/switch`, `/unlink`, `/help`.
 
 `FLAT`/`PREVENT`/`ALLOW` each require a confirmation tap.
+
+One linked account is **active** at a time; `/status`, `/trades`, `/flat`,
+`/prevent`, `/allow` and `/unlink` all act on it. `/myaccounts` lists the linked
+accounts, `/link` adds one, and `/switch` lists them with a button per account
+to change the active one.
 
 > ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_ENTRIES`/`ALLOW_ENTRIES` admin command
 > over NATS (via the broker). The **worker** must be updated to honor it —
@@ -53,6 +59,43 @@ the old secret stops working immediately. It does **not** evict anyone who
 already linked — a token only grants the initial claim. To remove a specific
 person, they `/unlink` (or delete their `account_bot_links` row).
 
+## Rendering
+
+Every list command replies with a monospace table (a Telegram `<pre>` block)
+built by `render_table` in `app/utils/table.py` — `/myaccounts`, `/switch`,
+`/trades`, `/atrades`:
+
+```text
+📊 Trades (1–3 / 20) · times in UTC+7
+
+SYMBOL   ACTION  STATUS       PRICE    QTY    BALANCE  TIME
+──────────────────────────────────────────────────────────────────
+XAUUSD   LONG    OPEN      2,345.68   1.00  10,102.50  01-01 07:00
+BTCUSDT  SHORT   PARTIAL  65,000.00   0.50  10,250.75  01-02 20:45
+EURUSD   LONG    CLOSED        1.09  10.00   9,980.00  01-04 13:30
+```
+
+`render_table(headers, rows, aligns, max_widths)` sizes each column to its
+widest cell, right-aligns where asked (`"r"` — used for the numeric columns),
+truncates over-long values with an ellipsis, and HTML-escapes for the caller.
+Padding is computed on the visible text *before* escaping, so entities never
+skew a column.
+
+Alignment only holds for single-width characters, which rules emoji out of
+table cells — they are double-width and vary by platform. So markers inside a
+table are text: the active account is `★` (U+2605), and a trade's status is
+abbreviated (`OPEN`, `PARTIAL`, `REJECT`, `CLOSED`, `FLAT`) rather than the
+colour-coded circle. Inline keyboard buttons are not monospace and keep the
+emoji.
+
+**Timezone.** Every displayed timestamp is converted to the broker's
+`notification_timezone` setting — the same offset used for broker-sent
+notifications — and the zone is always named, once in the table header
+(`· times in UTC+7`) rather than on each row. The bot has no DB access, so
+`app/utils/timezone.py` takes the offset from
+`GET /admin/settings/notification-timezone`; if that call fails it falls back
+to UTC+7, the broker's own default.
+
 ## Architecture
 
 ```
@@ -60,15 +103,18 @@ app/
 ├── __main__.py        # Dispatcher, polling, graceful shutdown
 ├── commands.py        # USER/ADMIN command lists + scoped setup_bot_commands
 ├── config.py          # BotSettings (pydantic-settings; admin_ids)
-├── helpers.py         # safe_edit_text (ignores "message is not modified")
+├── constants.py       # markets + gateways valid per market
+├── emojis.py          # named emoji constants (no raw glyphs in source)
 ├── logger.py          # console + daily rolling file
-├── states.py          # FSM: LinkAccount.waiting_for_token
+├── states.py          # FSM: LinkAccount, CreateAccount
 ├── filters/           # is_admin.py — IsAdmin router gate
 ├── services/          # broker_client.py — httpx client (enduser + admin calls)
 ├── middlewares/       # deps.py (DI), auth.py (require-linked guard)
 ├── handlers/          # start, link, trades, commands, account, admin
 ├── keyboards/         # inline keyboards (confirm, pagination, pickers, settings)
-└── presenters/        # render API payloads → Telegram HTML
+├── presenters/        # render API payloads → Telegram HTML
+└── utils/             # table (monospace tables), timezone (local time),
+                       # telegram (safe_edit_text), pagination
 ```
 
 ## Configuration (env / `.env`)

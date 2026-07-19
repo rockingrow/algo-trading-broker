@@ -37,6 +37,7 @@ from app.filters.is_admin import IsAdmin
 from app.presenters import messages
 from app.states import CreateAccount
 from app.utils.telegram import safe_edit_text
+from app.utils.timezone import offset_hours_from_payload
 from app.keyboards import inline
 from app.services.broker_client import BrokerClientAdmin
 
@@ -68,8 +69,9 @@ async def _atrades_view(
   payload = await broker_admin.admin_list_trades(account_id, limit=PAGE_SIZE, offset=offset)
   if payload is None:
     return None, None
+  tz_offset = offset_hours_from_payload(await broker_admin.get_notification_timezone())
   return (
-    messages.AdminMessages.format_admin_trades(account_id, payload),
+    messages.AdminMessages.format_admin_trades(account_id, payload, tz_offset),
     inline.admin_trades_pagination(account_id, payload.get("page", {})),
   )
 

@@ -222,6 +222,7 @@ class BrokerClientAdmin(BrokerClient):
     ROTATE_TOKEN = "accounts/{account_id}/link-token/rotate"
     SETTINGS = "settings"
     SETTINGS_TOGGLE = "settings/{slug}"
+    NOTIFICATION_TIMEZONE = "settings/notification-timezone"
 
   async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
     """All trading accounts (includes link_token + linked_user_ids)."""
@@ -307,4 +308,12 @@ class BrokerClientAdmin(BrokerClient):
     """Toggle a broker setting (slug: block-signal, silent-signal, include-signal-raw)."""
     return self._json_or_none(
       await self._request("POST", self._path(self.ENDPOINTS.SETTINGS_TOGGLE, slug=slug))
+    )
+
+  async def get_notification_timezone(self) -> Optional[dict[str, Any]]:
+    """The broker's configured display timezone (``{"setting": ..., "value": "7"}``,
+    a UTC offset in hours). None on failure — callers fall back to the same
+    default the broker itself uses."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.NOTIFICATION_TIMEZONE))
     )

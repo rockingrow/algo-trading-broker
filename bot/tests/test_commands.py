@@ -15,7 +15,7 @@ from app.commands import (
 
 
 def test_command_list_sizes():
-  assert len(USER_COMMANDS) == 10
+  assert len(USER_COMMANDS) == 11
   assert len(ADMIN_EXTRA_COMMANDS) == 6
   # Admin sees user commands plus the extras.
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)

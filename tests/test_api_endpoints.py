@@ -701,6 +701,25 @@ def test_set_notification_timezone_persist_failure_returns_500(ctx):
   assert resp.status_code == 500
 
 
+def test_get_notification_timezone_defaults_to_utc_plus_7(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/notification-timezone", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == NOTIFICATION_TIMEZONE_KEY
+  assert body["value"] == "7"
+
+
+def test_get_notification_timezone_reflects_stored_value(ctx):
+  ctx["setting_repo"].values[NOTIFICATION_TIMEZONE_KEY] = "9"
+  resp = ctx["client"].get(
+    "/admin/settings/notification-timezone", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "9"
+
+
 # ── Admin settings (read) ──────────────────────────────────────────
 
 

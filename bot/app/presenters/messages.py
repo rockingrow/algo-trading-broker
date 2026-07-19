@@ -11,13 +11,25 @@ import html
 from typing import Any, Optional
 
 from app import emojis
+from app.utils.table import ACTIVE_MARK, render_table
+from app.utils.timezone import SHORT_TIME_FMT, format_local_time, format_utc_label
 
-_STATUS_EMOJI = {
-  "OPENED": emojis.GREEN_CIRCLE,
-  "CLOSED": emojis.WHITE_CIRCLE,
-  "FLAT": emojis.BLUE_CIRCLE,
-  "REJECTED": emojis.RED_CIRCLE,
-  "PARTIALLY_CLOSED": emojis.YELLOW_CIRCLE,
+# Broker wire action → the bot command that triggered it. Users type /prevent,
+# not BLOCK_ENTRIES; echoing the enum back leaks broker vocabulary at them.
+_ACTION_LABEL = {
+  "FLAT": "Flat",
+  "BLOCK_ENTRIES": "Prevent",
+  "ALLOW_ENTRIES": "Allow",
+}
+
+# Table cells must stay single-width, so the status shows as an abbreviation
+# rather than the colour-coded circle a free-form line could afford.
+_STATUS_LABEL = {
+  "OPENED": "OPEN",
+  "CLOSED": "CLOSED",
+  "FLAT": "FLAT",
+  "REJECTED": "REJECT",
+  "PARTIALLY_CLOSED": "PARTIAL",
 }
 
 
@@ -34,24 +46,28 @@ def _fmt_num(value: Optional[float]) -> str:
     return _esc(value)
 
 
-def _format_trade_line(trade: dict[str, Any]) -> str:
+def _trade_row(trade: dict[str, Any], tz_offset_hours: float) -> tuple[str, ...]:
+  """One trade as raw table cells — render_table escapes and pads them."""
   status = str(trade.get("status", ""))
-  emoji = _STATUS_EMOJI.get(status, "•")
-  updated = str(trade.get("updatedAt", ""))[:19].replace("T", " ")
   return (
-    f"{emoji} <b>{_esc(trade.get('symbol'))}</b> "
-    f"{_esc(trade.get('action'))} · {_esc(status)}\n"
-    f"   price {_fmt_num(trade.get('price'))} · qty {_fmt_num(trade.get('quantity'))} "
-    f"· balance {_fmt_num(trade.get('account_balance'))}\n"
-    f"   <i>{_esc(updated)}</i>"
+    str(trade.get("symbol") or "—"),
+    str(trade.get("action") or "—"),
+    _STATUS_LABEL.get(status, status),
+    _fmt_num(trade.get("price")),
+    _fmt_num(trade.get("quantity")),
+    _fmt_num(trade.get("account_balance")),
+    format_local_time(
+      trade.get("updatedAt"), tz_offset_hours, fmt=SHORT_TIME_FMT, with_label=False
+    ),
   )
 
 
 def format_command_result(result: dict[str, Any]) -> str:
-  action = _esc(result.get("action"))
+  # Unknown actions fall through escaped, so a new broker enum still displays.
+  action = _ACTION_LABEL.get(str(result.get("action")), _esc(result.get("action")))
   scope = _esc(result.get("scope"))
   return (
-    f"{emojis.CHECK} Command <b>{action}</b> sent\n"
+    f"{emojis.CHECK} Command <b>{action}</b> done\n"
     f"Scope: <code>{scope}</code>\n\n"
     "<i>The command has been dispatched to the worker via the broker.</i>"
   )
@@ -67,6 +83,7 @@ class UserMessages:
     "/prevent — Block new orders\n"
     "/allow — Allow new orders\n"
     "/status — Account info\n"
+    "/myaccounts — List linked accounts\n"
     "/link — Add another account\n"
     "/switch — Change active account\n"
     "/unlink — Unlink active account"
@@ -92,23 +109,36 @@ class UserMessages:
     )
 
   @staticmethod
-  def format_accounts_list(accounts: list[dict[str, Any]]) -> str:
-    """Caption for the /switch account picker — one line per linked account,
-    marking the currently active one."""
+  def format_accounts_list(accounts: list[dict[str, Any]], with_switch_hint: bool = True) -> str:
+    """One table row per linked account, starring the currently active one.
+
+    ``with_switch_hint`` appends the "tap to switch" line, relevant only when
+    the message is paired with the /switch inline picker keyboard.
+    """
     if not accounts:
       return f"{emojis.EMPTY_MAILBOX} No linked accounts."
-    lines = [f"<b>{emojis.FOLDER} Your accounts</b> ({len(accounts)})", ""]
-    for a in accounts:
-      dot = emojis.STAR if a.get("is_active") else "•"
-      lines.append(
-        f"{dot} <code>{_esc(a.get('market'))}-{_esc(a.get('gateway') or '?')}-"
-        f"{_esc(a.get('account_id'))}</code>"
-      )
-    lines.append("\n<i>Tap an account below to make it active.</i>")
+    table = render_table(
+      headers=(ACTIVE_MARK, "MARKET", "GATEWAY", "ACCOUNT"),
+      rows=[
+        (
+          ACTIVE_MARK if a.get("is_active") else "",
+          a.get("market"),
+          a.get("gateway") or "?",
+          a.get("account_id"),
+        )
+        for a in accounts
+      ],
+      # ACCOUNT is capped because ids can be long (an email, say) — the rest
+      # are short enums that size themselves.
+      max_widths=(1, None, None, 24),
+    )
+    lines = [f"<b>{emojis.FOLDER} Your accounts</b> ({len(accounts)})", "", table]
+    if with_switch_hint:
+      lines.append("\n<i>Tap an account below to make it active.</i>")
     return "\n".join(lines)
 
   @staticmethod
-  def format_trades(payload: dict[str, Any]) -> str:
+  def format_trades(payload: dict[str, Any], tz_offset_hours: float) -> str:
     data = payload.get("data") or []
     page = payload.get("page") or {}
     total = page.get("total", len(data))
@@ -120,9 +150,18 @@ class UserMessages:
     start = offset + 1
     end = offset + len(data)
 
-    header = f"<b>{emojis.CHART} Trades</b> ({start}–{end} / {total})"
-    lines = [_format_trade_line(t) for t in data]
-    return header + "\n\n" + "\n".join(lines)
+    # The zone is stated once here rather than repeated on every row.
+    header = (
+      f"<b>{emojis.CHART} Trades</b> ({start}–{end} / {total}) · "
+      f"times in {format_utc_label(tz_offset_hours)}"
+    )
+    table = render_table(
+      headers=("SYMBOL", "ACTION", "STATUS", "PRICE", "QTY", "BALANCE", "TIME"),
+      rows=[_trade_row(t, tz_offset_hours) for t in data],
+      aligns=("l", "l", "l", "r", "r", "r", "l"),
+      max_widths=(12, 6, 7, None, None, None, None),
+    )
+    return header + "\n\n" + table
 
 
 class AdminMessages:
@@ -158,9 +197,11 @@ class AdminMessages:
     return "\n".join(lines)
 
   @staticmethod
-  def format_admin_trades(account_id: str, payload: dict[str, Any]) -> str:
+  def format_admin_trades(
+    account_id: str, payload: dict[str, Any], tz_offset_hours: float
+  ) -> str:
     return f"<b>Account</b> <code>{_esc(account_id)}</code>\n\n" + UserMessages.format_trades(
-      payload
+      payload, tz_offset_hours
     )
 
   @staticmethod

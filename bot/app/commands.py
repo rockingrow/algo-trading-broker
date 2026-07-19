@@ -26,6 +26,7 @@ USER_COMMANDS = [
   BotCommand(command="prevent", description="Block new orders"),
   BotCommand(command="allow", description="Allow new orders"),
   BotCommand(command="status", description="Account info"),
+  BotCommand(command="myaccounts", description="List linked accounts"),
   BotCommand(command="link", description="Add another account"),
   BotCommand(command="switch", description="Change active account"),
   BotCommand(command="unlink", description="Unlink active account"),

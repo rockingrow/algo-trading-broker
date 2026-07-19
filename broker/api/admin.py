@@ -11,7 +11,11 @@ from broker.constants import (
   SILENT_SIGNAL,
 )
 from broker.helpers import emoji_constants as em
-from broker.helpers.timezone_helper import format_offset_value, format_utc_label
+from broker.helpers.timezone_helper import (
+  format_offset_value,
+  format_utc_label,
+  parse_offset_hours,
+)
 from broker.providers import (
   get_account_repository,
   get_admin_notifier,
@@ -350,6 +354,23 @@ def get_admin_router() -> APIRouter:
     await _push_crypto_leverage_init(publisher, setting_repo, account_repo)
 
     return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
+
+  @router.get(
+    "/settings/notification-timezone",
+    tags=["settings"],
+    summary="Get the notification display timezone",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_notification_timezone(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Current NOTIFICATION_TIMEZONE_KEY UTC offset (in hours), falling back
+    to UTC+7 when unset — the same default `format_notification_time` uses."""
+    hours = parse_offset_hours(await setting_repo.get(NOTIFICATION_TIMEZONE_KEY))
+    return SettingValueResponse(
+      setting=NOTIFICATION_TIMEZONE_KEY, value=format_offset_value(hours)
+    )
 
   @router.post(
     "/settings/notification-timezone",

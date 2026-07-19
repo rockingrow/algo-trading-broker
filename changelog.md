@@ -69,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `c9d8e7f6a5b4` and denormalised from the owning `accounts` row at upsert
   time, so a trade can be attributed to the right account now that
   `account_id` alone no longer identifies one.
+- **`GET /admin/settings/notification-timezone`** — Read the current
+  `notification_timezone` UTC offset (defaults to `7`), backing the bot's own
+  timezone conversion below.
 
 ### Changed
 
@@ -106,6 +109,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grouped into `UserMessages` / `AdminMessages` under `app/presenters`, with
   reusable cross-handler logic (`safe_edit_text`, pagination keyboard building)
   extracted to `app/utils`.
+- **Account and trade lists render as tables** — `/myaccounts` and `/switch`
+  show one padded row per account (active ★ / market / gateway / account)
+  instead of a run-together `market-gateway-id` string; `/trades` and
+  `/atrades` show one row per trade (symbol / action / status / price / qty /
+  balance / time) instead of a three-line block per trade. Both go through a
+  reusable `render_table` in `app/utils/table.py` (monospace `<pre>`,
+  per-column alignment and width caps, escaping handled for the caller).
+  Two consequences of monospace alignment:
+  - The active marker is the text star `★` rather than the `:star:` emoji,
+    which is double-width and would skew every column after it. The inline
+    `/switch` buttons still use the emoji.
+  - Trade status shows as a text abbreviation (`OPEN`, `PARTIAL`, `REJECT`)
+    in place of the colour-coded circle, which had the same width problem.
+  Trade timestamps drop to `MM-DD HH:MM` and the timezone moves from every
+  row into the header (`· times in UTC+7`), so it is still always shown.
+
+### Fixed
+
+- **`/trades` and `/atrades` showed a bare UTC timestamp** — The bot rendered
+  each trade's `updatedAt` as raw UTC digits with no indication of the zone.
+  It now reads the broker's `notification_timezone` setting (new
+  `GET /admin/settings/notification-timezone`, `app/utils/timezone.py`) and
+  converts to that offset, matching the timezone already applied to Telegram
+  signal notifications. The bot never reads `broker_settings` directly, so a
+  failed call falls back to UTC+7 — the broker's own default. See the table
+  entry above for how the converted time and its zone are laid out.
 
 ## [1.1.0] - 2026-07-18
 

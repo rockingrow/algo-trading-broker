@@ -247,6 +247,20 @@ async def test_admin_list_trades_path_and_params():
   await client.aclose()
 
 
+async def test_get_notification_timezone_path():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    return httpx.Response(200, json={"setting": "notification_timezone", "value": "9"})
+
+  client = _admin_client(handler)
+  result = await client.get_notification_timezone()
+  assert result == {"setting": "notification_timezone", "value": "9"}
+  assert captured["path"] == "/admin/settings/notification-timezone"
+  await client.aclose()
+
+
 async def test_admin_flat_default_body():
   captured = {}
 

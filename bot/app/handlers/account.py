@@ -24,6 +24,18 @@ async def cmd_status(message: Message, account: dict[str, Any]) -> None:
   await message.answer(messages.UserMessages.format_account(account))
 
 
+# ── /myaccounts — list all accounts linked to this Telegram user ──────
+
+
+@router.message(Command("myaccounts"))
+async def cmd_myaccounts(message: Message, broker: BrokerClientUser) -> None:
+  accounts = await broker.list_accounts(message.from_user.id)
+  if accounts is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch your accounts. Try again later.")
+    return
+  await message.answer(messages.UserMessages.format_accounts_list(accounts, with_switch_hint=False))
+
+
 # ── /switch — change which linked account is active ───────────────────
 # AuthMiddleware already resolved an active account before this handler runs,
 # so the caller is guaranteed to have at least one linked account.
