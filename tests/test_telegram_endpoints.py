@@ -31,61 +31,73 @@ TOKEN = uuid.uuid4()
 
 
 class FakeTgAccountRepo:
-  """In-memory stand-in for ``AccountRepository`` supporting several accounts
-  per telegram_user_id, mirroring ``SqlAlchemyAccountRepository``'s
-  active-account model: the first account linked becomes active; later links
-  don't disturb it."""
+  """In-memory stand-in for ``AccountRepository`` mirroring
+  ``SqlAlchemyAccountRepository``'s model: ``account_bot_links`` is a
+  many-to-many set of ``(platform_user_id, account)`` pairs, tokens live apart
+  from accounts, and the first account a user links becomes active while later
+  links don't disturb it.
+
+  ``_links`` is keyed by the platform user id **as a string**, matching the
+  ``String(64)`` column the real repository writes."""
 
   def __init__(self, accounts: list[Account] | Account | None):
     if accounts is None:
       accounts = []
     elif isinstance(accounts, Account):
       accounts = [accounts]
-    self._by_token = {str(a.telegram_link_token): a for a in accounts}
-    self._linked: dict[int, list[Account]] = {}
-    self._active: dict[int, uuid.UUID] = {}
+    self._accounts = accounts
+    # Tokens are no longer a column on the account, so they're a side map here
+    # too. Seeded positionally: first account gets TOKEN, second TOKEN_2.
+    self._by_token = dict(zip([str(TOKEN), str(TOKEN_2)], accounts))
+    self._links: dict[str, list[Account]] = {}
+    self._active: dict[str, uuid.UUID] = {}
 
-  async def list_by_telegram_user_id(self, telegram_user_id):
-    return list(self._linked.get(telegram_user_id, []))
+  async def list_by_telegram_user_id(self, telegram_user_id, platform=None):
+    return list(self._links.get(str(telegram_user_id), []))
 
-  async def get_active_account(self, telegram_user_id):
-    linked = self._linked.get(telegram_user_id)
+  async def get_active_account(self, telegram_user_id, platform=None):
+    linked = self._links.get(str(telegram_user_id))
     if not linked:
       return None
-    active_id = self._active.get(telegram_user_id)
+    active_id = self._active.get(str(telegram_user_id))
     return next((a for a in linked if a.id == active_id), linked[0])
 
-  async def set_active_account(self, telegram_user_id, account_id):
-    linked = self._linked.get(telegram_user_id, [])
+  async def set_active_account(self, telegram_user_id, account_id, platform=None):
+    linked = self._links.get(str(telegram_user_id), [])
     match = next((a for a in linked if a.id == account_id), None)
     if match is None:
       return None
-    self._active[telegram_user_id] = account_id
+    self._active[str(telegram_user_id)] = account_id
     return match
 
-  async def link_telegram(self, token, telegram_user_id):
+  async def link_telegram(self, token, telegram_user_id, platform=None):
     account = self._by_token.get(str(token))
     if account is None:
       return None
-    account.telegram_user_id = telegram_user_id
-    linked = self._linked.setdefault(telegram_user_id, [])
+    key = str(telegram_user_id)
+    linked = self._links.setdefault(key, [])
     if account not in linked:
       linked.append(account)
-    self._active.setdefault(telegram_user_id, account.id)
+    self._active.setdefault(key, account.id)
     return account
 
-  async def unlink_telegram(self, telegram_user_id):
-    linked = self._linked.get(telegram_user_id)
+  async def unlink_telegram(self, telegram_user_id, platform=None):
+    key = str(telegram_user_id)
+    linked = self._links.get(key)
     if not linked:
       return False
     active = await self.get_active_account(telegram_user_id)
     linked.remove(active)
-    active.telegram_user_id = None
     if linked:
-      self._active[telegram_user_id] = linked[0].id
+      self._active[key] = linked[0].id
     else:
-      self._active.pop(telegram_user_id, None)
+      self._active.pop(key, None)
     return True
+
+  def linked_user_ids(self, account: Account) -> list[str]:
+    """Test helper: who currently holds *account* (the join table's other
+    direction, which no endpoint exposes)."""
+    return [uid for uid, accounts in self._links.items() if account in accounts]
 
 
 class FakeTradeRepo:
@@ -116,8 +128,6 @@ def _make_account() -> Account:
     account_balance=1000.0,
     market=MarketTypeEnum.FOREX,
     last_activity_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-    telegram_user_id=None,
-    telegram_link_token=TOKEN,
   )
 
 
@@ -180,7 +190,9 @@ def test_link_success(ctx):
   assert resp.status_code == 200
   body = resp.json()
   assert body["account_id"] == "acc-1"
-  assert body["telegram_user_id"] == TG_ID
+  assert body["is_active"] is True
+  # The response deliberately no longer echoes the caller's own id.
+  assert "telegram_user_id" not in body
 
 
 def test_link_invalid_token(ctx):
@@ -320,8 +332,6 @@ def _make_account2() -> Account:
     market=MarketTypeEnum.CRYPTO,
     gateway="BINANCE",
     last_activity_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
-    telegram_user_id=None,
-    telegram_link_token=TOKEN_2,
   )
 
 
@@ -409,6 +419,67 @@ def test_switch_active_account_not_owned(multi_ctx):
     headers=_headers(),
   )
   assert resp.status_code == 404
+
+
+# ── many users per account ──────────────────────────────────────────
+
+OTHER_TG_ID = 9999
+
+
+def test_second_user_can_link_same_account(ctx):
+  """The account<->bot-user join table's whole point. Under the old scalar
+  ``accounts.telegram_user_id`` this silently stole the account from the
+  first user; now both hold it."""
+  for tg_id in (TG_ID, OTHER_TG_ID):
+    resp = ctx["client"].post(
+      "/v1/telegram/link",
+      json={"token": str(TOKEN), "telegram_user_id": tg_id},
+      headers=_headers(),
+    )
+    assert resp.status_code == 200
+
+  for tg_id in (TG_ID, OTHER_TG_ID):
+    resp = ctx["client"].get(f"/v1/telegram/{tg_id}", headers=_headers())
+    assert resp.status_code == 200
+    assert resp.json()["account_id"] == "acc-1"
+
+  account = ctx["account_repo"]._accounts[0]
+  assert ctx["account_repo"].linked_user_ids(account) == [
+    str(TG_ID),
+    str(OTHER_TG_ID),
+  ]
+
+
+def test_unlink_leaves_other_users_link_intact(ctx):
+  for tg_id in (TG_ID, OTHER_TG_ID):
+    ctx["client"].post(
+      "/v1/telegram/link",
+      json={"token": str(TOKEN), "telegram_user_id": tg_id},
+      headers=_headers(),
+    )
+
+  resp = ctx["client"].post(f"/v1/telegram/{TG_ID}/unlink", headers=_headers())
+  assert resp.status_code == 200
+
+  # The unlinking user is gone...
+  assert ctx["client"].get(f"/v1/telegram/{TG_ID}", headers=_headers()).status_code == 404
+  # ...the other one still has the account.
+  resp = ctx["client"].get(f"/v1/telegram/{OTHER_TG_ID}", headers=_headers())
+  assert resp.status_code == 200
+  assert resp.json()["account_id"] == "acc-1"
+
+
+def test_relinking_same_account_is_idempotent(ctx):
+  for _ in range(2):
+    resp = ctx["client"].post(
+      "/v1/telegram/link",
+      json={"token": str(TOKEN), "telegram_user_id": TG_ID},
+      headers=_headers(),
+    )
+    assert resp.status_code == 200
+
+  resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/accounts", headers=_headers())
+  assert len(resp.json()) == 1
 
 
 # ── auth enforcement ────────────────────────────────────────────────

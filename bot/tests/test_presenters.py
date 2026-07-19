@@ -13,12 +13,11 @@ def test_format_account_shows_id_and_balance():
       "account_name": "Main",
       "account_balance": 1234.5,
       "market": "FOREX",
-      "telegram_user_id": 7,
     }
   )
   assert "acc-1" in out
   assert "1,234.50" in out
-  assert "Status: linked" in out
+  assert "FOREX" in out
 
 
 def test_format_account_escapes_html():
@@ -87,21 +86,22 @@ def test_format_accounts_admin():
         "account_id": "acc-1",
         "account_balance": 100.0,
         "market": "FOREX",
-        "telegram_user_id": 5,
-        "telegram_link_token": "tok-123",
+        "linked_user_ids": ["5", "6"],
+        "link_token": "tok-123",
       },
       {
         "account_name": None,
         "account_id": "acc-2",
         "market": "CRYPTO",
-        "telegram_user_id": None,
-        "telegram_link_token": "tok-456",
+        "linked_user_ids": [],
+        "link_token": "tok-456",
       },
     ]
   )
   assert "acc-1" in out and "acc-2" in out
-  assert emojis.CHECK in out  # linked
-  assert "—" in out  # unlinked
+  # An account can have several managers now, so the mark carries the count.
+  assert f"{emojis.CHECK}2" in out
+  assert "—" in out  # unclaimed
   assert "tok-123" in out
   assert "tg-spoiler" in out
 
@@ -123,7 +123,7 @@ def test_format_settings():
 
 def test_format_rotate_result():
   out = messages.AdminMessages.format_rotate_result(
-    {"account_id": "acc-1", "telegram_link_token": "new-tok"}
+    {"account_id": "acc-1", "link_token": "new-tok"}
   )
   assert "new-tok" in out
   assert "acc-1" in out
@@ -136,7 +136,7 @@ def test_format_account_created():
       "account_id": "7654321",
       "market": "CRYPTO",
       "gateway": "BINANCE",
-      "telegram_link_token": "new-tok",
+      "link_token": "new-tok",
     }
   )
   assert "7654321" in out

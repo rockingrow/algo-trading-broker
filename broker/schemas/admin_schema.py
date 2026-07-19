@@ -20,10 +20,10 @@ class SettingValueResponse(BaseModel):
 
 
 class RotateTokenResponse(BaseModel):
-  """Result of rotating an account's Telegram link token."""
+  """Result of rotating an account's bot link token."""
 
   account_id: str
-  telegram_link_token: uuid.UUID
+  link_token: uuid.UUID
 
 
 class AdminResponse(BaseModel):

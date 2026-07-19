@@ -32,7 +32,11 @@ from broker.providers import (
 )
 from broker.router import get_core_router
 from broker.schemas.trade_schema import TradeStatusEnum
-from broker.schemas.account_schema import MarketTypeEnum, compose_worker_id
+from broker.schemas.account_schema import (
+  AccountLinkSummary,
+  MarketTypeEnum,
+  compose_worker_id,
+)
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import SystemActionEnum
 from broker.security.ensure_api_key import ensure_api_key
@@ -101,9 +105,20 @@ class FakePublisher:
 class FakeAccountRepo:
   def __init__(self, accounts):
     self.accounts = list(accounts)
+    # account id -> summary, standing in for account_link_tokens +
+    # account_bot_links. Every account gets a token on creation, as the real
+    # repository does.
+    self.summaries: dict[uuid.UUID, AccountLinkSummary] = {
+      a.id: AccountLinkSummary(link_token=uuid.uuid4()) for a in self.accounts
+    }
 
   async def get_all(self):
     return self.accounts
+
+  async def get_link_summaries(self, account_ids, platform=None):
+    return {
+      aid: self.summaries[aid] for aid in account_ids if aid in self.summaries
+    }
 
   async def get_by_market(self, market):
     return [a for a in self.accounts if a.market == market]
@@ -120,6 +135,7 @@ class FakeAccountRepo:
       account_id=account_id, account_name=account_name, market=market, gateway=gateway
     )
     self.accounts.append(account)
+    self.summaries[account.id] = AccountLinkSummary(link_token=uuid.uuid4())
     return account
 
 

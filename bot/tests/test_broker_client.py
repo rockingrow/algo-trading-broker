@@ -33,11 +33,11 @@ async def test_link_success_returns_account():
     captured["path"] = request.url.path
     captured["method"] = request.method
     captured["api_key"] = request.headers.get("x-api-key")
-    return httpx.Response(200, json={"account_id": "acc-1", "telegram_user_id": 7})
+    return httpx.Response(200, json={"account_id": "acc-1", "is_active": True})
 
   client = _client(handler)
   result = await client.link("11111111-1111-1111-1111-111111111111", 7)
-  assert result == {"account_id": "acc-1", "telegram_user_id": 7}
+  assert result == {"account_id": "acc-1", "is_active": True}
   assert captured["path"] == "/v1/telegram/link"
   assert captured["method"] == "POST"
   assert captured["api_key"] == "secret-key"
@@ -209,7 +209,8 @@ async def test_admin_create_account_success():
         "account_id": "7654321",
         "market": "CRYPTO",
         "gateway": "BINANCE",
-        "telegram_link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
+        "link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
+        "linked_user_ids": [],
       },
     )
 
@@ -283,7 +284,7 @@ async def test_admin_rotate_settings_toggle_paths():
 
   def handler(request: httpx.Request) -> httpx.Response:
     seen.append(request.url.path)
-    return httpx.Response(200, json={"account_id": "acc-1", "telegram_link_token": "t"})
+    return httpx.Response(200, json={"account_id": "acc-1", "link_token": "t"})
 
   client = _admin_client(handler)
   await client.admin_rotate_token("acc-1")

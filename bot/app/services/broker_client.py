@@ -224,7 +224,7 @@ class BrokerClientAdmin(BrokerClient):
     SETTINGS_TOGGLE = "settings/{slug}"
 
   async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
-    """All trading accounts (includes telegram_link_token + link status)."""
+    """All trading accounts (includes link_token + linked_user_ids)."""
     return self._json_or_none(await self._request("GET", "/v1/accounts"))
 
   async def admin_create_account(

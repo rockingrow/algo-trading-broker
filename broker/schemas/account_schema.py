@@ -7,6 +7,7 @@ Status enum shared by the Account ORM model and the NATS ACCOUNT handler.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -54,6 +55,19 @@ def decompose_worker_id(worker_id: str, market: str, gateway: str) -> str:
   return worker_id.removeprefix(f"{market}-{gateway}-")
 
 
+@dataclass
+class AccountLinkSummary:
+  """The bot-facing facts about an account that no longer live on its row: the
+  token an admin can hand out, and which platform users are linked to it.
+
+  Lives here rather than in the repository so the ``AccountRepository``
+  protocol can name it without depending on the SQLAlchemy implementation.
+  """
+
+  link_token: Optional[uuid.UUID] = None
+  linked_user_ids: list[str] = field(default_factory=list)
+
+
 class AccountResponse(BaseModel):
   """API response model for a registered trading account, serialised from the Account ORM row."""
 
@@ -64,10 +78,13 @@ class AccountResponse(BaseModel):
   market: MarketTypeEnum
   gateway: Optional[str]
   last_activity_at: Optional[datetime]
-  # Telegram binding. ``telegram_link_token`` is exposed here only because this
-  # endpoint is X-API-KEY protected (admin) — admins hand it to end-users.
-  telegram_user_id: Optional[int] = None
-  telegram_link_token: Optional[uuid.UUID] = None
+  # Bot binding, joined in from account_link_tokens / account_bot_links rather
+  # than read off the account row. ``link_token`` is exposed here only because
+  # this endpoint is X-API-KEY protected (admin) — admins hand it to end-users.
+  # ``linked_user_ids`` holds platform user ids as strings (an account may be
+  # managed by several people); it is empty for an unclaimed account.
+  link_token: Optional[uuid.UUID] = None
+  linked_user_ids: list[str] = []
   createdAt: datetime
   updatedAt: datetime
 
@@ -82,8 +99,8 @@ class AccountResponse(BaseModel):
         "market": "FOREX",
         "gateway": "MT5",
         "last_activity_at": "2026-06-02T09:30:00Z",
-        "telegram_user_id": None,
-        "telegram_link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
+        "link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
+        "linked_user_ids": [],
         "createdAt": "2026-01-15T08:00:00Z",
         "updatedAt": "2026-06-02T09:30:00Z",
       }

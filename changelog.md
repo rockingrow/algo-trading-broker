@@ -15,26 +15,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   touches PostgreSQL or NATS directly. Ships its own `pyproject` / `Dockerfile`
   / `uv.lock` and a `bot` service in `docker-compose.yml`. Run it with
   `docker compose up -d bot`; see [`bot/README.md`](bot/README.md).
-- **UUID-based account linking** — Every `accounts` row carries a
-  `telegram_link_token` (UUID, migration `d4f1a2c3b5e6`). An admin hands it to
-  an end user, who pastes it into the bot's `/start` FSM flow; the bot calls
-  `POST /v1/telegram/link` to bind their `telegram_user_id` to the account.
+- **UUID-based account linking** — Every account gets a link token (UUID) in
+  `account_link_tokens`. An admin hands it to an end user, who pastes it into
+  the bot's `/start` FSM flow; the bot calls `POST /v1/telegram/link`, which
+  records the join row.
 - **`/v1/telegram/*` endpoints** — `link`, `{id}` (active account), `{id}/accounts`,
   `{id}/active-account`, `{id}/trades`, `{id}/commands/flat`,
   `{id}/commands/prevent`, `{id}/unlink`. All behind `X-API-KEY`: the bot is the
   only caller, and the end-user identity is the `telegram_user_id` taken from a
   verified Telegram update — never from user-typed text.
-- **Multiple accounts per Telegram user, with an active account** — One
-  Telegram user may now link several accounts (typically one per
-  market/gateway pair). A new `telegram_sessions` table (migration
-  `e1f2a3b4c5d6`) holds one row per user pointing at the **active** account;
-  every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
-  `/allow`, `/unlink`) acts on whichever that is. New bot commands `/link`
-  (add another account) and `/switch` (pick the active one from an inline
-  keyboard labelled `market-gateway-account_id`, active one starred). The
-  selection is stored broker-side, so it survives bot restarts; a pointer left
-  stale by an unlink falls back to the user's most recently active account and
-  self-heals on the next read.
+- **Bot bindings decoupled from `accounts`, many-to-many both ways**
+  (migration `f7a8b9c0d1e2`) — `accounts` carries no chat-platform columns at
+  all. Three new tables take over, each keyed by `platform`
+  (`BotPlatformTypeEnum`, currently only `TELEGRAM`) so a future Discord/Slack
+  is a new enum member rather than a migration:
+  - `account_bot_links` — the join table. An account may be managed by
+    **several** bot users (previously impossible: a second link overwrote the
+    first) and a bot user may hold several accounts. No role column yet;
+    every linked user has the same rights. `platform_user_id` is `String(64)`
+    rather than a bigint because not every platform uses numeric ids.
+  - `account_link_tokens` — invite secrets, several per account, individually
+    revocable (`revoked_at`) and optionally time-boxed (`expires_at`, NULL =
+    never). `/rotate` revokes every valid token and issues a new one; it does
+    **not** evict anyone already linked, since a token only grants the
+    initial claim.
+  - `bot_sessions` — one row per bot user pointing at their **active**
+    account; every single-account command (`/status`, `/trades`, `/flat`,
+    `/prevent`, `/allow`, `/unlink`) acts on whichever that is. New bot
+    commands `/link` (add another account) and `/switch` (pick the active one
+    from an inline keyboard labelled `market-gateway-account_id`, active one
+    starred). Stored broker-side, so it survives bot restarts; a pointer left
+    stale by an unlink falls back to the user's most recently active account
+    and self-heals on the next read.
 - **Admin role and scoped command menus** — Telegram command **scopes** give
   endusers the default menu while each id in `TELEGRAM_ADMIN_IDS` gets an
   extended one, re-initialised on every startup (and tolerating admins who have
@@ -72,9 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be ambiguous if it is reused across gateways. Avoid deliberately reusing an
   `account_id` across gateways until those callers pass `market` /
   `gateway` too.
-- **`accounts.telegram_user_id` is no longer unique** — Its unique index is
-  replaced with a plain one so a single Telegram user can hold several linked
-  accounts. Which one is active moved to `telegram_sessions`.
+- **`GET /v1/accounts` / `POST /admin/accounts` response fields** — The
+  Telegram columns are gone from the payload: `telegram_link_token` →
+  `link_token` (joined from `account_link_tokens`), and the scalar
+  `telegram_user_id` → `linked_user_ids`, a list of platform user id strings
+  (an account can have more than one). `POST /admin/accounts/{id}/link-token/rotate`
+  likewise returns `link_token` instead of `telegram_link_token`.
+  `LinkedAccountResponse` (the `/v1/telegram/*` payload) drops
+  `telegram_user_id` entirely — every account in that response is by
+  definition linked to the caller, so the field could only ever echo the id
+  the bot already sent.
 - **`AdminSignal` requires `market` + `gateway` alongside `account_id`** —
   Account-scoped admin signals are now fully disambiguated on the wire, and
   `POST /admin/flat` returns `422` if `account_id` is given without both.

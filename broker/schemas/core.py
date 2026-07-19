@@ -26,6 +26,17 @@ class CryptoGatewayEnum(str, Enum):
   BINANCE = "BINANCE"
 
 
+class BotPlatformTypeEnum(str, Enum):
+  """Chat platform a bot user identity belongs to.
+
+  Only Telegram exists today, but the account<->bot-user tables are keyed by
+  ``(platform, platform_user_id)`` so adding Discord/Slack later is a new enum
+  member rather than a schema migration.
+  """
+
+  TELEGRAM = "TELEGRAM"
+
+
 class SignalStatusEnum(str, Enum):
   """Delivery state of a persisted webhook signal.
 

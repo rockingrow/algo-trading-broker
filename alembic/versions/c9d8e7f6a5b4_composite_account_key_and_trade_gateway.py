@@ -1,4 +1,4 @@
-"""merge heads + composite (market, gateway, account_id) key on accounts,
+"""composite (market, gateway, account_id) key on accounts,
 add market/gateway to trades
 
 Two accounts on different gateways may coincidentally share the same bare
@@ -29,7 +29,7 @@ Until the worker side disambiguates by ``market``+``gateway`` too, avoid
 deliberately reusing an ``account_id`` across gateways in production.
 
 Revision ID: c9d8e7f6a5b4
-Revises: b6f7a8c9d0e1, d4f1a2c3b5e6
+Revises: b6f7a8c9d0e1
 Create Date: 2026-07-19 00:00:00.000000
 
 """
@@ -39,7 +39,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
 revision = "c9d8e7f6a5b4"
-down_revision = ("b6f7a8c9d0e1", "d4f1a2c3b5e6")
+down_revision = "b6f7a8c9d0e1"
 branch_labels = None
 depends_on = None
 

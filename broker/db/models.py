@@ -12,7 +12,6 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import (
-  BigInteger,
   Boolean,
   DateTime,
   Enum,
@@ -26,7 +25,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from broker.schemas.account_schema import MarketTypeEnum
-from broker.schemas.core import SignalActionEnum, SignalStatusEnum
+from broker.schemas.core import (
+  BotPlatformTypeEnum,
+  SignalActionEnum,
+  SignalStatusEnum,
+)
 from broker.schemas.trade_schema import TradeStatusEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -219,21 +222,10 @@ class Account(Base):
     DateTime(timezone=True), nullable=True
   )
 
-  # Telegram bot binding
-  # ``telegram_link_token`` is the UUID handed to the end-user (out of band) so
-  # they can claim the account from the Telegram bot. It is separate from the
-  # primary key so it can be rotated/revoked without touching ``id``.
-  # ``telegram_user_id`` is the Telegram user that claimed this account. NOT
-  # unique — one Telegram user may link several accounts (different
-  # market/gateway pairs). Which of them is currently "active" (the one
-  # single-account commands act on) is tracked separately in
-  # ``TelegramSession``.
-  telegram_user_id: Mapped[int | None] = mapped_column(
-    BigInteger, nullable=True, index=True
-  )
-  telegram_link_token: Mapped[uuid.UUID | None] = mapped_column(
-    UUID(as_uuid=True), nullable=True, unique=True, index=True, default=uuid.uuid4
-  )
+  # No bot/chat-platform columns live here on purpose: an account is a trading
+  # domain object and must not know about Telegram. Who may drive it from a
+  # bot lives in ``AccountBotLink``, the invite secrets in
+  # ``AccountLinkToken``, and the per-user active selection in ``BotSession``.
 
   def __repr__(self) -> str:
     return (
@@ -242,20 +234,115 @@ class Account(Base):
     )
 
 
-class TelegramSession(Base):
+class AccountBotLink(Base):
   """
-  One row per Telegram user, tracking which of their (possibly several)
-  linked accounts is currently "active" — the one single-account commands
-  (/status, /trades, /flat, ...) act on. Decoupled from
-  ``Account.telegram_user_id`` because that column is no longer unique: a
-  Telegram user can link multiple accounts, but only one is active at a time.
+  Many-to-many join between trading accounts and chat-platform users.
+
+  One account may be driven by several bot users (e.g. an owner plus an
+  assistant), and one bot user may hold several accounts (different
+  market/gateway pairs) — neither direction is expressible as a column on
+  ``accounts``, which is why this table exists.
+
+  There is deliberately no role/permission column yet: every linked user has
+  the same rights. Add one here when a real read-only use case shows up.
+
+  ``platform_user_id`` is a *string*, not an integer, even though Telegram and
+  Discord ids are 64-bit numbers — Slack/Matrix ids are opaque strings, so
+  storing text avoids a second migration later. The API layer still speaks
+  ``telegram_user_id: int``; the repository is the single place that casts.
   """
 
-  __tablename__ = "telegram_sessions"
-
-  telegram_user_id: Mapped[int] = mapped_column(
-    BigInteger, nullable=False, unique=True, index=True
+  __tablename__ = "account_bot_links"
+  __table_args__ = (
+    UniqueConstraint(
+      "platform",
+      "platform_user_id",
+      "account_id",
+      name="uq_account_bot_links_platform_user_account",
+    ),
   )
+
+  account_id: Mapped[uuid.UUID] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("accounts.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+  )
+  platform: Mapped[BotPlatformTypeEnum] = mapped_column(
+    Enum(BotPlatformTypeEnum), nullable=False
+  )
+  platform_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+  def __repr__(self) -> str:
+    return (
+      f"<AccountBotLink account_id={self.account_id} "
+      f"platform={self.platform} platform_user_id={self.platform_user_id}>"
+    )
+
+
+class AccountLinkToken(Base):
+  """
+  Invite secrets that let a bot user claim an account.
+
+  Split out of ``accounts`` so an account can have several outstanding tokens
+  (invite two people with two separately revocable secrets) and so revocation
+  is a state change rather than an overwrite.
+
+  A token is *valid* when ``revoked_at IS NULL`` and it has not expired.
+  ``expires_at`` is NULL by default, meaning "never expires" — nothing issues
+  a deadline today; the column exists so time-boxed invites need no migration.
+  ``last_used_at`` is audit only and never affects validity: a token stays
+  reusable after a successful link, matching the pre-existing behaviour.
+  """
+
+  __tablename__ = "account_link_tokens"
+
+  account_id: Mapped[uuid.UUID] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("accounts.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+  )
+  token: Mapped[uuid.UUID] = mapped_column(
+    UUID(as_uuid=True), nullable=False, unique=True, index=True, default=uuid.uuid4
+  )
+  expires_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
+  revoked_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
+  last_used_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
+
+  def __repr__(self) -> str:
+    return (
+      f"<AccountLinkToken account_id={self.account_id} "
+      f"revoked_at={self.revoked_at} expires_at={self.expires_at}>"
+    )
+
+
+class BotSession(Base):
+  """
+  One row per (platform, bot user), tracking which of their (possibly several)
+  linked accounts is currently "active" — the one single-account commands
+  (/status, /trades, /flat, ...) act on. Kept separate from
+  ``AccountBotLink`` because "may drive" and "is currently driving" are
+  different facts: a user has N links but exactly one active selection.
+  """
+
+  __tablename__ = "bot_sessions"
+  __table_args__ = (
+    UniqueConstraint(
+      "platform", "platform_user_id", name="uq_bot_sessions_platform_user"
+    ),
+  )
+
+  platform: Mapped[BotPlatformTypeEnum] = mapped_column(
+    Enum(BotPlatformTypeEnum), nullable=False
+  )
+  platform_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
   active_account_id: Mapped[uuid.UUID | None] = mapped_column(
     UUID(as_uuid=True),
     ForeignKey("accounts.id", ondelete="SET NULL"),
@@ -264,7 +351,8 @@ class TelegramSession(Base):
 
   def __repr__(self) -> str:
     return (
-      f"<TelegramSession telegram_user_id={self.telegram_user_id} "
+      f"<BotSession platform={self.platform} "
+      f"platform_user_id={self.platform_user_id} "
       f"active_account_id={self.active_account_id}>"
     )
 

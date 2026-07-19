@@ -17,20 +17,35 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from broker.db.engine import get_session
-from broker.db.models import Account, BrokerSetting, Signal, TelegramSession, Trade
+from broker.db.models import (
+  Account,
+  AccountBotLink,
+  AccountLinkToken,
+  BotSession,
+  BrokerSetting,
+  Signal,
+  Trade,
+)
 from broker.domain.trade_status import TradeStatusPolicy
 from broker.logger import get_logger
-from broker.schemas.account_schema import MarketTypeEnum
-from broker.schemas.core import SignalStatusEnum
+from broker.schemas.account_schema import AccountLinkSummary, MarketTypeEnum
+from broker.schemas.core import BotPlatformTypeEnum, SignalStatusEnum
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.settings import settings
 
 log = get_logger(__name__)
+
+
+def _new_link_token(account_id: uuid.UUID) -> AccountLinkToken:
+  """A fresh, never-expiring, unrevoked link token for *account_id*."""
+  return AccountLinkToken(
+    id=uuid.uuid4(), account_id=account_id, token=uuid.uuid4()
+  )
 
 
 class SqlAlchemyAccountRepository:
@@ -74,15 +89,15 @@ class SqlAlchemyAccountRepository:
           row.market = market
           row.gateway = gateway
         else:
-          session.add(
-            Account(
-              id=uuid.uuid4(),
-              account_id=account_id,
-              market=market,
-              gateway=gateway,
-              last_activity_at=datetime.now(timezone.utc),
-            )
+          new_account = Account(
+            id=uuid.uuid4(),
+            account_id=account_id,
+            market=market,
+            gateway=gateway,
+            last_activity_at=datetime.now(timezone.utc),
           )
+          session.add(new_account)
+          session.add(_new_link_token(new_account.id))
 
       log.debug(
         "account gateway upserted account_id=%s market=%s gateway=%s",
@@ -130,6 +145,9 @@ class SqlAlchemyAccountRepository:
           last_activity_at=datetime.now(timezone.utc),
         )
         session.add(account)
+        # Every account needs a claimable token from the moment it exists —
+        # this used to be the ``telegram_link_token`` column default.
+        session.add(_new_link_token(account.id))
         await session.flush()
         await session.refresh(account)
         log.info(
@@ -155,6 +173,65 @@ class SqlAlchemyAccountRepository:
       log.exception("Failed to fetch accounts: %s", exc)
       return []
 
+  async def get_link_summaries(
+    self,
+    account_ids: list[uuid.UUID],
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> dict[uuid.UUID, AccountLinkSummary]:
+    """Bulk-load the current link token and linked bot users for *account_ids*.
+
+    Two queries regardless of how many accounts are asked for — the admin
+    account list would otherwise be N+1 now that both facts live in their own
+    tables. Accounts with neither a token nor a link are absent from the
+    result; callers should treat a missing key as an empty summary.
+
+    An account can hold several unrevoked tokens; ``link_token`` reports the
+    most recently issued one, which is what ``rotate_link_token`` just handed
+    the admin.
+    """
+    summaries: dict[uuid.UUID, AccountLinkSummary] = {}
+    if not account_ids:
+      return summaries
+
+    now = datetime.now(timezone.utc)
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(AccountLinkToken)
+          .where(
+            AccountLinkToken.account_id.in_(account_ids),
+            AccountLinkToken.revoked_at.is_(None),
+            or_(
+              AccountLinkToken.expires_at.is_(None),
+              AccountLinkToken.expires_at > now,
+            ),
+          )
+          .order_by(AccountLinkToken.createdAt.asc())
+        )
+        for row in result.scalars().all():
+          # asc order + overwrite => the newest token wins.
+          summaries.setdefault(row.account_id, AccountLinkSummary()).link_token = (
+            row.token
+          )
+
+        result = await session.execute(
+          select(AccountBotLink)
+          .where(
+            AccountBotLink.account_id.in_(account_ids),
+            AccountBotLink.platform == platform,
+          )
+          .order_by(AccountBotLink.createdAt.asc())
+        )
+        for row in result.scalars().all():
+          summaries.setdefault(
+            row.account_id, AccountLinkSummary()
+          ).linked_user_ids.append(row.platform_user_id)
+    except Exception as exc:
+      log.exception("Failed to fetch link summaries: %s", exc)
+      return {}
+
+    return summaries
+
   async def get_by_market(self, market: MarketTypeEnum) -> list[Account]:
     """Return accounts in *market* ordered by last_activity_at desc."""
     try:
@@ -169,18 +246,30 @@ class SqlAlchemyAccountRepository:
       log.exception("Failed to fetch accounts for market=%s: %s", market, exc)
       return []
 
-  async def list_by_telegram_user_id(self, telegram_user_id: int) -> list[Account]:
-    """Return every account linked to a Telegram user (possibly several —
-    ``telegram_user_id`` is not unique on ``accounts``, see
-    ``TelegramSession`` for which one is currently active), ordered
-    ``last_activity_at`` desc with ``createdAt`` asc as a deterministic
-    tie-break (two admin-created accounts that haven't traded yet both have
-    ``last_activity_at IS NULL``)."""
+  async def list_by_telegram_user_id(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> list[Account]:
+    """Return every account linked to a bot user (possibly several — see
+    ``AccountBotLink``, and ``BotSession`` for which one is currently active),
+    ordered ``last_activity_at`` desc with ``createdAt`` asc as a
+    deterministic tie-break (two admin-created accounts that haven't traded
+    yet both have ``last_activity_at IS NULL``).
+
+    That ordering is a contract, not a detail: ``get_active_account`` and
+    ``unlink_telegram`` both fall back to "the first row of this list."
+    """
+    platform_user_id = str(telegram_user_id)
     try:
       async with get_session() as session:
         result = await session.execute(
           select(Account)
-          .where(Account.telegram_user_id == telegram_user_id)
+          .join(AccountBotLink, AccountBotLink.account_id == Account.id)
+          .where(
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == platform_user_id,
+          )
           .order_by(Account.last_activity_at.desc(), Account.createdAt.asc())
         )
         return list(result.scalars().all())
@@ -192,32 +281,41 @@ class SqlAlchemyAccountRepository:
       )
       return []
 
-  async def get_active_account(self, telegram_user_id: int) -> Account | None:
-    """Return the Telegram user's currently active account, or None if they
-    have no linked accounts at all.
+  async def get_active_account(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> Account | None:
+    """Return the bot user's currently active account, or None if they have
+    no linked accounts at all.
 
-    Reads ``TelegramSession.active_account_id`` and validates it still
-    belongs to this user in one query (covers a stale pointer left over from
+    Reads ``BotSession.active_account_id`` and validates the user still holds
+    a link to it in the same query (covers a stale pointer left over from
     ``unlink_telegram``). Falls back to the first row from
     ``list_by_telegram_user_id`` when the session is missing, its pointer is
     NULL, or stale — self-healing the session best-effort so the next call
     hits the fast path (failure to self-heal is logged and non-fatal; the
     correct fallback account is still returned).
     """
+    platform_user_id = str(telegram_user_id)
     try:
       async with get_session() as session:
         result = await session.execute(
-          select(TelegramSession).where(
-            TelegramSession.telegram_user_id == telegram_user_id
+          select(BotSession).where(
+            BotSession.platform == platform,
+            BotSession.platform_user_id == platform_user_id,
           )
         )
-        tg_session: Optional[TelegramSession] = result.scalars().first()
+        bot_session: Optional[BotSession] = result.scalars().first()
 
-        if tg_session is not None and tg_session.active_account_id is not None:
+        if bot_session is not None and bot_session.active_account_id is not None:
           result = await session.execute(
-            select(Account).where(
-              Account.id == tg_session.active_account_id,
-              Account.telegram_user_id == telegram_user_id,
+            select(Account)
+            .join(AccountBotLink, AccountBotLink.account_id == Account.id)
+            .where(
+              Account.id == bot_session.active_account_id,
+              AccountBotLink.platform == platform,
+              AccountBotLink.platform_user_id == platform_user_id,
             )
           )
           account: Optional[Account] = result.scalars().first()
@@ -231,7 +329,7 @@ class SqlAlchemyAccountRepository:
       )
       return None
 
-    accounts = await self.list_by_telegram_user_id(telegram_user_id)
+    accounts = await self.list_by_telegram_user_id(telegram_user_id, platform)
     if not accounts:
       return None
     fallback = accounts[0]
@@ -239,21 +337,23 @@ class SqlAlchemyAccountRepository:
     try:
       async with get_session() as session:
         result = await session.execute(
-          select(TelegramSession).where(
-            TelegramSession.telegram_user_id == telegram_user_id
+          select(BotSession).where(
+            BotSession.platform == platform,
+            BotSession.platform_user_id == platform_user_id,
           )
         )
-        tg_session = result.scalars().first()
-        if tg_session is None:
+        bot_session = result.scalars().first()
+        if bot_session is None:
           session.add(
-            TelegramSession(
+            BotSession(
               id=uuid.uuid4(),
-              telegram_user_id=telegram_user_id,
+              platform=platform,
+              platform_user_id=platform_user_id,
               active_account_id=fallback.id,
             )
           )
         else:
-          tg_session.active_account_id = fallback.id
+          bot_session.active_account_id = fallback.id
     except Exception as exc:
       log.warning(
         "Failed to self-heal active session for telegram_user_id=%s: %s",
@@ -264,23 +364,31 @@ class SqlAlchemyAccountRepository:
     return fallback
 
   async def set_active_account(
-    self, telegram_user_id: int, account_id: uuid.UUID
+    self,
+    telegram_user_id: int,
+    account_id: uuid.UUID,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> Account | None:
-    """Set the Telegram user's active account. Returns the account, or None
-    if no account with that id is linked to this ``telegram_user_id``.
+    """Set the bot user's active account. Returns the account, or None if no
+    account with that id is linked to this user.
 
-    The ownership check (``id == account_id AND telegram_user_id ==
-    telegram_user_id``) is deliberate: unlike the rest of this class, which
-    treats ``telegram_user_id`` as a trusted, bot-verified identity,
+    The ownership check (joining ``account_bot_links`` rather than looking the
+    account up by id alone) is deliberate: unlike the rest of this class,
+    which treats ``telegram_user_id`` as a trusted, bot-verified identity,
     ``account_id`` here is client-supplied and must be checked against it —
     a "not found" and a "found but not yours" both return None so no
     information about other users' account ids leaks.
     """
+    platform_user_id = str(telegram_user_id)
     try:
       async with get_session() as session:
         result = await session.execute(
-          select(Account).where(
-            Account.id == account_id, Account.telegram_user_id == telegram_user_id
+          select(Account)
+          .join(AccountBotLink, AccountBotLink.account_id == Account.id)
+          .where(
+            Account.id == account_id,
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == platform_user_id,
           )
         )
         account: Optional[Account] = result.scalars().first()
@@ -288,21 +396,23 @@ class SqlAlchemyAccountRepository:
           return None
 
         result = await session.execute(
-          select(TelegramSession).where(
-            TelegramSession.telegram_user_id == telegram_user_id
+          select(BotSession).where(
+            BotSession.platform == platform,
+            BotSession.platform_user_id == platform_user_id,
           )
         )
-        tg_session: Optional[TelegramSession] = result.scalars().first()
-        if tg_session is None:
+        bot_session: Optional[BotSession] = result.scalars().first()
+        if bot_session is None:
           session.add(
-            TelegramSession(
+            BotSession(
               id=uuid.uuid4(),
-              telegram_user_id=telegram_user_id,
+              platform=platform,
+              platform_user_id=platform_user_id,
               active_account_id=account.id,
             )
           )
         else:
-          tg_session.active_account_id = account.id
+          bot_session.active_account_id = account.id
 
         await session.flush()
         await session.refresh(account)
@@ -322,45 +432,90 @@ class SqlAlchemyAccountRepository:
       return None
 
   async def link_telegram(
-    self, token: uuid.UUID, telegram_user_id: int
+    self,
+    token: uuid.UUID,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> Account | None:
-    """Bind ``telegram_user_id`` to the account identified by ``token``.
+    """Link ``telegram_user_id`` to the account the ``token`` belongs to.
 
-    A Telegram user may hold several linked accounts, so this no longer
-    releases any prior binding. If the user's ``TelegramSession`` is missing
-    or has no active account yet, the newly linked account becomes active
-    (covers both "first ever link" and "relinking after a full unlink").
-    Otherwise an existing active selection is left untouched — adding a 2nd
-    or 3rd account doesn't disturb which one is currently active. Returns the
-    linked account, or None if the token does not match any account.
+    Adds a row to ``account_bot_links``; it never removes one. Several users
+    may hold the same account and one user may hold several accounts —
+    linking is purely additive in both directions.
+
+    If the user's ``BotSession`` is missing or has no active account yet, the
+    newly linked account becomes active (covers both "first ever link" and
+    "relinking after a full unlink"). Otherwise an existing active selection
+    is left untouched — adding a 2nd or 3rd account doesn't disturb which one
+    is currently active.
+
+    Returns the linked account, or None if the token doesn't exist, has been
+    revoked, or has expired. Re-linking an account the user already holds is
+    a no-op that still returns the account (idempotent — the unique
+    constraint must not be allowed to raise).
     """
+    platform_user_id = str(telegram_user_id)
+    now = datetime.now(timezone.utc)
     try:
       async with get_session() as session:
         result = await session.execute(
-          select(Account).where(Account.telegram_link_token == token)
+          select(AccountLinkToken).where(
+            AccountLinkToken.token == token,
+            AccountLinkToken.revoked_at.is_(None),
+            or_(
+              AccountLinkToken.expires_at.is_(None),
+              AccountLinkToken.expires_at > now,
+            ),
+          )
+        )
+        link_token: Optional[AccountLinkToken] = result.scalars().first()
+        if link_token is None:
+          return None
+
+        result = await session.execute(
+          select(Account).where(Account.id == link_token.account_id)
         )
         account: Optional[Account] = result.scalars().first()
         if account is None:
           return None
 
-        account.telegram_user_id = telegram_user_id
+        link_token.last_used_at = now
 
         result = await session.execute(
-          select(TelegramSession).where(
-            TelegramSession.telegram_user_id == telegram_user_id
+          select(AccountBotLink).where(
+            AccountBotLink.account_id == account.id,
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == platform_user_id,
           )
         )
-        tg_session: Optional[TelegramSession] = result.scalars().first()
-        if tg_session is None:
+        if result.scalars().first() is None:
           session.add(
-            TelegramSession(
+            AccountBotLink(
               id=uuid.uuid4(),
-              telegram_user_id=telegram_user_id,
+              account_id=account.id,
+              platform=platform,
+              platform_user_id=platform_user_id,
+            )
+          )
+
+        result = await session.execute(
+          select(BotSession).where(
+            BotSession.platform == platform,
+            BotSession.platform_user_id == platform_user_id,
+          )
+        )
+        bot_session: Optional[BotSession] = result.scalars().first()
+        if bot_session is None:
+          session.add(
+            BotSession(
+              id=uuid.uuid4(),
+              platform=platform,
+              platform_user_id=platform_user_id,
               active_account_id=account.id,
             )
           )
-        elif tg_session.active_account_id is None:
-          tg_session.active_account_id = account.id
+        elif bot_session.active_account_id is None:
+          bot_session.active_account_id = account.id
 
         await session.flush()
         await session.refresh(account)
@@ -379,49 +534,67 @@ class SqlAlchemyAccountRepository:
       )
       return None
 
-  async def unlink_telegram(self, telegram_user_id: int) -> bool:
-    """Clear the Telegram binding for the user's *active* account, and
-    re-point the active selection at another remaining linked account (if
-    any) or clear it. Returns True if a row changed.
+  async def unlink_telegram(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool:
+    """Drop this user's link to their *active* account, and re-point the
+    active selection at another account they still hold (if any) or clear it.
+    Returns True if a row changed.
+
+    Only this user's own link row is deleted — other users linked to the same
+    account keep theirs, and the account itself is untouched.
 
     Deliberately calls ``get_active_account`` (its own ``get_session()``
     block) rather than duplicating the active-resolution + fallback-ordering
     logic here — an extra round trip on this low-frequency, user-initiated
     action, in exchange for one source of truth for "what's active."
     """
-    active = await self.get_active_account(telegram_user_id)
+    active = await self.get_active_account(telegram_user_id, platform)
     if active is None:
       return False
 
+    platform_user_id = str(telegram_user_id)
     try:
       async with get_session() as session:
-        result = await session.execute(select(Account).where(Account.id == active.id))
-        account: Optional[Account] = result.scalars().first()
-        if account is None:
-          return False
-        account.telegram_user_id = None
+        await session.execute(
+          delete(AccountBotLink).where(
+            AccountBotLink.account_id == active.id,
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == platform_user_id,
+          )
+        )
         await session.flush()
 
         result = await session.execute(
           select(Account)
-          .where(Account.telegram_user_id == telegram_user_id, Account.id != active.id)
+          .join(AccountBotLink, AccountBotLink.account_id == Account.id)
+          .where(
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == platform_user_id,
+            Account.id != active.id,
+          )
           .order_by(Account.last_activity_at.desc(), Account.createdAt.asc())
         )
         remaining: Optional[Account] = result.scalars().first()
 
         result = await session.execute(
-          select(TelegramSession).where(
-            TelegramSession.telegram_user_id == telegram_user_id
+          select(BotSession).where(
+            BotSession.platform == platform,
+            BotSession.platform_user_id == platform_user_id,
           )
         )
-        tg_session: Optional[TelegramSession] = result.scalars().first()
-        if tg_session is not None:
-          tg_session.active_account_id = remaining.id if remaining is not None else None
+        bot_session: Optional[BotSession] = result.scalars().first()
+        if bot_session is not None:
+          bot_session.active_account_id = (
+            remaining.id if remaining is not None else None
+          )
 
         log.info(
           "Unlinked telegram_user_id=%s from account_id=%s",
           telegram_user_id,
-          account.account_id,
+          active.account_id,
         )
         return True
     except Exception as exc:
@@ -429,19 +602,23 @@ class SqlAlchemyAccountRepository:
       return False
 
   async def rotate_link_token(self, account_id: str) -> uuid.UUID | None:
-    """Issue a fresh link token for an account (revokes the old one).
+    """Issue a fresh link token for an account, revoking every token that was
+    still valid. Returns the new token, or None if the account doesn't exist.
 
-    Returns the new token, or None if the account does not exist.
+    Revoking is a state change (``revoked_at``), not a delete, so an issued
+    secret's history survives rotation. Already-linked users are unaffected —
+    a token only grants the initial claim.
 
-    KNOWN LIMITATION: resolves by bare ``account_id`` alone, which is no
-    longer guaranteed unique (see ``uq_accounts_market_gateway_account_id`` —
-    the same id can exist under different market/gateway pairs). If it
-    collides, this rotates whichever matching row Postgres returns first,
+    KNOWN LIMITATION: resolves by bare ``account_id`` alone, which is not
+    guaranteed unique (see ``uq_accounts_market_gateway_account_id`` — the
+    same id can exist under different market/gateway pairs). If it collides,
+    this rotates whichever matching row Postgres returns first,
     non-deterministically. Not fixed here: doing so needs the admin-facing
     callers (bot ``/rotate``, ``POST /admin/accounts/{account_id}/...``) to
     also pass market + gateway, which is a wider UX change than this
     schema migration. Avoid reusing account_id across gateways until then.
     """
+    now = datetime.now(timezone.utc)
     try:
       async with get_session() as session:
         result = await session.execute(
@@ -450,8 +627,24 @@ class SqlAlchemyAccountRepository:
         account: Optional[Account] = result.scalars().first()
         if account is None:
           return None
+
+        result = await session.execute(
+          select(AccountLinkToken).where(
+            AccountLinkToken.account_id == account.id,
+            AccountLinkToken.revoked_at.is_(None),
+          )
+        )
+        for stale in result.scalars().all():
+          stale.revoked_at = now
+
         new_token = uuid.uuid4()
-        account.telegram_link_token = new_token
+        session.add(
+          AccountLinkToken(
+            id=uuid.uuid4(),
+            account_id=account.id,
+            token=new_token,
+          )
+        )
         log.info("Rotated link token for account_id=%s", account_id)
         return new_token
     except Exception as exc:

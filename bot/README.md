@@ -9,7 +9,7 @@ broker's HTTP API and never touches the database or NATS directly.
 
 | Role | Who | Auth |
 | ---- | --- | ---- |
-| **Enduser** | Anyone who links an account | Sends the account's `telegram_link_token` (UUID) via `/start`; the bot binds their Telegram id to that account. |
+| **Enduser** | Anyone who links an account | Sends one of the account's link tokens (UUID) via `/start`; the bot records their Telegram id against that account. |
 | **Admin** | Telegram IDs in `TELEGRAM_ADMIN_IDS` | Router-level `IsAdmin` filter. Admins don't need a linked account. |
 
 Menus are role-aware via Telegram command **scopes**, re-applied on every
@@ -34,7 +34,7 @@ gets an extended chat-scoped menu.
 
 | Command | Action | Broker endpoint |
 | ------- | ------ | --------------- |
-| `/accounts` | List accounts + link status + link token (spoiler) | `GET /v1/accounts` |
+| `/accounts` | List accounts + linked-user count + link token (spoiler) | `GET /v1/accounts` |
 | `/newaccount` | Register an account (pick market → gateway → type id) | `POST /admin/accounts` |
 | `/atrades [account_id]` | Trades of any account (picker if no arg) | `GET /v1/{account_id}/trades` |
 | `/aflat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |
@@ -43,9 +43,15 @@ gets an extended chat-scoped menu.
 
 ### Link-token semantics
 
-`telegram_link_token` is a bearer secret: whoever sends it claims the account
-(re-binding moves it — latest claim wins). To revoke access, an admin uses
-`/rotate` to issue a fresh token; the old one stops working immediately.
+A link token is a bearer secret: whoever sends it gains access to the account.
+Linking is **additive** — several people can hold the same account (each keeps
+their own active-account selection), and one person can hold several accounts.
+A token stays reusable after a successful link.
+
+`/rotate` issues a fresh token and revokes every token that was still valid, so
+the old secret stops working immediately. It does **not** evict anyone who
+already linked — a token only grants the initial claim. To remove a specific
+person, they `/unlink` (or delete their `account_bot_links` row).
 
 ## Architecture
 

@@ -472,15 +472,24 @@ def get_admin_router() -> APIRouter:
         detail="account_id already exists",
       )
     log.info("Account manually created account_id=%s", body.account_id)
-    return AccountResponse.model_validate(account)
+    resp = AccountResponse.model_validate(account)
+    # create_account also mints the account's first link token; surface it so
+    # the admin can hand it out without a second round trip.
+    summary = (await account_repo.get_link_summaries([account.id])).get(account.id)
+    if summary is not None:
+      resp.link_token = summary.link_token
+      resp.linked_user_ids = summary.linked_user_ids
+    return resp
 
   @router.post(
     "/accounts/{account_id}/link-token/rotate",
     tags=["accounts"],
-    summary="Rotate an account's Telegram link token",
+    summary="Rotate an account's bot link token",
     description=(
-      "Issue a fresh telegram_link_token for the account (revoking the old "
-      "one). Hand the new token to the end-user so they can re-link the bot."
+      "Issue a fresh link token for the account, revoking every token that "
+      "was still valid. Hand the new token to the end-user so they can link "
+      "the bot. Already-linked users keep their access — a token only grants "
+      "the initial claim."
     ),
     responses={
       **AUTH_RESPONSES,
@@ -498,6 +507,6 @@ def get_admin_router() -> APIRouter:
         detail="Account not found",
       )
     log.info("Link token rotated for account_id=%s", account_id)
-    return RotateTokenResponse(account_id=account_id, telegram_link_token=new_token)
+    return RotateTokenResponse(account_id=account_id, link_token=new_token)
 
   return router

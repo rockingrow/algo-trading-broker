@@ -601,7 +601,7 @@ class NatsPublisher:
     payload = signal.model_dump_json().encode()
     await self._conn.nc.publish(PublishTopicEnum.ADMIN.value, payload)
     log.info(
-      "Published [ADMIN] action=%s strategy=%s symbol=%s account_id=%s",
+      "Published [ADMIN] action=%s strategy=%s symbol=%s account_id=%s market=%s gateway=%s",
       signal.action,
       signal.strategy,
       signal.symbol,

@@ -33,9 +33,19 @@ def get_api_router() -> APIRouter:
   async def list_accounts(
     accounts_repo: AccountRepository = Depends(get_account_repository),
   ) -> List[AccountResponse]:
-    """Return all accounts ordered by last activity descending."""
+    """Return all accounts ordered by last activity descending, each with its
+    current link token and linked bot users joined in from their own tables."""
     accounts = await accounts_repo.get_all()
-    return [AccountResponse.model_validate(a) for a in accounts]
+    summaries = await accounts_repo.get_link_summaries([a.id for a in accounts])
+    result: List[AccountResponse] = []
+    for a in accounts:
+      resp = AccountResponse.model_validate(a)
+      summary = summaries.get(a.id)
+      if summary is not None:
+        resp.link_token = summary.link_token
+        resp.linked_user_ids = summary.linked_user_ids
+      result.append(resp)
+    return result
 
   @router.get(
     "/{account_id}/trades",

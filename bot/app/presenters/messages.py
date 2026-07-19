@@ -81,14 +81,14 @@ class UserMessages:
 
   @staticmethod
   def format_account(account: dict[str, Any]) -> str:
-    linked = "linked" if account.get("telegram_user_id") else "not linked"
+    # No link status line: this only ever renders an account the caller is
+    # already linked to, so it could never say anything but "linked".
     return (
       f"<b>{emojis.FOLDER} Account</b>\n"
       f"• ID: <code>{_esc(account.get('account_id'))}</code>\n"
       f"• Name: {_esc(account.get('account_name'))}\n"
       f"• Balance: <b>{_fmt_num(account.get('account_balance'))}</b>\n"
-      f"• Market: {_esc(account.get('market'))}\n"
-      f"• Status: {linked}"
+      f"• Market: {_esc(account.get('market'))}"
     )
 
   @staticmethod
@@ -142,13 +142,16 @@ class AdminMessages:
       return f"{emojis.EMPTY_MAILBOX} No accounts yet."
     lines = [f"<b>{emojis.FOLDER} Accounts</b> ({len(accounts)})", ""]
     for a in accounts:
-      linked = emojis.CHECK if a.get("telegram_user_id") else "—"
+      # An account may be managed by several people now, so show how many
+      # rather than a yes/no mark.
+      user_count = len(a.get("linked_user_ids") or [])
+      linked = f"{emojis.CHECK}{user_count}" if user_count else "—"
       lines.append(
         f"{linked} <b>{_esc(a.get('account_name'))}</b> "
         f"<code>{_esc(a.get('account_id'))}</code>\n"
         f"   balance {_fmt_num(a.get('account_balance'))} · {_esc(a.get('market'))}"
       )
-      token = a.get("telegram_link_token")
+      token = a.get("link_token")
       if token:
         # Hidden in a spoiler, wrapped in code for tap-to-copy to hand to the end user.
         lines.append(f"   token: <tg-spoiler><code>{_esc(token)}</code></tg-spoiler>")
@@ -179,7 +182,7 @@ class AdminMessages:
       f"• Market: {_esc(account.get('market'))}\n"
       f"• Gateway: {_esc(account.get('gateway'))}\n\n"
       f"{emojis.KEY} Link token:\n"
-      f"<tg-spoiler><code>{_esc(account.get('telegram_link_token'))}</code></tg-spoiler>\n\n"
+      f"<tg-spoiler><code>{_esc(account.get('link_token'))}</code></tg-spoiler>\n\n"
       "<i>Send this token to the end user so they can link via /start.</i>"
     )
 
@@ -187,6 +190,7 @@ class AdminMessages:
   def format_rotate_result(result: dict[str, Any]) -> str:
     return (
       f"{emojis.KEY} New link token for <code>{_esc(result.get('account_id'))}</code>:\n"
-      f"<tg-spoiler><code>{_esc(result.get('telegram_link_token'))}</code></tg-spoiler>\n\n"
-      "<i>The old token has been revoked. Send this new token to the end user.</i>"
+      f"<tg-spoiler><code>{_esc(result.get('link_token'))}</code></tg-spoiler>\n\n"
+      "<i>Previous tokens have been revoked. Send this new token to the end "
+      "user. Anyone already linked keeps their access.</i>"
     )

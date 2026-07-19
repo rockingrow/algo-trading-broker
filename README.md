@@ -536,11 +536,19 @@ Returns all trading accounts ordered by most recent activity. Requires the `X-AP
     "market": "FOREX",
     "gateway": "MT5",
     "last_activity_at": "2024-03-20T10:05:00Z",
+    "link_token": "b5dc0374-9639-4861-acf4-2d239aa5c1b4",
+    "linked_user_ids": ["123456789"],
     "createdAt": "2024-03-01T00:00:00Z",
     "updatedAt": "2024-03-20T10:05:00Z"
   }
 ]
 ```
+
+`link_token` is the account's currently valid invite secret (joined in from
+`account_link_tokens`) — hand it to a user so they can link the bot.
+`linked_user_ids` lists every bot user already linked to the account (from
+`account_bot_links`); it is empty for an unclaimed account, and can hold more
+than one id since an account may be managed by several people.
 
 Accounts are automatically created or updated each time a `TRADE` event arrives from a worker (or manually via `POST /admin/accounts`, below). `gateway` records the exchange the account trades through (e.g. `MT5` for forex, `BINANCE` for crypto), taken from the `TRADE` event; combined with `market` and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id the broker uses to address `SYSTEM` messages.
 
@@ -565,7 +573,7 @@ Manually registers an account — `market`, `gateway`, and an `account_id` chose
 
 `gateway` must be valid for `market` (currently `FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or the request is rejected with `422`. `account_id` may not contain `:` or whitespace (it's embedded verbatim in the Telegram bot's callback data) and must be at most 50 characters. Returns `409` if the `(market, gateway, account_id)` triple already exists — reusing the same `account_id` under a *different* gateway is allowed and creates a distinct account.
 
-**Response** (`201`): the created account, shaped like a row in [`GET /v1/accounts`](#get-v1accounts) — including a freshly generated `telegram_link_token`.
+**Response** (`201`): the created account, shaped like a row in [`GET /v1/accounts`](#get-v1accounts) — including a freshly generated `link_token`.
 
 ---
 
@@ -733,20 +741,32 @@ gets an extended admin menu (`/accounts`, `/atrades`, `/aflat`, `/rotate`,
 
 **Onboarding / auth flow**
 
-1. Every `accounts` row carries a unique `telegram_link_token` (UUID). An admin
-   reads it from `GET /v1/accounts` (or rotates it via
+1. Every account has at least one link token (UUID) in `account_link_tokens`. An
+   admin reads it as `link_token` from `GET /v1/accounts` (or rotates it via
    `POST /admin/accounts/{account_id}/link-token/rotate`) and hands it to the user.
 2. The user sends `/start` to the bot and pastes the token. The bot calls
-   `POST /v1/telegram/link`, which binds their `telegram_user_id` to the account.
+   `POST /v1/telegram/link`, which records an `account_bot_links` row joining
+   their Telegram id to the account.
 3. Linked users can then query trades (`/trades`) and issue control commands.
 
-**Multiple accounts per user (active account)**
+**Many-to-many: accounts ↔ bot users**
 
-One Telegram user may link **several** accounts — typically one per
-market/gateway pair (e.g. an MT5 forex account and a Binance crypto account).
-Exactly one of them is **active** at a time, and every single-account command
-(`/status`, `/trades`, `/flat`, `/prevent`, `/allow`, `/unlink`) acts on
-whichever one that is.
+`account_bot_links` is a join table, so both directions are open:
+
+- One user may link **several** accounts — typically one per market/gateway
+  pair (e.g. an MT5 forex account and a Binance crypto account).
+- One account may be linked by **several** users — e.g. an owner and an
+  assistant. There is no role distinction yet: every linked user has the same
+  rights over the account.
+
+Linking never removes an existing link in either direction, and `/unlink` only
+drops the caller's own.
+
+**Active account**
+
+For each user, exactly one of their linked accounts is **active** at a time, and
+every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
+`/allow`, `/unlink`) acts on whichever one that is.
 
 - `/link` — add another account (paste a second token). The first account
   linked becomes active automatically; adding more does not change the
@@ -754,9 +774,9 @@ whichever one that is.
 - `/switch` — list the linked accounts as `market-gateway-account_id`
   buttons (the active one is starred) and tap one to activate it.
 
-The selection lives in the broker's `telegram_sessions` table, not in bot
-memory, so it survives bot restarts. If it ever points at an account that was
-unlinked, the broker falls back to the user's most recently active account and
+The selection lives in the broker's `bot_sessions` table, not in bot memory, so
+it survives bot restarts. If it ever points at an account the user no longer
+holds a link to, the broker falls back to their most recently active account and
 repairs the row.
 
 **Control commands** publish `ADMIN`-subject directives via the broker:
@@ -842,34 +862,82 @@ for configuration and local development.
 | `market` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
-| `telegram_user_id` | BigInteger (Nullable) | Linked Telegram user — **not** unique: one user may link several accounts (see [`telegram_sessions`](#telegram_sessions-table)) |
-| `telegram_link_token` | UUID (Nullable) | Token handed to the user to link the bot (unique) |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
 **Unique constraint:** `(market, gateway, account_id)` — a bare `account_id` can exist under more than one market/gateway (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). Endpoints and repository methods that take only `account_id` (`POST /admin/accounts/{account_id}/link-token/rotate`, `GET /v1/{account_id}/trades`, the `account_id` scope on `POST /admin/flat`) resolve/match on that bare id and can be ambiguous if it's reused across gateways — avoid deliberately reusing an `account_id` across gateways until those callers are updated to also pass `market`/`gateway`.
 
-### `telegram_sessions` table
+> The `accounts` table deliberately carries **no** bot/chat-platform columns: an
+> account is a trading domain object. Who may drive it from a bot lives in
+> `account_bot_links`, the invite secrets in `account_link_tokens`, and the
+> per-user active selection in `bot_sessions`. All three are keyed by
+> `platform` (`BotPlatformTypeEnum`, currently only `TELEGRAM`) so adding
+> Discord/Slack is a new enum member, not a migration.
 
-One row per Telegram user, tracking which of their linked accounts is currently
-**active** — the one every single-account bot command (`/status`, `/trades`,
-`/flat`, `/prevent`, `/allow`, `/unlink`) acts on. Kept separate from
-`accounts.telegram_user_id` because that column is no longer unique: a user may
-link several accounts, but only one is active at a time.
+### `account_bot_links` table
+
+Many-to-many join between accounts and chat-platform users: an account may be
+managed by several people, and a person may hold several accounts. There is no
+role/permission column — every linked user has the same rights.
 
 | Column | Type | Description |
 | ------- | ------------ | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
-| `telegram_user_id` | BigInteger | Telegram user this session belongs to (unique) |
+| `account_id` | UUID | FK → `accounts.id`, `ON DELETE CASCADE` |
+| `platform` | Enum | `TELEGRAM` |
+| `platform_user_id` | String(64) | The bot user's platform id. Stored as text, not a number: Telegram/Discord ids are numeric but Slack/Matrix ids are opaque strings |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+**Unique constraint:** `(platform, platform_user_id, account_id)`.
+
+### `account_link_tokens` table
+
+Invite secrets that let a bot user claim an account. Split out of `accounts` so
+an account can have several outstanding tokens (invite two people with two
+separately revocable secrets) and so revocation is a state change rather than an
+overwrite.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `account_id` | UUID | FK → `accounts.id`, `ON DELETE CASCADE` |
+| `token` | UUID | The bearer secret handed to the end-user (unique) |
+| `expires_at` | DateTime (Nullable) | `NULL` = never expires. Nothing issues a deadline today |
+| `revoked_at` | DateTime (Nullable) | Set by `/rotate` on every previously valid token |
+| `last_used_at` | DateTime (Nullable) | Audit only — a token stays reusable after a successful link |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+A token is **valid** when `revoked_at IS NULL AND (expires_at IS NULL OR
+expires_at > now())`. One is minted automatically whenever an account row is
+created. Rotating revokes the old ones but never evicts anyone already linked —
+a token only grants the initial claim.
+
+### `bot_sessions` table
+
+One row per `(platform, bot user)`, tracking which of their linked accounts is
+currently **active** — the one every single-account bot command (`/status`,
+`/trades`, `/flat`, `/prevent`, `/allow`, `/unlink`) acts on. Kept separate from
+`account_bot_links` because "may drive" and "is currently driving" are different
+facts: a user has N links but exactly one active selection.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `platform` | Enum | `TELEGRAM` |
+| `platform_user_id` | String(64) | The bot user this session belongs to |
 | `active_account_id` | UUID (Nullable) | FK → `accounts.id`, `ON DELETE SET NULL`. The active account, or `NULL` once the user has unlinked everything |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
+**Unique constraint:** `(platform, platform_user_id)`.
+
 The row is created on first link and updated by
 `POST /v1/telegram/{telegram_user_id}/active-account` (the bot's `/switch`).
-If `active_account_id` ever points at an account that is no longer linked to
-the user, the broker falls back to their most recently active account and
-self-heals the row on the next read.
+If `active_account_id` ever points at an account the user no longer holds a link
+to, the broker falls back to their most recently active account and self-heals
+the row on the next read.
 
 ### `broker_settings` table
 

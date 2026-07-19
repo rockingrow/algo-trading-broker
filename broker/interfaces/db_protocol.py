@@ -4,7 +4,8 @@ import uuid
 from typing import Protocol, runtime_checkable
 
 from broker.db.models import Account, Signal, Trade
-from broker.schemas.account_schema import MarketTypeEnum
+from broker.schemas.account_schema import AccountLinkSummary, MarketTypeEnum
+from broker.schemas.core import BotPlatformTypeEnum
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.webhook_schema import WebhookPayload
 
@@ -60,19 +61,47 @@ class AccountRepository(Protocol):
 
   async def get_by_market(self, market: MarketTypeEnum) -> list[Account]: ...
 
-  async def list_by_telegram_user_id(self, telegram_user_id: int) -> list[Account]: ...
+  async def get_link_summaries(
+    self,
+    account_ids: list[uuid.UUID],
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> dict[uuid.UUID, AccountLinkSummary]: ...
 
-  async def get_active_account(self, telegram_user_id: int) -> Account | None: ...
+  # Bot-user methods take the caller's platform id as ``telegram_user_id: int``
+  # because that is what the ``/v1/telegram/*`` endpoints receive. The
+  # implementation stores it as a string keyed by ``platform``; see
+  # ``AccountBotLink``.
+  async def list_by_telegram_user_id(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> list[Account]: ...
+
+  async def get_active_account(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> Account | None: ...
 
   async def set_active_account(
-    self, telegram_user_id: int, account_id: uuid.UUID
+    self,
+    telegram_user_id: int,
+    account_id: uuid.UUID,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> Account | None: ...
 
   async def link_telegram(
-    self, token: uuid.UUID, telegram_user_id: int
+    self,
+    token: uuid.UUID,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> Account | None: ...
 
-  async def unlink_telegram(self, telegram_user_id: int) -> bool: ...
+  async def unlink_telegram(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool: ...
 
   async def rotate_link_token(self, account_id: str) -> uuid.UUID | None: ...
 
