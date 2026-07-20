@@ -156,7 +156,8 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | Direction | Subject | Purpose |
 | --------- | ------- | ------- |
 | Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
-| Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
+| Publish (broker → workers) | `ADMIN` | Broadcast administrative messages (no `account_id`) — every worker receives and filters for itself |
+| Publish (broker → one worker) | `ADMIN.<market>.<gateway>.<account_id>` | Account-scoped administrative message on a private per-account subject; only that account's worker is subscribed, so no other worker learns the `account_id` |
 | Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` and `RETRY_SIGNALS` sent back after a worker announces itself |
 | Publish (broker → broker) | `SIGNALS.<strategy>` (JetStream stream `SIGNALS`) | Durable webhook envelope buffer — the webhook endpoint enqueues here, the broker's own `SignalWorker` consumes and fans out to `{strategy}` |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
@@ -778,7 +779,7 @@ Returns the default `"7"` when the setting is unset or holds an unparseable valu
 
 ### POST `/admin/flat`
 
-Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
+Publishes a `FLAT` directive to workers over NATS. Scope can be narrowed by passing optional fields in the JSON body. An account-scoped FLAT (see below) goes to a private per-account subject; an unscoped FLAT is broadcast on the shared `ADMIN` subject.
 
 **Request Body (all fields optional):**
 
@@ -794,7 +795,7 @@ Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subje
 
 Omit all fields (or send an empty body `{}`) to flat every open position across all workers.
 
-`market`/`gateway` optionally narrow `account_id` further and are forwarded onto the broadcast `AdminSignal`. This is broadcast on the shared `ADMIN` subject to **every** connected worker; each worker filters for itself client-side (worker-side code, outside this repo). Since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), pass `market`/`gateway` when scoping to an account whose id might collide with one on another gateway — but this only helps once the worker side is updated to check them too. A worker that still matches on `account_id` alone can act on a FLAT meant for a different account that happens to share that id.
+When `account_id` is set, `market` and `gateway` are **required** with it (422 otherwise) — since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), all three together identify one account. The FLAT is then published to the private subject `ADMIN.<market>.<gateway>.<account_id>` that **only that account's worker** is subscribed to, so no other worker ever sees the `account_id` and each worker stays isolated to its own account. Omitting `account_id` (a strategy/symbol-scoped or flat-everything directive) broadcasts on the shared `ADMIN` subject to **every** connected worker, which filters for itself client-side (worker-side code, outside this repo).
 
 ---
 

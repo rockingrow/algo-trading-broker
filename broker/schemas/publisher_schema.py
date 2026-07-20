@@ -17,6 +17,22 @@ class PublishTopicEnum(str, Enum):
   SYSTEM = "SYSTEM"
 
 
+def compose_admin_subject(market, gateway: str, account_id: str) -> str:
+  """Build the per-account private ADMIN subject
+  ``ADMIN.<market>.<gateway>.<account_id>`` (e.g. ``ADMIN.FOREX.MT5.12345678``).
+
+  Account-scoped admin actions are published here instead of on the shared
+  ``ADMIN`` subject so that only the one worker subscribed to this exact
+  subject receives them. No other worker sees the ``account_id``, keeping each
+  worker isolated to its own account.
+
+  ``market`` may be a :class:`MarketTypeEnum` (or any enum with a string
+  ``value``) or its bare string value; both render to the bare market name.
+  """
+  market = market.value if isinstance(market, Enum) else str(market)
+  return f"{PublishTopicEnum.ADMIN.value}.{market}.{gateway}.{account_id}"
+
+
 class AdminActionEnum(str, Enum):
   """Admin actions that can be published to the ADMIN topic."""
 
@@ -94,17 +110,22 @@ class TradingSignal(BaseModel):
 
 
 class AdminSignal(BaseModel):
-  """Admin signal broadcast on the shared ADMIN topic — every connected
-  worker receives it and is expected to filter for itself.
+  """Admin signal published to workers.
 
-  ``account_id`` alone no longer identifies a single account (the same bare
-  id can exist under different market/gateway pairs, see
-  ``uq_accounts_market_gateway_account_id`` on the ``accounts`` table), so
-  ``market``/``gateway`` are REQUIRED whenever ``account_id`` is set —
-  every account-scoped signal is fully disambiguated on the wire. Workers
-  MUST match all three (``account_id`` + ``market`` + ``gateway``)
-  against themselves before acting, not ``account_id`` alone, or they can
-  act on a signal meant for a different account that shares its bare id.
+  Routing depends on scope:
+
+  * **Account-scoped** (``account_id`` set) — published to the per-account
+    private subject ``ADMIN.<market>.<gateway>.<account_id>`` (see
+    :func:`compose_admin_subject`). Only the single worker subscribed to that
+    subject receives it, so no other worker ever learns the ``account_id`` and
+    each worker stays isolated to its own account. ``market``/``gateway`` are
+    REQUIRED whenever ``account_id`` is set (see
+    ``uq_accounts_market_gateway_account_id`` on the ``accounts`` table) so the
+    subject is fully disambiguated — the same bare id can exist under different
+    market/gateway pairs.
+  * **Broadcast** (no ``account_id``) — published to the shared ``ADMIN``
+    subject and fanned out to every connected worker, which filters for itself
+    (e.g. a strategy/symbol-scoped or flat-everything directive).
   """
 
   model_config = ConfigDict(

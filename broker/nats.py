@@ -142,7 +142,7 @@ class NatsClient:
     log.warning("NATS disconnected")
     await self._notify(
       f"{em.NATS_DISCONNECTED} <b>NATS Disconnected</b>\n"
-      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
+      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
       f"{em.LISTEN} Listening: <code>{self.listen_subjects_line()}</code>"
     )
 
@@ -150,7 +150,7 @@ class NatsClient:
     log.info("NATS reconnected to %s", settings.nats_url)
     await self._notify(
       f"{em.NATS_RECONNECTED} <b>NATS Reconnected</b>\n"
-      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
+      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
       f"{em.LISTEN} Listening: <code>{self.listen_subjects_line()}</code>"
     )
 

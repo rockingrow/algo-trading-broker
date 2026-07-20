@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
   # Notification: Startup
   await notifier.send_message(
     f"{em.BROKER_STARTED} <b>Broker Node Started</b>\n"
-    f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy)\n"
+    f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
     f"{em.PLUG} NATS Listening: <code>{nats_client.listen_subjects_line()}</code>\n"
     f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )

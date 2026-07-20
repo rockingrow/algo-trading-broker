@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Account-scoped ADMIN actions now use private per-account subjects** — Any
+  admin action carrying an `account_id` (e.g. an account-scoped `/admin/flat`)
+  is no longer fanned out on the shared `ADMIN` subject. It is published to the
+  private subject `ADMIN.<market>.<gateway>.<account_id>` (e.g.
+  `ADMIN.FOREX.MT5.12345678`) that only that account's worker is subscribed to,
+  so the `account_id` is never exposed to any other worker — each worker stays
+  fully isolated to its own account. Unscoped admin actions (no `account_id`,
+  e.g. a strategy/symbol-scoped or flat-everything directive) still broadcast on
+  the shared `ADMIN` subject. Workers subscribed to an account must subscribe to
+  their own `ADMIN.<market>.<gateway>.<account_id>` subject to keep receiving
+  account-scoped directives.
+
 ## [1.1.1] - 2026-07-21
 
 ### Added
