@@ -37,9 +37,12 @@ accounts, `/link` adds one, and `/switch` lists them with a button per account
 to change the active one.
 
 `/subscribe` opts you in to a DM whenever one of your linked accounts **completes
-(closes) a trade**; `/unsubscribe` turns it off. The DM is sent by this same bot,
-so it lands in your existing chat. This is a per-user preference spanning every
-account you hold.
+a trade**; `/unsubscribe` turns it off. The DM is sent by this same bot, so it
+lands in your existing chat. This is a per-user preference spanning every account
+you hold. "Completes" means any terminal close — a normal TP/SL close **and** an
+admin `/admin_flat`, since the position is over either way and you did not close
+it yourself. Each DM carries the account, gateway, symbol, action, status, close
+price, quantity, balance and PnL.
 
 > ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_ENTRIES`/`ALLOW_ENTRIES` admin command
 > over NATS (via the broker). The **worker** must be updated to honor it —
@@ -57,7 +60,7 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | Command | Action | Broker endpoint |
 | ------- | ------ | --------------- |
 | `/admin_help` | List the admin commands (also the menu divider) | — |
-| `/admin_accounts` | List accounts + linked-user count + link token (spoiler) | `GET /v1/accounts` |
+| `/admin_accounts` | Accounts + linked-user count + link token (spoiler), then a second table of row UUIDs | `GET /v1/accounts` |
 | `/admin_newaccount` | Register an account (pick market → gateway → type id) | `POST /admin/accounts` |
 | `/admin_trades [account_id]` | Trades of any account (picker if no arg) | `GET /v1/{account_id}/trades` |
 | `/admin_flat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |

@@ -1028,12 +1028,23 @@ the row on the next read.
 One row per `(platform, bot user)` who has opted in — via the bot's `/subscribe`
 — to a Telegram DM whenever one of their linked accounts **completes (closes) a
 trade**. Unsubscribing (`/unsubscribe`) deletes the row. When a worker's `TRADE`
-event closes a trade, the broker resolves the account's owners as the
+event ends a trade, the broker resolves the account's owners as the
 intersection of `account_bot_links` (who is linked) and this table (who opted
 in), then DMs each via the bot-service bot token (`BOT_TELEGRAM_TOKEN`) — the
 bot the user actually started, since a bot can only message users who started
 it. The opt-in spans every account the user holds, which is why it is a per-user
 row here rather than a column on a link.
+
+"Ends a trade" means the event's own status maps to a **terminal** trade status —
+`CLOSED` (TP2 / SL / R_SL / TERMINAL_CLOSED / FORCED_CLOSED) or `FLAT` (an admin
+`POST /admin/flat`). An admin FLAT counts because the position is over and the
+owner did not close it themselves. Gating on the event's status rather than the
+persisted row's keys the DM to the one discrete close event the worker emits, so
+a later touch of an already-closed row does not fire a second one.
+
+A `FLATTED` event reports `closed_price=0` when the worker has no close price to
+give. No instrument closes at 0, so the broker treats it as missing and keeps the
+open price rather than persisting — and DM-ing — a bogus `0`.
 
 | Column | Type | Description |
 | ------- | ------------ | --------------------------------------- |

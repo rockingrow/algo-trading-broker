@@ -69,6 +69,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example was `50`) breaks the send instead of tuning it. No action needed on
   upgrade: a leftover `BOT_VIEW_TRADES_PER_PAGE` in an existing `.env` is
   ignored.
+- **An admin FLAT counts as a completed trade for broadcasts** — A `FLATTED`
+  event (a `POST /admin/flat`) now DMs subscribed owners just like a normal
+  close. The position is over and the owner did not close it themselves, so
+  they arguably need the notice more, not less. The gate is still the event's
+  own status rather than the persisted row's, so the DM stays keyed to the one
+  discrete close event the worker emits and a later touch of an already-closed
+  row still fires nothing.
+- **Completed-trade DM shows the gateway instead of the strategy** — The
+  account line alone doesn't say which gateway the account is on, and
+  `account_id` is no longer unique across gateways; the strategy name it
+  replaces was of no use to the owner reading a close.
 - **`/admin_rotate` now resets access, not just the token** — Rotating an
   account's link token additionally unlinks every Telegram user currently bound
   to the account and clears any active-session pointer at it, so the freshly
@@ -193,6 +204,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A FLATTED trade was persisted with a close price of `0`** — Workers report
+  `closed_price=0` on a FLAT when they have no close price to give, and the
+  repository only fell back to the open price when the field was `None`, so the
+  `0` was written to the row and surfaced as `Close price: 0` in the owner's
+  broadcast DM. No instrument ever closes at 0, so a falsy close price is now
+  treated as missing and the open price is kept.
+- **Broadcast DMs leaked the column scale of `Numeric` values** — `str()` on a
+  `Numeric(20,8)` Decimal renders the stored scale, not the number a human
+  writes: a zero came out as `0E-8` and `0.104` as `0.10400000`. Price,
+  quantity and balance now normalise to plain digits (trailing zeros dropped,
+  the scientific forms Decimal falls back to for zero and for large integers
+  expanded back out).
 - **`/trades` and `/atrades` showed a bare UTC timestamp** — The bot rendered
   each trade's `updatedAt` as raw UTC digits with no indication of the zone.
   It now reads the broker's `notification_timezone` setting (new
