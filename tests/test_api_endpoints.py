@@ -32,7 +32,11 @@ from broker.providers import (
 )
 from broker.router import get_core_router
 from broker.schemas.trade_schema import TradeStatusEnum
-from broker.schemas.account_schema import MarketTypeEnum, compose_worker_id
+from broker.schemas.account_schema import (
+  AccountLinkSummary,
+  MarketTypeEnum,
+  compose_worker_id,
+)
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import SystemActionEnum
 from broker.security.ensure_api_key import ensure_api_key
@@ -101,12 +105,38 @@ class FakePublisher:
 class FakeAccountRepo:
   def __init__(self, accounts):
     self.accounts = list(accounts)
+    # account id -> summary, standing in for account_link_tokens +
+    # account_bot_links. Every account gets a token on creation, as the real
+    # repository does.
+    self.summaries: dict[uuid.UUID, AccountLinkSummary] = {
+      a.id: AccountLinkSummary(link_token=uuid.uuid4()) for a in self.accounts
+    }
 
   async def get_all(self):
     return self.accounts
 
+  async def get_link_summaries(self, account_ids, platform=None):
+    return {
+      aid: self.summaries[aid] for aid in account_ids if aid in self.summaries
+    }
+
   async def get_by_market(self, market):
-    return [a for a in self.accounts if a.market_type == market]
+    return [a for a in self.accounts if a.market == market]
+
+  async def create_account(self, account_id, market, gateway, account_name=None):
+    # account_id alone isn't unique — only the full (market, gateway, account_id)
+    # triple is (see uq_accounts_market_gateway_account_id).
+    if any(
+      a.account_id == account_id and a.market == market and a.gateway == gateway
+      for a in self.accounts
+    ):
+      return None
+    account = _make_account(
+      account_id=account_id, account_name=account_name, market=market, gateway=gateway
+    )
+    self.accounts.append(account)
+    self.summaries[account.id] = AccountLinkSummary(link_token=uuid.uuid4())
+    return account
 
 
 class FakeTradeRepo:
@@ -129,7 +159,7 @@ def _make_account(
   *,
   account_id="acc-1",
   account_name="Main",
-  market_type=MarketTypeEnum.FOREX,
+  market=MarketTypeEnum.FOREX,
   gateway=None,
 ) -> Account:
   return Account(
@@ -137,7 +167,7 @@ def _make_account(
     account_id=account_id,
     account_name=account_name,
     account_balance=1000.0,
-    market_type=market_type,
+    market=market,
     gateway=gateway,
     last_activity_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     createdAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -293,7 +323,66 @@ def test_list_accounts(ctx):
   data = resp.json()
   assert len(data) == 1
   assert data[0]["account_id"] == "acc-1"
-  assert data[0]["market_type"] == "FOREX"
+  assert data[0]["market"] == "FOREX"
+
+
+# ── Create account (admin) ─────────────────────────────────────────
+
+
+def test_create_account_success(ctx):
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market": "CRYPTO", "gateway": "BINANCE", "account_id": "7654321"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 201
+  body = resp.json()
+  assert body["account_id"] == "7654321"
+  assert body["market"] == "CRYPTO"
+  assert body["gateway"] == "BINANCE"
+
+
+def test_create_account_rejects_invalid_gateway_for_market(ctx):
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market": "FOREX", "gateway": "BINANCE", "account_id": "7654321"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_create_account_conflict_on_duplicate_id(ctx):
+  # Seed account "acc-1" already has market/gateway set — same triple posted
+  # again should conflict.
+  ctx["account_repo"].accounts[0].gateway = "MT5"
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market": "FOREX", "gateway": "MT5", "account_id": "acc-1"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 409
+
+
+def test_create_account_allows_same_account_id_on_different_gateway(ctx):
+  # "acc-1" already exists as a FOREX/MT5 account; the same bare account_id
+  # under a different market/gateway is a distinct account and must succeed.
+  ctx["account_repo"].accounts[0].gateway = "MT5"
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market": "CRYPTO", "gateway": "BINANCE", "account_id": "acc-1"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 201
+  assert resp.json()["gateway"] == "BINANCE"
+
+
+def test_create_account_rejects_colon_in_account_id(ctx):
+  resp = ctx["client"].post(
+    "/admin/accounts",
+    json={"market": "FOREX", "gateway": "MT5", "account_id": "bad:id"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
 
 
 # ── Trades ──────────────────────────────────────────────────────────
@@ -398,11 +487,11 @@ def test_set_crypto_allowed_symbol_pushes_per_crypto_account(ctx):
   # Two crypto accounts (targeted) plus the default forex one (ignored).
   ctx["account_repo"].accounts.append(
     _make_account(
-      account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
     )
   )
   ctx["account_repo"].accounts.append(
-    _make_account(account_id="111", market_type=MarketTypeEnum.CRYPTO, gateway="BYBIT")
+    _make_account(account_id="111", market=MarketTypeEnum.CRYPTO, gateway="BYBIT")
   )
 
   resp = ctx["client"].post(
@@ -429,7 +518,7 @@ def test_set_crypto_allowed_symbol_skips_crypto_account_without_gateway(ctx):
   ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "10"
   # Crypto account whose gateway was never reported cannot be addressed.
   ctx["account_repo"].accounts.append(
-    _make_account(account_id="999", market_type=MarketTypeEnum.CRYPTO, gateway=None)
+    _make_account(account_id="999", market=MarketTypeEnum.CRYPTO, gateway=None)
   )
 
   resp = ctx["client"].post(
@@ -445,7 +534,7 @@ def test_set_crypto_allowed_symbol_skips_push_on_invalid_leverage(ctx):
   ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "not-an-int"
   ctx["account_repo"].accounts.append(
     _make_account(
-      account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
     )
   )
 
@@ -507,7 +596,7 @@ def test_set_crypto_max_leverage_pushes_per_crypto_account(ctx):
   ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] = "BTC,ETH"
   ctx["account_repo"].accounts.append(
     _make_account(
-      account_id="7654321", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
     )
   )
 
@@ -612,6 +701,44 @@ def test_set_notification_timezone_persist_failure_returns_500(ctx):
   assert resp.status_code == 500
 
 
+def test_get_notification_timezone_defaults_to_utc_plus_7(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/notification-timezone", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == NOTIFICATION_TIMEZONE_KEY
+  assert body["value"] == "7"
+
+
+def test_get_notification_timezone_reflects_stored_value(ctx):
+  ctx["setting_repo"].values[NOTIFICATION_TIMEZONE_KEY] = "9"
+  resp = ctx["client"].get(
+    "/admin/settings/notification-timezone", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "9"
+
+
+# ── Admin settings (read) ──────────────────────────────────────────
+
+
+def test_get_settings_defaults_disabled(ctx):
+  resp = ctx["client"].get("/admin/settings", headers={"X-API-KEY": API_KEY})
+  assert resp.status_code == 200
+  body = resp.json()
+  assert len(body) == 3
+  assert all(item["value"] == "0" and item["state"] == "DISABLED" for item in body)
+
+
+def test_get_settings_reflects_enabled(ctx):
+  ctx["setting_repo"].values[SIGNAL_BLOCKED] = "1"
+  resp = ctx["client"].get("/admin/settings", headers={"X-API-KEY": API_KEY})
+  blocked = next(i for i in resp.json() if i["setting"] == SIGNAL_BLOCKED)
+  assert blocked["value"] == "1"
+  assert blocked["state"] == "ENABLED"
+
+
 # ── Admin flat ──────────────────────────────────────────────────────
 
 
@@ -636,6 +763,39 @@ def test_flat_scoped(ctx):
   published = ctx["publisher"].admin_signals[0]
   assert published["strategy"] == "s"
   assert published["symbol"] == "XAUUSD"
+
+
+def test_flat_scoped_by_market_and_gateway(ctx):
+  resp = ctx["client"].post(
+    "/admin/flat",
+    json={"account_id": "acc-1", "market": "CRYPTO", "gateway": "BINANCE"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  body = resp.json()
+  assert "market=CRYPTO" in body["scope"]
+  assert "gateway=BINANCE" in body["scope"]
+  published = ctx["publisher"].admin_signals[0]
+  assert published["market"] == MarketTypeEnum.CRYPTO
+  assert published["gateway"] == "BINANCE"
+
+
+def test_flat_rejects_account_id_without_market_and_gateway(ctx):
+  resp = ctx["client"].post(
+    "/admin/flat",
+    json={"account_id": "acc-1"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+  assert ctx["publisher"].admin_signals == []
+
+
+def test_flat_rejects_account_id_with_only_gateway(ctx):
+  resp = ctx["client"].post(
+    "/admin/flat",
+    json={"account_id": "acc-1", "gateway": "MT5"},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
 
 
 # ── Auth enforcement (ensure_api_key NOT overridden) ───────────────

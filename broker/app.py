@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import traceback
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from broker.db.engine import close_db, init_db
@@ -10,6 +11,7 @@ from broker.db.repository import (
   SqlAlchemyAccountRepository,
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
+  SqlAlchemyTradeBroadcastRepository,
   SqlAlchemyTradeRepository,
 )
 from broker.helpers import emoji_constants as em
@@ -29,6 +31,7 @@ from broker.services.signal_processing_service import (
   SignalWorker,
 )
 from broker.services.signal_retry_job import SignalRetryJob
+from broker.services.trade_broadcast_service import TradeBroadcastService
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -52,8 +55,14 @@ async def lifespan(app: FastAPI):
   publisher = NatsPublisher(connection=nats_client)
   setting_repo = SqlAlchemySettingRepository()
   signal_repo = SqlAlchemySignalRepository()
+  trade_broadcast_service = TradeBroadcastService(
+    broadcast_repository=SqlAlchemyTradeBroadcastRepository(),
+    setting_repository=setting_repo,
+  )
   consumer = TradeEventConsumer(
-    trade_repository=SqlAlchemyTradeRepository(), connection=nats_client
+    trade_repository=SqlAlchemyTradeRepository(),
+    connection=nats_client,
+    broadcast_service=trade_broadcast_service,
   )
   system_consumer = SystemEventConsumer(
     setting_repository=setting_repo,
@@ -137,6 +146,16 @@ def create_app() -> FastAPI:
   app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
 
   install_webhook_connection_close(app)
+
+  @app.exception_handler(RequestValidationError)
+  async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    log.warning(
+      "422 Unprocessable Content | %s %s | %s",
+      request.method,
+      request.url.path,
+      exc.errors(),
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
   @app.exception_handler(Exception)
   async def global_exception_handler(request: Request, exc: Exception):

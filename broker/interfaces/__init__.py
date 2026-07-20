@@ -2,6 +2,7 @@ from broker.interfaces.db_protocol import (
   AccountRepository,
   SettingRepository,
   SignalRepository,
+  TradeBroadcastRepository,
   TradeRepository,
 )
 from broker.interfaces.notifier_protocol import Notifier
@@ -13,5 +14,6 @@ __all__ = [
   "SettingRepository",
   "SignalPublisher",
   "SignalRepository",
+  "TradeBroadcastRepository",
   "TradeRepository",
 ]

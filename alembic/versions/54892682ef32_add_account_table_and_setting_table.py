@@ -37,7 +37,7 @@ def upgrade() -> None:
       sa.Column("account_name", sa.String(length=255), nullable=True),
       sa.Column("account_balance", sa.Float(), nullable=True),
       sa.Column(
-        "market_type", PgEnum(name="markettypeenum", create_type=False), nullable=False
+        "market", PgEnum(name="markettypeenum", create_type=False), nullable=False
       ),
       sa.Column("last_activity_at", sa.DateTime(timezone=True), nullable=True),
       sa.Column("id", sa.UUID(), nullable=False),

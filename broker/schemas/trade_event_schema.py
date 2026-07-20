@@ -29,7 +29,7 @@ class PositionEvent(BaseModel):
   model_config = ConfigDict(use_enum_values=True)
 
   event: PositionEventType
-  market_type: MarketTypeEnum
+  market: MarketTypeEnum
   strategy: str
   strategy_code: Optional[str] = None
 
@@ -66,5 +66,5 @@ class PositionEvent(BaseModel):
   account_name: Optional[str] = None
   # Exchange/gateway the account trades through (e.g. MT5, BINANCE). Upserted
   # onto the accounts row so the broker can address the worker as
-  # <market_type>-<gateway>-<account_id> on the SYSTEM subject.
+  # <market>-<gateway>-<account_id> on the SYSTEM subject.
   gateway: Optional[str] = None

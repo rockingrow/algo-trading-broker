@@ -63,7 +63,10 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from broker.services.trade_broadcast_service import TradeBroadcastService
 
 from nats.aio.subscription import Subscription
 from pydantic import ValidationError
@@ -123,15 +126,22 @@ CRYPTO_SETTINGS_CACHE_TTL_SECONDS = 30.0
 
 
 class TradeEventConsumer:
-  """Consumes TRADE events from NATS and persists them via a TradeRepository."""
+  """Consumes TRADE events from NATS and persists them via a TradeRepository.
+
+  When a ``TradeBroadcastService`` is injected, each persisted event is also
+  handed to it so a completed (closed) trade is DM-ed to its subscribed
+  owners. The broadcast is best-effort and never blocks persistence.
+  """
 
   def __init__(
     self,
     trade_repository: TradeRepository,
     connection: NatsClient | None = None,
+    broadcast_service: "TradeBroadcastService | None" = None,
   ) -> None:
     self._repo = trade_repository
     self._conn = connection or nats_client
+    self._broadcast = broadcast_service
     self._sub: Optional[Subscription] = None
 
   async def start(self) -> None:
@@ -171,9 +181,17 @@ class TradeEventConsumer:
       event.status,
     )
     try:
-      await self._repo.upsert_by_position_event(event)
+      trade = await self._repo.upsert_by_position_event(event)
     except Exception as exc:
       log.exception("Failed to apply TRADE event: %s", exc)
+      return
+
+    if self._broadcast is not None:
+      try:
+        await self._broadcast.maybe_broadcast(event, trade)
+      except Exception as exc:
+        # Broadcasting must never break TRADE consumption.
+        log.exception("Failed to broadcast completed trade: %s", exc)
 
 
 class SystemEventConsumer:
@@ -601,11 +619,13 @@ class NatsPublisher:
     payload = signal.model_dump_json().encode()
     await self._conn.nc.publish(PublishTopicEnum.ADMIN.value, payload)
     log.info(
-      "Published [ADMIN] action=%s strategy=%s symbol=%s account_id=%s",
+      "Published [ADMIN] action=%s strategy=%s symbol=%s account_id=%s market=%s gateway=%s",
       signal.action,
       signal.strategy,
       signal.symbol,
       signal.account_id,
+      signal.market,
+      signal.gateway,
     )
 
   async def publish_system_signal(

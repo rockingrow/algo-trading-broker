@@ -5,6 +5,233 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-21
+
+### Added
+
+- **Timezone in all log output** — Uvicorn access logs and application logs
+  now include the local timezone suffix (e.g. `ICT`, `UTC`, `+0700`) in every
+  timestamp, so operators can tell at a glance which clock the log refers to.
+  Uvicorn receives a custom `log_config` from `uvicorn_log_config()`; the
+  application formatter's `datefmt` is updated to match.
+- **422 validation errors are now logged** — A `RequestValidationError`
+  exception handler logs every 422 response at `WARNING` level with method,
+  path, and Pydantic validation error details. Previously, FastAPI's default
+  handler returned the 422 silently — the only trace was uvicorn's one-line
+  access log with no payload context.
+- **Admin command prefix + menu divider** — Bot admin commands are now prefixed
+  `admin_` (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
+  `/admin_flat`, `/admin_rotate`, `/admin_settings`) so they group as a distinct
+  set, separated from the user commands by a divider row (`/admin_help`, which
+  also lists them). Telegram command names may only contain `[a-z0-9_]`, so the
+  prefix uses an underscore and the divider is a real command rather than a
+  literal `-----` token. The legacy un-prefixed names still work (handler
+  aliases); only the prefixed form is advertised in the menu.
+- **`/admin_linkaccount`** — Admins can bind a Telegram user to an account
+  directly, without handing out an invite token. The bot resolves the account
+  by its row UUID (`accounts.id`, unambiguous even when a bare `account_id` is
+  reused across gateways) and calls the new
+  `POST /admin/accounts/{account_uuid}/link-telegram`. Additive and idempotent.
+- **`/admin_invite_url` + `/start <code>` deep links** — Admins can hand out a
+  one-tap invite URL (`https://t.me/<bot>?start=<code>`) instead of a bare UUID.
+  Tapping it opens the bot with the account's link token already in the `/start`
+  payload, so the account links on the first tap and the end user never types a
+  code. `/admin_invite_url <code>` wraps a code the admin already has; called
+  bare it offers the account picker and reads the token from the account picked
+  (the button carries the row UUID, so the token never enters `callback_data`).
+  The payload is the token in bare hex (32 chars) just to shorten the URL;
+  `/start` and the manual prompt both accept dashed or hex and normalise before
+  calling the broker. Bot-only — no broker or schema change, and no new secret:
+  the URL is exactly as sensitive as the token in it, and `/admin_rotate`
+  revokes both together.
+- **Account row UUIDs in `/admin_accounts`** — The account list now carries a
+  second table with each account's internal row UUID (the id the link-account
+  and broker-side calls address). It's a separate table rather than another
+  column because a 36-char UUID would blow out the width of the main one.
+- **Completed-trade broadcasts (`/subscribe`, `/unsubscribe`)** — Owners can opt
+  in to a Telegram DM whenever one of their linked accounts closes a trade. The
+  opt-in is a per-user preference stored in the new
+  `trade_broadcast_subscriptions` table (migration `a1b2c3d4e5f6`), toggled via
+  `POST /v1/telegram/{id}/broadcast/subscribe` · `/unsubscribe` (and read via
+  `GET /v1/telegram/{id}/broadcast`). When a worker's `TRADE` event closes a
+  trade, the broker DMs every subscribed owner (the intersection of
+  `account_bot_links` and the subscription table) via the bot-service bot token
+  (`BOT_TELEGRAM_TOKEN`, read from the shared `.env`) — the bot the user
+  actually started. Best-effort: a lookup or send failure never blocks `TRADE`
+  consumption.
+
+- **Telegram bot service** (`bot/`) — A new, self-contained **aiogram v3**
+  service serving two roles from one process: endusers and admins. It is a
+  thin HTTP client of the broker (authenticated with `X-API-KEY`) and never
+  touches PostgreSQL or NATS directly. Ships its own `pyproject` / `Dockerfile`
+  / `uv.lock` and a `bot` service in `docker-compose.yml`. Run it with
+  `docker compose up -d bot`; see [`bot/README.md`](bot/README.md).
+- **UUID-based account linking** — Every account gets a link token (UUID) in
+  `account_link_tokens`. An admin hands it to an end user, who pastes it into
+  the bot's `/start` FSM flow; the bot calls `POST /v1/telegram/link`, which
+  records the join row.
+- **`/v1/telegram/*` endpoints** — `link`, `{id}` (active account), `{id}/accounts`,
+  `{id}/active-account`, `{id}/trades`, `{id}/commands/flat`,
+  `{id}/commands/prevent`, `{id}/unlink`. All behind `X-API-KEY`: the bot is the
+  only caller, and the end-user identity is the `telegram_user_id` taken from a
+  verified Telegram update — never from user-typed text.
+- **Bot bindings decoupled from `accounts`, many-to-many both ways**
+  (migration `f7a8b9c0d1e2`) — `accounts` carries no chat-platform columns at
+  all. Three new tables take over, each keyed by `platform`
+  (`BotPlatformTypeEnum`, currently only `TELEGRAM`) so a future Discord/Slack
+  is a new enum member rather than a migration:
+  - `account_bot_links` — the join table. An account may be managed by
+    **several** bot users (previously impossible: a second link overwrote the
+    first) and a bot user may hold several accounts. No role column yet;
+    every linked user has the same rights. `platform_user_id` is `String(64)`
+    rather than a bigint because not every platform uses numeric ids.
+  - `account_link_tokens` — invite secrets, several per account, individually
+    revocable (`revoked_at`) and optionally time-boxed (`expires_at`, NULL =
+    never). `/rotate` revokes every valid token and issues a new one; it does
+    **not** evict anyone already linked, since a token only grants the
+    initial claim.
+  - `bot_sessions` — one row per bot user pointing at their **active**
+    account; every single-account command (`/status`, `/trades`, `/flat`,
+    `/prevent`, `/allow`, `/unlink`) acts on whichever that is. New bot
+    commands `/link` (add another account) and `/switch` (pick the active one
+    from an inline keyboard labelled `market-gateway-account_id`, active one
+    starred). Stored broker-side, so it survives bot restarts; a pointer left
+    stale by an unlink falls back to the user's most recently active account
+    and self-heals on the next read.
+- **Admin role and scoped command menus** — Telegram command **scopes** give
+  endusers the default menu while each id in `TELEGRAM_ADMIN_IDS` gets an
+  extended one, re-initialised on every startup (and tolerating admins who have
+  not messaged the bot yet). Admin commands: `/accounts`, `/newaccount`,
+  `/atrades`, `/aflat`, `/rotate`, `/settings`.
+- **`POST /admin/accounts`** — Manually register an account ahead of any trade
+  or worker handshake, so a link token can be issued immediately. `gateway`
+  must be valid for `market` (`FOREX` → `MT5`, `CRYPTO` → `BINANCE`) or
+  the request is rejected with `422`; returns `409` if the
+  `(market, gateway, account_id)` triple already exists.
+- **`POST /admin/accounts/{account_id}/link-token/rotate`** — Issue a fresh
+  link token for an account, revoking the old one.
+- **`GET /admin/settings`** — Read the runtime toggles (previously POST-only),
+  backing the bot's `/settings` screen.
+- **`BLOCK_ENTRIES` / `ALLOW_ENTRIES` admin actions** — `AdminActionEnum` grows
+  two per-account directives, published on the `ADMIN` subject by the bot's
+  `/prevent` and `/allow`. Enforcement is the **worker's** responsibility —
+  worker code lives outside this repo, so the broker only publishes them.
+- **`trades.market` and `trades.gateway` columns** — Added via migration
+  `c9d8e7f6a5b4` and denormalised from the owning `accounts` row at upsert
+  time, so a trade can be attributed to the right account now that
+  `account_id` alone no longer identifies one.
+- **`GET /admin/settings/notification-timezone`** — Read the current
+  `notification_timezone` UTC offset (defaults to `7`), backing the bot's own
+  timezone conversion below.
+
+### Changed
+
+- **Every table listing paginates** — `/myaccounts`, `/switch` and
+  `/admin_accounts` now page through Prev/Next buttons like `/trades` and
+  `/admin_trades` already did, and each header states its range
+  (`(9–16 / 23)`). Telegram rejects a message over 4096 characters outright,
+  so an unpaginated account table didn't degrade as the list grew — it stopped
+  sending. The broker returns these lists whole, so the bot slices them
+  client-side (`utils.pagination.paginate`) and synthesises the same `page`
+  metadata the trade endpoints return; in `/switch` the table and the account
+  picker are built from one slice, so each button stays under its row.
+- **Page sizes moved from `.env` to code** — `BOT_VIEW_TRADES_PER_PAGE` is
+  **removed**; page sizes are now `TRADES_PER_PAGE`, `ACCOUNTS_PER_PAGE` and
+  `ADMIN_ACCOUNTS_PER_PAGE` in [`bot/app/constants.py`](bot/app/constants.py).
+  The right value follows from how wide each table is, which is a property of
+  the code rather than of the deployment, and an over-large value (the shipped
+  example was `50`) breaks the send instead of tuning it. No action needed on
+  upgrade: a leftover `BOT_VIEW_TRADES_PER_PAGE` in an existing `.env` is
+  ignored.
+- **An admin FLAT counts as a completed trade for broadcasts** — A `FLATTED`
+  event (a `POST /admin/flat`) now DMs subscribed owners just like a normal
+  close. The position is over and the owner did not close it themselves, so
+  they arguably need the notice more, not less. The gate is still the event's
+  own status rather than the persisted row's, so the DM stays keyed to the one
+  discrete close event the worker emits and a later touch of an already-closed
+  row still fires nothing.
+- **Completed-trade DM shows the gateway instead of the strategy** — The
+  account line alone doesn't say which gateway the account is on, and
+  `account_id` is no longer unique across gateways; the strategy name it
+  replaces was of no use to the owner reading a close.
+- **`/admin_rotate` now resets access, not just the token** — Rotating an
+  account's link token additionally unlinks every Telegram user currently bound
+  to the account and clears any active-session pointer at it, so the freshly
+  issued token is the only way back in. Previously already-linked users kept
+  their access.
+- **`accounts` unique constraint: `account_id` → `(market, gateway, account_id)`** —
+  Two unrelated real accounts on different gateways can coincidentally share a
+  bare id (an MT5 login `100234` and a Binance account `100234`), which the old
+  single-column constraint made impossible to register. `trades` gets the
+  matching treatment: `(account_id, ref_id)` →
+  `(market, gateway, account_id, ref_id)`.
+  **Known limitation:** admin-facing lookups that take a bare `account_id` —
+  `POST /admin/accounts/{account_id}/link-token/rotate` and
+  `GET /v1/{account_id}/trades` — still resolve/match on that id alone and can
+  be ambiguous if it is reused across gateways. Avoid deliberately reusing an
+  `account_id` across gateways until those callers pass `market` /
+  `gateway` too.
+- **`GET /v1/accounts` / `POST /admin/accounts` response fields** — The
+  Telegram columns are gone from the payload: `telegram_link_token` →
+  `link_token` (joined from `account_link_tokens`), and the scalar
+  `telegram_user_id` → `linked_user_ids`, a list of platform user id strings
+  (an account can have more than one). `POST /admin/accounts/{id}/link-token/rotate`
+  likewise returns `link_token` instead of `telegram_link_token`.
+  `LinkedAccountResponse` (the `/v1/telegram/*` payload) drops
+  `telegram_user_id` entirely — every account in that response is by
+  definition linked to the caller, so the field could only ever echo the id
+  the bot already sent.
+- **`AdminSignal` requires `market` + `gateway` alongside `account_id`** —
+  Account-scoped admin signals are now fully disambiguated on the wire, and
+  `POST /admin/flat` returns `422` if `account_id` is given without both.
+  **Workers must match all three** (`account_id` + `market` + `gateway`)
+  against themselves before acting; a worker still matching on `account_id`
+  alone can act on a directive meant for a different account sharing that id.
+- **Bot copy is English-only, emoji via named constants** — Vietnamese strings
+  replaced, and raw glyphs pulled out of source into `app/emojis.py`.
+- **Bot formatters reorganised into presenters** — Message-formatting functions
+  grouped into `UserMessages` / `AdminMessages` under `app/presenters`, with
+  reusable cross-handler logic (`safe_edit_text`, pagination keyboard building)
+  extracted to `app/utils`.
+- **Account and trade lists render as tables** — `/myaccounts` and `/switch`
+  show one padded row per account (active ★ / market / gateway / account)
+  instead of a run-together `market-gateway-id` string; `/trades` and
+  `/atrades` show one row per trade (symbol / action / status / price / qty /
+  balance / time) instead of a three-line block per trade. Both go through a
+  reusable `render_table` in `app/utils/table.py` (monospace `<pre>`,
+  per-column alignment and width caps, escaping handled for the caller).
+  Two consequences of monospace alignment:
+  - The active marker is the text star `★` rather than the `:star:` emoji,
+    which is double-width and would skew every column after it. The inline
+    `/switch` buttons still use the emoji.
+  - Trade status shows as a text abbreviation (`OPEN`, `PARTIAL`, `REJECT`)
+    in place of the colour-coded circle, which had the same width problem.
+  Trade timestamps drop to `MM-DD HH:MM` and the timezone moves from every
+  row into the header (`· times in UTC+7`), so it is still always shown.
+
+### Fixed
+
+- **A FLATTED trade was persisted with a close price of `0`** — Workers report
+  `closed_price=0` on a FLAT when they have no close price to give, and the
+  repository only fell back to the open price when the field was `None`, so the
+  `0` was written to the row and surfaced as `Close price: 0` in the owner's
+  broadcast DM. No instrument ever closes at 0, so a falsy close price is now
+  treated as missing and the open price is kept.
+- **Broadcast DMs leaked the column scale of `Numeric` values** — `str()` on a
+  `Numeric(20,8)` Decimal renders the stored scale, not the number a human
+  writes: a zero came out as `0E-8` and `0.104` as `0.10400000`. Price,
+  quantity and balance now normalise to plain digits (trailing zeros dropped,
+  the scientific forms Decimal falls back to for zero and for large integers
+  expanded back out).
+- **`/trades` and `/atrades` showed a bare UTC timestamp** — The bot rendered
+  each trade's `updatedAt` as raw UTC digits with no indication of the zone.
+  It now reads the broker's `notification_timezone` setting (new
+  `GET /admin/settings/notification-timezone`, `app/utils/timezone.py`) and
+  converts to that offset, matching the timezone already applied to Telegram
+  signal notifications. The bot never reads `broker_settings` directly, so a
+  failed call falls back to UTC+7 — the broker's own default. See the table
+  entry above for how the converted time and its zone are laid out.
+
 ## [1.1.0] - 2026-07-18
 
 ### Added
@@ -126,7 +353,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`accounts.gateway` column** — Added via Alembic migration `f4d5e6a7b8c9`.
   Stores the exchange an account trades through (e.g. `MT5` for forex, `BINANCE`
   for crypto). Nullable; populated from the `WORKER_CONNECTED` handshake and the
-  `TRADE` event, and surfaced on `GET /v1/accounts`. Combined with `market_type`
+  `TRADE` event, and surfaced on `GET /v1/accounts`. Combined with `market`
   and `account_id` it forms the `<market>-<gateway>-<account_id>` worker id used
   to address `SYSTEM` messages.
 - **`gateway` on the `TRADE` (`PositionEvent`) payload** — Workers may report the
@@ -338,7 +565,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **PositionEvent v2 ingestion** — The broker now consumes the worker's v2 `TRADE` event shape. `source_ticket`/`ticket` → `ref_source_id`/`ref_id`, `mt5_retcode` → `gateway_return_code`, `magic` → `strategy_code`; `market_type` is now a typed `MarketTypeEnum`; `account_name` is optional; and signal-derived fields (`sl`, `tp1`, `tp2`, `risk_percent`, `signal_id`) are promoted to first-class fields.
+- **PositionEvent v2 ingestion** — The broker now consumes the worker's v2 `TRADE` event shape. `source_ticket`/`ticket` → `ref_source_id`/`ref_id`, `mt5_retcode` → `gateway_return_code`, `magic` → `strategy_code`; `market` is now a typed `MarketTypeEnum`; `account_name` is optional; and signal-derived fields (`sl`, `tp1`, `tp2`, `risk_percent`, `signal_id`) are promoted to first-class fields.
 - **Persist `gateway_return_code`** — The gateway return code carried on each `TRADE` event is now stored on `Trade` and exposed in the `GET /v1/{account_id}/trades` response (`TradeResponse`).
 
 ### Fixed

@@ -14,14 +14,23 @@ from datetime import datetime, timezone
 
 
 from broker.db import repository as repo_mod
-from broker.db.models import Account, BrokerSetting, Trade
+from broker.db.models import (
+  Account,
+  AccountBotLink,
+  AccountLinkToken,
+  BotSession,
+  BrokerSetting,
+  Trade,
+  TradeBroadcastSubscription,
+)
 from broker.db.repository import (
   SqlAlchemyAccountRepository,
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
+  SqlAlchemyTradeBroadcastRepository,
   SqlAlchemyTradeRepository,
 )
-from broker.schemas.core import SignalActionEnum
+from broker.schemas.core import BotPlatformTypeEnum, SignalActionEnum
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.account_schema import MarketTypeEnum
@@ -250,7 +259,7 @@ async def test_list_retryable_swallows_db_error(monkeypatch):
 def _event(**overrides) -> PositionEvent:
   base = dict(
     event="CREATED",
-    market_type="FOREX",
+    market="FOREX",
     strategy="strat",
     id=1,
     ref_source_id="rs-1",
@@ -300,17 +309,17 @@ async def test_upsert_persists_gateway_on_new_account(monkeypatch):
   _patch_session(monkeypatch, session)
 
   await SqlAlchemyTradeRepository().upsert_by_position_event(
-    _event(market_type="CRYPTO", gateway="BINANCE")
+    _event(market="CRYPTO", gateway="BINANCE")
   )
 
   account = next(o for o in session.added if isinstance(o, Account))
   assert account.gateway == "BINANCE"
-  assert account.market_type == MarketTypeEnum.CRYPTO
+  assert account.market == MarketTypeEnum.CRYPTO
 
 
 async def test_upsert_updates_gateway_on_existing_account(monkeypatch):
   existing_account = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway="OLD"
+    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway="OLD"
   )
   existing_trade = Trade(
     account_id="acc-1",
@@ -345,6 +354,20 @@ async def test_upsert_uses_closed_price_when_present(monkeypatch):
   assert result.is_running is False
 
 
+async def test_upsert_falls_back_to_open_price_when_closed_price_is_zero(monkeypatch):
+  # FLATTED events arrive with closed_price=0, which is not a real price —
+  # persisting it surfaces as "Close price: 0" in the owner's broadcast DM.
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(status="FLATTED", closed_price=0.0)
+  )
+
+  assert result.price == 100.0
+  assert result.status == TradeStatusEnum.FLAT
+
+
 async def test_upsert_inserts_rejected_trade_with_reason(monkeypatch):
   # A worker that hits its MAX ORDER limit still persists the order and fires a
   # TRADE with status REJECTED; the broker records it as a terminal, non-running
@@ -363,7 +386,7 @@ async def test_upsert_inserts_rejected_trade_with_reason(monkeypatch):
 
 
 async def test_upsert_updates_existing_trade(monkeypatch):
-  existing_account = Account(account_id="acc-1", market_type=MarketTypeEnum.FOREX)
+  existing_account = Account(account_id="acc-1", market=MarketTypeEnum.FOREX)
   existing_trade = Trade(
     account_id="acc-1",
     ref_id="rs-1",
@@ -390,7 +413,7 @@ async def test_upsert_updates_existing_trade(monkeypatch):
 
 
 async def test_upsert_ignores_status_downgrade(monkeypatch):
-  existing_account = Account(account_id="acc-1", market_type=MarketTypeEnum.FOREX)
+  existing_account = Account(account_id="acc-1", market=MarketTypeEnum.FOREX)
   existing_trade = Trade(
     account_id="acc-1",
     ref_id="rs-1",
@@ -482,7 +505,7 @@ async def test_upsert_gateway_backfills_existing_account(monkeypatch):
   # The row predates the gateway column (or has only ever seen gateway-less
   # TRADE events), so the handshake is what fills it in.
   existing = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway=None
+    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway=None
   )
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
@@ -504,17 +527,21 @@ async def test_upsert_gateway_inserts_unknown_account(monkeypatch):
     "acc-2", MarketTypeEnum.FOREX, "MT5"
   )
 
-  assert len(session.added) == 1
-  row = session.added[0]
+  row = next(o for o in session.added if isinstance(o, Account))
   assert row.account_id == "acc-2"
-  assert row.market_type == MarketTypeEnum.FOREX
+  assert row.market == MarketTypeEnum.FOREX
   assert row.gateway == "MT5"
   assert row.last_activity_at is not None
+
+  # Implicitly created accounts get a claimable token too — this used to be
+  # the ``telegram_link_token`` column default.
+  token = next(o for o in session.added if isinstance(o, AccountLinkToken))
+  assert token.account_id == row.id
 
 
 async def test_upsert_gateway_is_noop_when_unchanged(monkeypatch):
   existing = Account(
-    account_id="acc-1", market_type=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
   )
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
@@ -537,3 +564,515 @@ async def test_upsert_gateway_swallows_db_error(monkeypatch):
   await SqlAlchemyAccountRepository().upsert_gateway(
     "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
   )
+
+
+# ── AccountRepository.create_account (admin manual registration) ──────
+
+
+async def test_create_account_inserts_new_row(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  account = await SqlAlchemyAccountRepository().create_account(
+    "7654321", MarketTypeEnum.CRYPTO, "BINANCE", "Main Crypto"
+  )
+
+  row = next(o for o in session.added if isinstance(o, Account))
+  assert row.account_id == "7654321"
+  assert row.market == MarketTypeEnum.CRYPTO
+  assert row.gateway == "BINANCE"
+  assert row.account_name == "Main Crypto"
+  assert row.last_activity_at is not None
+  assert account is row
+  assert session.refreshed == [row]
+
+  # The admin can hand out a link token immediately after creation.
+  token = next(o for o in session.added if isinstance(o, AccountLinkToken))
+  assert token.account_id == row.id
+  assert token.revoked_at is None
+  assert token.expires_at is None
+
+
+async def test_create_account_returns_none_when_account_id_taken(monkeypatch):
+  # Same (market, gateway, account_id) triple already exists.
+  existing = Account(
+    account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+
+  account = await SqlAlchemyAccountRepository().create_account(
+    "7654321", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+
+  assert account is None
+  assert session.added == []
+
+
+async def test_create_account_swallows_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+  account = await SqlAlchemyAccountRepository().create_account(
+    "7654321", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+  assert account is None
+
+
+# ── AccountRepository bot linking ───────────────────────────────────
+#
+# The bot binding now spans three tables, so each of these seeds the exact
+# sequence of ``execute()`` calls the method under test makes. Note that
+# ``platform_user_id`` is a *string* on the row even though callers pass an int.
+
+
+import uuid  # noqa: E402
+
+
+def _linked(account: Account, platform_user_id: str = "555") -> AccountBotLink:
+  return AccountBotLink(
+    id=uuid.uuid4(),
+    account_id=account.id,
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id=platform_user_id,
+  )
+
+
+async def test_link_telegram_links_user_and_activates_first_account(monkeypatch):
+  token = uuid.uuid4()
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  link_token = AccountLinkToken(account_id=account.id, token=token)
+  # token lookup → account lookup → existing link (none) → session (none)
+  session = FakeSession(results=[[link_token], [account], [], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(token, 555)
+  assert result is account
+
+  new_link = next(o for o in session.added if isinstance(o, AccountBotLink))
+  assert new_link.account_id == account.id
+  assert new_link.platform_user_id == "555"
+  assert new_link.platform is BotPlatformTypeEnum.TELEGRAM
+
+  new_session = next(o for o in session.added if isinstance(o, BotSession))
+  assert new_session.platform_user_id == "555"
+  assert new_session.active_account_id == account.id
+
+  assert link_token.last_used_at is not None
+
+
+async def test_link_telegram_second_user_on_same_account(monkeypatch):
+  """The whole point of the join table: a second person may link an account
+  someone else already holds, without displacing them."""
+  token = uuid.uuid4()
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  link_token = AccountLinkToken(account_id=account.id, token=token)
+  first_user_link = _linked(account, "555")
+  # User 777 links: no *existing link for 777* (the 555 row is invisible to
+  # that query), so a second AccountBotLink row is added.
+  session = FakeSession(results=[[link_token], [account], [], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(token, 777)
+  assert result is account
+
+  added = [o for o in session.added if isinstance(o, AccountBotLink)]
+  assert len(added) == 1
+  assert added[0].platform_user_id == "777"
+  assert added[0].account_id == account.id
+  # Nothing about the first user's link was touched.
+  assert first_user_link.platform_user_id == "555"
+  assert first_user_link.account_id == account.id
+
+
+async def test_link_telegram_is_idempotent_for_existing_link(monkeypatch):
+  """Re-linking an account the user already holds must not insert a duplicate
+  row — that would violate uq_account_bot_links_platform_user_account."""
+  token = uuid.uuid4()
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  link_token = AccountLinkToken(account_id=account.id, token=token)
+  existing_link = _linked(account)
+  existing_session = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=account.id,
+  )
+  session = FakeSession(
+    results=[[link_token], [account], [existing_link], [existing_session]]
+  )
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(token, 555)
+  assert result is account
+  assert [o for o in session.added if isinstance(o, AccountBotLink)] == []
+
+
+async def test_link_telegram_does_not_disturb_active_account(monkeypatch):
+  """Linking a 2nd account leaves the existing active selection alone."""
+  token = uuid.uuid4()
+  target = Account(id=uuid.uuid4(), account_id="acc-2", market=MarketTypeEnum.FOREX)
+  previous_id = uuid.uuid4()
+  link_token = AccountLinkToken(account_id=target.id, token=token)
+  existing_session = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=previous_id,
+  )
+  session = FakeSession(results=[[link_token], [target], [], [existing_session]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(token, 555)
+  assert result is target
+  assert existing_session.active_account_id == previous_id
+
+
+async def test_link_telegram_activates_when_session_has_no_active(monkeypatch):
+  token = uuid.uuid4()
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  link_token = AccountLinkToken(account_id=account.id, token=token)
+  # Session row exists (e.g. after a full unlink) but has no active account.
+  empty_session = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=None,
+  )
+  session = FakeSession(results=[[link_token], [account], [], [empty_session]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().link_telegram(token, 555)
+  assert empty_session.active_account_id == account.id
+
+
+async def test_link_telegram_invalid_token_returns_none(monkeypatch):
+  # A revoked/expired/unknown token is filtered out by the query itself.
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().link_telegram(uuid.uuid4(), 555)
+  assert result is None
+  assert session.added == []
+
+
+# ── AccountRepository.list_by_telegram_user_id / get_active_account /
+#    set_active_account ────────────────────────────────────────────
+
+
+async def test_list_by_telegram_user_id_returns_rows(monkeypatch):
+  a1 = Account(account_id="acc-1", market=MarketTypeEnum.FOREX)
+  a2 = Account(account_id="acc-2", market=MarketTypeEnum.CRYPTO)
+  session = FakeSession(results=[[a1, a2]])
+  _patch_session(monkeypatch, session)
+
+  rows = await SqlAlchemyAccountRepository().list_by_telegram_user_id(555)
+  assert rows == [a1, a2]
+
+
+async def test_get_active_account_fast_path(monkeypatch):
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  bot_session = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=account.id,
+  )
+  session = FakeSession(results=[[bot_session], [account]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_active_account(555)
+  assert result is account
+
+
+async def test_get_active_account_falls_back_and_self_heals(monkeypatch):
+  # No session row at all → fall back to the first linked account (its own
+  # list_by_telegram_user_id call) and self-heal a new session row.
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  session = FakeSession(results=[[], [account], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_active_account(555)
+  assert result is account
+  healed = next(o for o in session.added if isinstance(o, BotSession))
+  assert healed.active_account_id == account.id
+  assert healed.platform_user_id == "555"
+
+
+async def test_get_active_account_returns_none_when_unlinked(monkeypatch):
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_active_account(555)
+  assert result is None
+  assert session.added == []
+
+
+async def test_set_active_account_owned(monkeypatch):
+  account = Account(id=uuid.uuid4(), account_id="acc-2", market=MarketTypeEnum.CRYPTO)
+  bot_session = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=uuid.uuid4(),
+  )
+  session = FakeSession(results=[[account], [bot_session]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().set_active_account(555, account.id)
+  assert result is account
+  assert bot_session.active_account_id == account.id
+
+
+async def test_set_active_account_not_owned_returns_none(monkeypatch):
+  # The ownership join returns nothing for an account this user has no link to.
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().set_active_account(555, uuid.uuid4())
+  assert result is None
+
+
+# ── AccountRepository.unlink_telegram ───────────────────────────────
+
+
+async def test_unlink_telegram_drops_link_and_reassigns(monkeypatch):
+  active = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  remaining = Account(id=uuid.uuid4(), account_id="acc-2", market=MarketTypeEnum.CRYPTO)
+  bot_session_a = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=active.id,
+  )
+  bot_session_b = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=active.id,
+  )
+  session = FakeSession(
+    results=[
+      [bot_session_a],  # get_active_account: session lookup
+      [active],  # get_active_account: link-validated account lookup
+      [],  # unlink: DELETE the link row
+      [remaining],  # unlink: accounts still linked to this user
+      [bot_session_b],  # unlink: session lookup to re-point active
+    ]
+  )
+  _patch_session(monkeypatch, session)
+
+  ok = await SqlAlchemyAccountRepository().unlink_telegram(555)
+  assert ok is True
+  assert bot_session_b.active_account_id == remaining.id
+
+
+async def test_unlink_telegram_clears_session_when_last_account(monkeypatch):
+  active = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  bot_session_a = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=active.id,
+  )
+  bot_session_b = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="555",
+    active_account_id=active.id,
+  )
+  session = FakeSession(
+    results=[
+      [bot_session_a],
+      [active],
+      [],  # DELETE
+      [],  # no remaining accounts
+      [bot_session_b],
+    ]
+  )
+  _patch_session(monkeypatch, session)
+
+  ok = await SqlAlchemyAccountRepository().unlink_telegram(555)
+  assert ok is True
+  assert bot_session_b.active_account_id is None
+
+
+async def test_unlink_telegram_no_account(monkeypatch):
+  session = FakeSession(results=[[], []])  # get_active_account finds nothing
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyAccountRepository().unlink_telegram(555) is False
+
+
+async def test_rotate_link_token_revokes_old_and_issues_new(monkeypatch):
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  old_a = AccountLinkToken(account_id=account.id, token=uuid.uuid4())
+  old_b = AccountLinkToken(account_id=account.id, token=uuid.uuid4())
+  session = FakeSession(results=[[account], [old_a, old_b]])
+  _patch_session(monkeypatch, session)
+
+  new_token = await SqlAlchemyAccountRepository().rotate_link_token("acc-1")
+  assert new_token is not None
+  assert new_token not in (old_a.token, old_b.token)
+  # Every previously valid token is revoked, not deleted.
+  assert old_a.revoked_at is not None
+  assert old_b.revoked_at is not None
+
+  issued = next(o for o in session.added if isinstance(o, AccountLinkToken))
+  assert issued.token == new_token
+  assert issued.account_id == account.id
+  assert issued.revoked_at is None
+
+
+async def test_rotate_link_token_unknown_account(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyAccountRepository().rotate_link_token("nope") is None
+
+
+async def test_rotate_link_token_unlinks_users_and_clears_active(monkeypatch):
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  old = AccountLinkToken(account_id=account.id, token=uuid.uuid4())
+  bot_session = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="42",
+    active_account_id=account.id,
+  )
+  session = FakeSession(
+    results=[
+      [account],
+      [old],
+      [],  # DELETE account_bot_links
+      [bot_session],  # sessions pointing at this account
+    ]
+  )
+  _patch_session(monkeypatch, session)
+
+  new_token = await SqlAlchemyAccountRepository().rotate_link_token("acc-1")
+  assert new_token is not None
+  # Old token revoked and the active-session pointer cleared.
+  assert old.revoked_at is not None
+  assert bot_session.active_account_id is None
+
+
+# ── AccountRepository.admin_link_telegram ───────────────────────────
+
+
+async def test_admin_link_telegram_creates_link_and_session(monkeypatch):
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  session = FakeSession(
+    results=[
+      [account],  # select account by uuid
+      [],  # no existing bot link
+      [],  # no existing bot session
+    ]
+  )
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().admin_link_telegram(account.id, 42)
+  assert result is account
+
+  link = next(o for o in session.added if isinstance(o, AccountBotLink))
+  assert link.account_id == account.id
+  assert link.platform_user_id == "42"
+  sess = next(o for o in session.added if isinstance(o, BotSession))
+  assert sess.active_account_id == account.id
+
+
+async def test_admin_link_telegram_unknown_account(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyAccountRepository().admin_link_telegram(uuid.uuid4(), 42) is None
+
+
+async def test_admin_link_telegram_idempotent(monkeypatch):
+  account = Account(id=uuid.uuid4(), account_id="acc-1", market=MarketTypeEnum.FOREX)
+  existing = AccountBotLink(
+    account_id=account.id, platform=BotPlatformTypeEnum.TELEGRAM, platform_user_id="42"
+  )
+  active = BotSession(
+    platform=BotPlatformTypeEnum.TELEGRAM,
+    platform_user_id="42",
+    active_account_id=account.id,
+  )
+  session = FakeSession(results=[[account], [existing], [active]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().admin_link_telegram(account.id, 42)
+  assert result is account
+  # No duplicate link added; existing active selection untouched.
+  assert not any(isinstance(o, AccountBotLink) for o in session.added)
+  assert active.active_account_id == account.id
+
+
+# ── TradeBroadcastRepository ────────────────────────────────────────
+
+
+async def test_broadcast_subscribe_inserts_when_absent(monkeypatch):
+  session = FakeSession(results=[[]])  # not yet subscribed
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyTradeBroadcastRepository().subscribe(42) is True
+  added = [o for o in session.added if isinstance(o, TradeBroadcastSubscription)]
+  assert len(added) == 1
+  assert added[0].platform_user_id == "42"
+
+
+async def test_broadcast_subscribe_idempotent(monkeypatch):
+  existing = TradeBroadcastSubscription(
+    platform=BotPlatformTypeEnum.TELEGRAM, platform_user_id="42"
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyTradeBroadcastRepository().subscribe(42) is True
+  assert not any(
+    isinstance(o, TradeBroadcastSubscription) for o in session.added
+  )
+
+
+async def test_broadcast_is_subscribed(monkeypatch):
+  existing = TradeBroadcastSubscription(
+    platform=BotPlatformTypeEnum.TELEGRAM, platform_user_id="42"
+  )
+  session = FakeSession(results=[[existing], []])
+  _patch_session(monkeypatch, session)
+  repo = SqlAlchemyTradeBroadcastRepository()
+  assert await repo.is_subscribed(42) is True
+  assert await repo.is_subscribed(43) is False
+
+
+async def test_broadcast_targets_dedupes(monkeypatch):
+  session = FakeSession(results=[["111", "222", "111"]])
+  _patch_session(monkeypatch, session)
+  targets = await SqlAlchemyTradeBroadcastRepository().list_broadcast_targets(
+    "acc-1", MarketTypeEnum.FOREX, "MT5"
+  )
+  assert targets == ["111", "222"]
+
+
+# ── AccountRepository.get_link_summaries ────────────────────────────
+
+
+async def test_get_link_summaries_groups_tokens_and_users(monkeypatch):
+  acc_a, acc_b = uuid.uuid4(), uuid.uuid4()
+  tokens = [
+    AccountLinkToken(account_id=acc_a, token=uuid.uuid4()),
+    AccountLinkToken(account_id=acc_b, token=uuid.uuid4()),
+  ]
+  links = [
+    AccountBotLink(
+      account_id=acc_a,
+      platform=BotPlatformTypeEnum.TELEGRAM,
+      platform_user_id="555",
+    ),
+    AccountBotLink(
+      account_id=acc_a,
+      platform=BotPlatformTypeEnum.TELEGRAM,
+      platform_user_id="777",
+    ),
+  ]
+  session = FakeSession(results=[tokens, links])
+  _patch_session(monkeypatch, session)
+
+  summaries = await SqlAlchemyAccountRepository().get_link_summaries([acc_a, acc_b])
+  assert summaries[acc_a].link_token == tokens[0].token
+  assert summaries[acc_a].linked_user_ids == ["555", "777"]
+  assert summaries[acc_b].link_token == tokens[1].token
+  assert summaries[acc_b].linked_user_ids == []
+
+
+async def test_get_link_summaries_short_circuits_on_empty(monkeypatch):
+  session = FakeSession(results=[])
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyAccountRepository().get_link_summaries([]) == {}

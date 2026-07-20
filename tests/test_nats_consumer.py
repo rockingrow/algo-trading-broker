@@ -30,7 +30,7 @@ class FakeMsg:
 def _valid_event_dict() -> dict:
   return {
     "event": "CREATED",
-    "market_type": "FOREX",
+    "market": "FOREX",
     "strategy": "strat",
     "id": 1,
     "ref_source_id": "rs-1",
@@ -75,6 +75,43 @@ async def test_repository_exception_does_not_propagate():
   repo = FakeTradeRepo(raise_exc=True)
   consumer = TradeEventConsumer(trade_repository=repo)
   # Should log and return rather than raise.
+  await consumer.handle_subject_trade(FakeMsg(json.dumps(_valid_event_dict()).encode()))
+
+
+class FakeBroadcast:
+  def __init__(self, raise_exc: bool = False):
+    self.calls: list[tuple] = []
+    self.raise_exc = raise_exc
+
+  async def maybe_broadcast(self, event, trade):
+    if self.raise_exc:
+      raise RuntimeError("broadcast boom")
+    self.calls.append((event, trade))
+
+
+async def test_broadcast_service_invoked_with_persisted_trade():
+  repo = FakeTradeRepo()
+  broadcast = FakeBroadcast()
+  consumer = TradeEventConsumer(trade_repository=repo, broadcast_service=broadcast)
+  await consumer.handle_subject_trade(FakeMsg(json.dumps(_valid_event_dict()).encode()))
+  assert len(broadcast.calls) == 1
+  event, _trade = broadcast.calls[0]
+  assert event.account_id == "acc-1"
+
+
+async def test_broadcast_skipped_when_persist_fails():
+  repo = FakeTradeRepo(raise_exc=True)
+  broadcast = FakeBroadcast()
+  consumer = TradeEventConsumer(trade_repository=repo, broadcast_service=broadcast)
+  await consumer.handle_subject_trade(FakeMsg(json.dumps(_valid_event_dict()).encode()))
+  assert broadcast.calls == []
+
+
+async def test_broadcast_exception_does_not_propagate():
+  repo = FakeTradeRepo()
+  broadcast = FakeBroadcast(raise_exc=True)
+  consumer = TradeEventConsumer(trade_repository=repo, broadcast_service=broadcast)
+  # A broadcast failure must not bubble out of TRADE consumption.
   await consumer.handle_subject_trade(FakeMsg(json.dumps(_valid_event_dict()).encode()))
 
 
