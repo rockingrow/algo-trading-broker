@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import traceback
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from broker.db.engine import close_db, init_db
@@ -137,6 +138,16 @@ def create_app() -> FastAPI:
   app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
 
   install_webhook_connection_close(app)
+
+  @app.exception_handler(RequestValidationError)
+  async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    log.warning(
+      "422 Unprocessable Content | %s %s | %s",
+      request.method,
+      request.url.path,
+      exc.errors(),
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
   @app.exception_handler(Exception)
   async def global_exception_handler(request: Request, exc: Exception):
