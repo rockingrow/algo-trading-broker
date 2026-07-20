@@ -6,6 +6,7 @@ only the IsAdmin filter. Everything maps to existing broker management endpoints
 
 Callback-data scheme (all well under Telegram's 64-byte limit; account_id is
 String(50) and never contains ':'):
+- aacc:{offset}                /admin_accounts pagination
 - atrp:{account_id}            picker → show trades
 - atr:{account_id}:{offset}    trades pagination
 - aflat:confirm|cancel         target resolved server-side, kept in FSM data
@@ -18,6 +19,10 @@ String(50) and never contains ':'):
 - aset:{slug}                  toggle a broker setting
 - nacc:m:{market}               /newaccount → gateway picker
 - nacc:g:{market}:{gateway}     gateway picker → prompt for account_id
+- alink:{account_uuid}         /admin_linkaccount picker → prompt for tg id
+- ainv:{account_uuid}          /admin_invite_url picker → build the invite link
+                                (the row UUID, not the link token — a bearer
+                                secret has no business in callback_data)
 """
 
 from __future__ import annotations
@@ -29,13 +34,20 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.utils.deep_linking import create_start_link
 
 from app import emojis
-from app.config import settings
-from app.constants import GATEWAYS_BY_MARKET, MARKETS
+from app.constants import (
+  ADMIN_ACCOUNTS_PER_PAGE,
+  GATEWAYS_BY_MARKET,
+  MARKETS,
+  TRADES_PER_PAGE,
+)
 from app.filters.is_admin import IsAdmin
 from app.presenters import messages
 from app.states import AdminLinkAccount, CreateAccount
+from app.utils.invite import to_payload
+from app.utils.pagination import paginate
 from app.utils.telegram import safe_edit_text
 from app.utils.timezone import offset_hours_from_payload
 from app.keyboards import inline
@@ -45,19 +57,46 @@ router = Router(name="admin")
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
-PAGE_SIZE = settings.BOT_VIEW_TRADES_PER_PAGE
-
 
 # ── /accounts ───────────────────────────────────────────────────────
+# /v1/accounts returns every account in one response, so the page is sliced
+# here rather than requested — see utils.pagination.paginate.
+
+
+async def _accounts_view(
+  broker_admin: BrokerClientAdmin, offset: int
+) -> tuple[Optional[str], Optional[InlineKeyboardMarkup]]:
+  accounts = await broker_admin.admin_list_accounts()
+  if accounts is None:
+    return None, None
+  rows, page = paginate(accounts, ADMIN_ACCOUNTS_PER_PAGE, offset)
+  return (
+    messages.AdminMessages.format_accounts_admin(rows, page),
+    inline.admin_accounts_pagination(page),
+  )
 
 
 @router.message(Command("admin_accounts", "accounts"))
 async def cmd_accounts(message: Message, broker_admin: BrokerClientAdmin) -> None:
-  accounts = await broker_admin.admin_list_accounts()
-  if accounts is None:
+  text, kb = await _accounts_view(broker_admin, 0)
+  if text is None:
     await message.answer(f"{emojis.WARNING} Failed to fetch account list.")
     return
-  await message.answer(messages.AdminMessages.format_accounts_admin(accounts))
+  await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("aacc:"))
+async def cb_accounts_page(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
+  raw = call.data.split(":", 1)[1]
+  if not raw.isdigit():
+    await call.answer()
+    return
+  text, kb = await _accounts_view(broker_admin, int(raw))
+  if text is None:
+    await call.answer("Failed to load data", show_alert=True)
+    return
+  await safe_edit_text(call.message, text, kb)
+  await call.answer()
 
 
 # ── /atrades ────────────────────────────────────────────────────────
@@ -66,7 +105,9 @@ async def cmd_accounts(message: Message, broker_admin: BrokerClientAdmin) -> Non
 async def _atrades_view(
   broker_admin: BrokerClientAdmin, account_id: str, offset: int
 ) -> tuple[Optional[str], Optional[InlineKeyboardMarkup]]:
-  payload = await broker_admin.admin_list_trades(account_id, limit=PAGE_SIZE, offset=offset)
+  payload = await broker_admin.admin_list_trades(
+    account_id, limit=TRADES_PER_PAGE, offset=offset
+  )
   if payload is None:
     return None, None
   tz_offset = offset_hours_from_payload(await broker_admin.get_notification_timezone())
@@ -296,25 +337,6 @@ async def cmd_admin_help(message: Message) -> None:
   await message.answer(messages.AdminMessages.ADMIN_HELP)
 
 
-# ── /admin_uuid ─────────────────────────────────────────────────────
-# Show the internal row UUID(s) of accounts (the id the admin link-account and
-# broker-side calls address). Optional arg filters to one bare account_id.
-
-
-@router.message(Command("admin_uuid", "auuid"))
-async def cmd_admin_uuid(
-  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
-) -> None:
-  accounts = await broker_admin.admin_list_accounts()
-  if accounts is None:
-    await message.answer(f"{emojis.WARNING} Failed to fetch account list.")
-    return
-  arg = (command.args or "").strip()
-  if arg:
-    accounts = [a for a in accounts if a.get("account_id") == arg]
-  await message.answer(messages.AdminMessages.format_account_uuids(accounts))
-
-
 # ── /admin_linkaccount ──────────────────────────────────────────────
 # Admin binds a Telegram user to an account directly (no invite token). Pick
 # the account (resolved by its unambiguous UUID), then type the Telegram id.
@@ -385,6 +407,69 @@ async def receive_link_telegram_id(
 @router.message(AdminLinkAccount.waiting_for_telegram_id, ~F.text)
 async def prompt_link_telegram_id_text(message: Message) -> None:
   await message.answer(f"{emojis.WARNING} Please send the Telegram user id as text.")
+
+
+# ── /admin_invite_url ───────────────────────────────────────────────
+# Turn an account's link token into a t.me deep link. Tapping it opens the bot
+# with ``/start <code>``, which links the account on the spot — the end user
+# never pastes a UUID (see handlers/start.py). The link is only a packaging of
+# the token: it grants exactly the same access and dies with the same
+# /admin_rotate, so it needs no broker-side state of its own.
+
+
+async def _invite_url(bot, code: Optional[str]) -> Optional[str]:
+  """Deep link for *code*, or None if it isn't a UUID. Callers that already
+  hold a token (account creation) use this to offer the link inline instead of
+  sending the admin back through /admin_invite_url."""
+  payload = to_payload(code) if code else None
+  if payload is None:
+    return None
+  return await create_start_link(bot, payload)
+
+
+async def _answer_invite_url(
+  message: Message, code: str, account: Optional[dict] = None
+) -> None:
+  url = await _invite_url(message.bot, code)
+  if url is None:
+    await message.answer(
+      f"{emojis.WARNING} <code>{html.escape(code)}</code> is not a valid UUID code."
+    )
+    return
+  await message.answer(messages.AdminMessages.format_invite_url(url, account))
+
+
+@router.message(Command("admin_invite_url", "invite_url", "invite"))
+async def cmd_invite_url(
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
+) -> None:
+  arg = (command.args or "").strip()
+  if arg:
+    await _answer_invite_url(message, arg)
+    return
+
+  accounts = await broker_admin.admin_list_accounts()
+  if not accounts:
+    await message.answer("No accounts.")
+    return
+  await message.answer(
+    "Choose an account to create an invite link for:",
+    reply_markup=inline.accounts_uuid_picker(accounts, "ainv"),
+  )
+
+
+@router.callback_query(F.data.startswith("ainv:"))
+async def cb_invite_url_pick(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
+  account_uuid = call.data.split(":", 1)[1]
+  # The picker carries the row UUID, so the token is re-fetched here rather than
+  # parked in callback_data where it would sit in the client's update history.
+  accounts = await broker_admin.admin_list_accounts() or []
+  account = next((a for a in accounts if str(a.get("id")) == account_uuid), None)
+  if account is None or not account.get("link_token"):
+    await call.answer("Account not found", show_alert=True)
+    return
+  await _answer_invite_url(call.message, str(account["link_token"]), account)
+  await call.answer()
 
 
 # ── /newaccount ─────────────────────────────────────────────────────
@@ -475,7 +560,9 @@ async def receive_new_account_id(
       f"{emojis.CROSS} Failed to create account (it may already exist). Run /newaccount to retry."
     )
     return
-  await message.answer(messages.AdminMessages.format_account_created(account))
+  # The token is in hand, so the invite link comes free — no second command.
+  url = await _invite_url(message.bot, account.get("link_token"))
+  await message.answer(messages.AdminMessages.format_account_created(account, url))
 
 
 @router.message(CreateAccount.waiting_for_account_id, ~F.text)

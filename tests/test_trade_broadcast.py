@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from fastapi import FastAPI
@@ -169,6 +170,21 @@ async def test_broadcast_service_dms_subscribed_owners_on_close():
   assert repo.target_calls == [("acc-1", MarketTypeEnum.FOREX, "MT5")]
 
 
+async def test_broadcast_service_dms_owners_on_admin_flat():
+  """An admin /flat closes the position too, so subscribers still get the DM."""
+  repo = FakeBroadcastRepo(targets=["111"])
+  notifier = FakeOwnerNotifier()
+  svc = TradeBroadcastService(
+    broadcast_repository=repo,
+    setting_repository=FakeSettingRepo(),
+    notifier=notifier,
+  )
+
+  await svc.maybe_broadcast(_event("FLATTED"), _make_trade(TradeStatusEnum.FLAT))
+
+  assert [c for c, _ in notifier.sent] == ["111"]
+
+
 async def test_broadcast_service_skips_non_completion():
   repo = FakeBroadcastRepo(targets=["111"])
   notifier = FakeOwnerNotifier()
@@ -207,12 +223,30 @@ async def test_broadcast_service_handles_none_trade():
   assert notifier.sent == []
 
 
+def test_format_completed_trade_message_renders_decimals_plainly():
+  """Numeric(20,8) columns come back as Decimals whose str() leaks the scale
+  (0 -> '0E-8', 0.104 -> '0.10400000'). The DM must show plain numbers."""
+  trade = _make_trade()
+  trade.price = Decimal("0E-8")
+  trade.quantity = Decimal("0.10400000")
+  trade.account_balance = Decimal("4328.60279949")
+
+  msg = format_completed_trade_message(trade)
+
+  assert "Close price: <code>0</code>" in msg
+  assert "Quantity: <code>0.104</code>" in msg
+  assert "Balance: <b>4328.60279949</b>" in msg
+  assert "E-8" not in msg
+
+
 def test_format_completed_trade_message_has_pnl():
   msg = format_completed_trade_message(_make_trade())
   assert "Trade completed" in msg
   assert "BTCUSDT" in msg
   assert "+120.00" in msg  # 1120 - 1000
   assert "CLOSED" in msg
+  assert "Gateway: <b>MT5</b>" in msg
+  assert "Strategy" not in msg
 
 
 # ── Broadcast opt-in endpoints ───────────────────────────────────────

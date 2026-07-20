@@ -42,15 +42,20 @@ class TradeBroadcastService:
     self._notifier = notifier or OwnerBroadcastNotifier()
     self._policy = policy or TradeStatusPolicy()
 
+  # Terminal statuses that end a trade from the owner's point of view. FLAT
+  # (an admin /flat) counts: the position is over and the owner did not close
+  # it themselves, so they arguably need the DM more than on a normal close.
+  _COMPLETION_STATUSES = frozenset({TradeStatusEnum.CLOSED, TradeStatusEnum.FLAT})
+
   def _is_completion(self, event: PositionEvent) -> bool:
-    """A trade is "completed" when this event maps to a fully-CLOSED status.
+    """A trade is "completed" when this event maps to a terminal status.
 
     Gating on the event's own status (not the persisted row's) keys the
     broadcast to the discrete close event the worker emits once — TP2 / SL /
-    R_SL / TERMINAL_CLOSED / FORCED_CLOSED — instead of firing again on any
-    later touch of an already-closed row.
+    R_SL / TERMINAL_CLOSED / FORCED_CLOSED / FLATTED — instead of firing again
+    on any later touch of an already-closed row.
     """
-    return self._policy.to_trade_status(event.status) == TradeStatusEnum.CLOSED
+    return self._policy.to_trade_status(event.status) in self._COMPLETION_STATUSES
 
   async def maybe_broadcast(self, event: PositionEvent, trade: Trade | None) -> None:
     """DM every subscribed owner of ``trade``'s account when the event closes it."""

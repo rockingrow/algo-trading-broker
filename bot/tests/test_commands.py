@@ -34,7 +34,7 @@ def test_command_list_sizes():
     "admin_rotate",
     "admin_settings",
     "admin_linkaccount",
-    "admin_uuid",
+    "admin_invite_url",
   } <= admin_names
   # The divider is the first admin extra so it separates the two groups.
   assert ADMIN_EXTRA_COMMANDS[0].command == "admin_help"

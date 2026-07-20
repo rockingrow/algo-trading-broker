@@ -7,6 +7,11 @@ from app.presenters import messages
 from app.utils.table import ACTIVE_MARK
 
 
+def _page(shown: int, total: int | None = None, offset: int = 0) -> dict[str, int]:
+  """Page metadata for a listing of *shown* rows, as utils.pagination emits."""
+  return {"total": total if total is not None else shown, "limit": 8, "offset": offset}
+
+
 def test_format_account_shows_id_and_balance():
   out = messages.UserMessages.format_account(
     {
@@ -125,7 +130,8 @@ def test_format_accounts_list_renders_table_marking_active():
     [
       {"id": "a1", "account_id": "acc-1", "market": "FOREX", "gateway": "MT5", "is_active": True},
       {"id": "a2", "account_id": "acc-2", "market": "CRYPTO", "gateway": "BINANCE", "is_active": False},
-    ]
+    ],
+    _page(2),
   )
   assert "<pre>" in out
   # Columns are padded to a common width, so each field stands on its own.
@@ -136,7 +142,7 @@ def test_format_accounts_list_renders_table_marking_active():
 
 
 def test_format_accounts_list_empty():
-  assert "No linked accounts" in messages.UserMessages.format_accounts_list([])
+  assert "No linked accounts" in messages.UserMessages.format_accounts_list([], _page(0))
 
 
 def test_format_accounts_list_truncates_long_account_id():
@@ -149,6 +155,7 @@ def test_format_accounts_list_truncates_long_account_id():
         "is_active": True,
       }
     ],
+    _page(1),
     with_switch_hint=False,
   )
   assert "algotradingworker_virtu…" in out
@@ -158,10 +165,21 @@ def test_format_accounts_list_truncates_long_account_id():
 def test_format_accounts_list_without_switch_hint():
   out = messages.UserMessages.format_accounts_list(
     [{"id": "a1", "account_id": "acc-1", "market": "FOREX", "gateway": "MT5", "is_active": True}],
+    _page(1),
     with_switch_hint=False,
   )
   assert "acc-1" in out
   assert "Tap an account" not in out
+
+
+def test_format_accounts_list_header_states_the_page_range():
+  # Page 2 of 23 accounts: without the range, the 8 rows shown read as the lot.
+  out = messages.UserMessages.format_accounts_list(
+    [{"account_id": f"acc-{i}", "market": "FOREX", "gateway": "MT5"} for i in range(8)],
+    _page(8, total=23, offset=8),
+    with_switch_hint=False,
+  )
+  assert "9–16 / 23" in out
 
 
 def test_format_command_result():
@@ -207,18 +225,29 @@ def test_format_accounts_admin():
         "linked_user_ids": [],
         "link_token": "tok-456",
       },
-    ]
+    ],
+    _page(2),
   )
   assert "acc-1" in out and "acc-2" in out
-  # An account can have several managers now, so the mark carries the count.
-  assert f"{emojis.CHECK}2" in out
-  assert "—" in out  # unclaimed
-  assert "tok-123" in out
-  assert "tg-spoiler" in out
+  # An account can have several managers now, so the column carries the count.
+  assert "USERS" in out
+  assert "Main" in out
+  assert "—" in out  # unnamed account
+  # Link tokens have no column: a table cell can't carry the spoiler markup
+  # that keeps them covered, and /admin_rotate hands out a fresh one anyway.
+  assert "tok-123" not in out and "tok-456" not in out
 
 
 def test_format_accounts_admin_empty():
-  assert "No accounts yet" in messages.AdminMessages.format_accounts_admin([])
+  assert "No accounts yet" in messages.AdminMessages.format_accounts_admin([], _page(0))
+
+
+def test_format_accounts_admin_header_states_the_page_range():
+  out = messages.AdminMessages.format_accounts_admin(
+    [{"account_id": f"acc-{i}", "market": "FOREX"} for i in range(5)],
+    _page(5, total=12, offset=5),
+  )
+  assert "6–10 / 12" in out
 
 
 def test_format_settings():
@@ -263,16 +292,29 @@ def test_format_admin_trades_converts_to_local_time():
   assert "times in UTC-5" in out
 
 
+ACCOUNT_CREATED = {
+  "account_id": "7654321",
+  "market": "CRYPTO",
+  "gateway": "BINANCE",
+  "link_token": "new-tok",
+}
+
+
 def test_format_account_created():
-  out = messages.AdminMessages.format_account_created(
-    {
-      "account_id": "7654321",
-      "market": "CRYPTO",
-      "gateway": "BINANCE",
-      "link_token": "new-tok",
-    }
-  )
+  out = messages.AdminMessages.format_account_created(ACCOUNT_CREATED)
   assert "7654321" in out
   assert "CRYPTO" in out
   assert "BINANCE" in out
   assert "new-tok" in out
+  # No link was built, so no invite line — the token alone still links.
+  assert "Invite link" not in out
+
+
+def test_format_account_created_includes_spoilered_invite_url():
+  out = messages.AdminMessages.format_account_created(
+    ACCOUNT_CREATED, "https://t.me/b?start=abc"
+  )
+  assert "Invite link" in out
+  assert "<tg-spoiler>https://t.me/b?start=abc</tg-spoiler>" in out
+  # The raw token stays available alongside the link.
+  assert "<tg-spoiler>new-tok</tg-spoiler>" in out

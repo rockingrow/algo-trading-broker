@@ -1225,7 +1225,10 @@ class SqlAlchemyTradeRepository:
       return None
 
     is_running = self._policy.is_open(event.status)
-    price = event.closed_price if event.closed_price is not None else event.opened_price
+    # A close price of 0 means the worker had none to report (seen on FLATTED
+    # events) — no instrument ever closes at 0, so treat it like a missing
+    # value and keep the open price rather than persisting a bogus 0.
+    price = event.closed_price if event.closed_price else event.opened_price
     market = MarketTypeEnum(event.market)
 
     async with get_session() as session:

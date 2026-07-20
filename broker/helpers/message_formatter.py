@@ -6,12 +6,32 @@ formatting between the FLAT and the normal-signal branches.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from broker.constants import SIGNAL_BLOCKED
 from broker.helpers import emoji_constants as em
 from broker.helpers.signal_helper import action_to_emoji
 from broker.helpers.timeframe_helper import format_timeframe
 from broker.helpers.timezone_helper import format_notification_time
 from broker.schemas.webhook_schema import WebhookPayload
+
+
+def _num(value) -> str:
+  """Render a DB ``Numeric`` (a ``Decimal``) the way a human writes it.
+
+  ``str()`` on a Decimal leaks the column's scale: a zero comes out as
+  ``0E-8`` and 0.104 as ``0.10400000``. Normalising drops the trailing zeros,
+  and the exponent guard turns the scientific forms Decimal falls back to for
+  zero and for large integers back into plain digits.
+  """
+  if value is None:
+    return "—"
+  if not isinstance(value, Decimal):
+    return str(value)
+  normalised = value.normalize()
+  if normalised.as_tuple().exponent > 0:
+    normalised = normalised.quantize(Decimal(1))
+  return f"{normalised:f}"
 
 
 def _header(payload: WebhookPayload) -> str:
@@ -142,19 +162,19 @@ def format_completed_trade_message(trade, *, timezone_offset: str | None = None)
   lines = [
     f"{em.FLAT} <b>Trade completed</b>",
     f"Account: <code>{trade.account_id}</code>",
+    f"Gateway: <b>{trade.gateway}</b>",
     f"Symbol: <b>{trade.symbol}</b>",
     f"Action: <b>{action}</b>",
     f"Status: <b>{status}</b>",
-    f"Close price: <code>{trade.price}</code>",
-    f"Quantity: <code>{trade.quantity}</code>",
+    f"Close price: <code>{_num(trade.price)}</code>",
+    f"Quantity: <code>{_num(trade.quantity)}</code>",
   ]
   if trade.account_balance is not None:
-    lines.append(f"Balance: <b>{trade.account_balance}</b>")
+    lines.append(f"Balance: <b>{_num(trade.account_balance)}</b>")
   if trade.account_balance is not None and trade.account_balance_init is not None:
     pnl = float(trade.account_balance) - float(trade.account_balance_init)
     sign = "+" if pnl >= 0 else ""
     lines.append(f"PnL: <b>{sign}{pnl:.2f}</b>")
-  lines.append(f"Strategy: <b>{trade.strategy}</b>")
   lines.append(
     f"Time: {format_notification_time(trade.updatedAt, timezone_offset)}"
   )

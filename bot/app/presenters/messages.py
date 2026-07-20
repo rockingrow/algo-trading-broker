@@ -46,6 +46,17 @@ def _fmt_num(value: Optional[float]) -> str:
     return _esc(value)
 
 
+def _page_range(page: dict[str, Any], shown: int) -> str:
+  """``"1–8 / 23"`` — which slice of a paged list this message is showing.
+
+  Every table header carries one, so a user looking at page 3 can tell that
+  the rows above aren't the whole story.
+  """
+  offset = int(page.get("offset", 0))
+  total = int(page.get("total", shown))
+  return f"{offset + 1}–{offset + shown} / {total}"
+
+
 def _trade_row(trade: dict[str, Any], tz_offset_hours: float) -> tuple[str, ...]:
   """One trade as raw table cells — render_table escapes and pads them."""
   status = str(trade.get("status", ""))
@@ -87,8 +98,8 @@ class UserMessages:
     "/link — Add another account\n"
     "/switch — Change active account\n"
     "/unlink — Unlink active account\n"
-    "/subscribe — Get completed-trade alerts\n"
-    "/unsubscribe — Stop completed-trade alerts"
+    "/subscribe — Receive trade broadcasts\n"
+    "/unsubscribe — Stop trade broadcasts"
   )
 
   @staticmethod
@@ -125,8 +136,16 @@ class UserMessages:
     )
 
   @staticmethod
-  def format_accounts_list(accounts: list[dict[str, Any]], with_switch_hint: bool = True) -> str:
+  def format_accounts_list(
+    accounts: list[dict[str, Any]],
+    page: dict[str, Any],
+    with_switch_hint: bool = True,
+  ) -> str:
     """One table row per linked account, starring the currently active one.
+
+    *accounts* is one page's worth of rows and *page* the metadata describing
+    it (see ``utils.pagination``) — the header states the range so a starred
+    account on another page isn't mistaken for missing.
 
     ``with_switch_hint`` appends the "tap to switch" line, relevant only when
     the message is paired with the /switch inline picker keyboard.
@@ -148,7 +167,11 @@ class UserMessages:
       # are short enums that size themselves.
       max_widths=(1, None, None, 24),
     )
-    lines = [f"<b>{emojis.FOLDER} Your accounts</b> ({len(accounts)})", "", table]
+    lines = [
+      f"<b>{emojis.FOLDER} Your accounts</b> ({_page_range(page, len(accounts))})",
+      "",
+      table,
+    ]
     if with_switch_hint:
       lines.append("\n<i>Tap an account below to make it active.</i>")
     return "\n".join(lines)
@@ -157,18 +180,13 @@ class UserMessages:
   def format_trades(payload: dict[str, Any], tz_offset_hours: float) -> str:
     data = payload.get("data") or []
     page = payload.get("page") or {}
-    total = page.get("total", len(data))
 
     if not data:
       return f"{emojis.EMPTY_MAILBOX} No trades yet."
 
-    offset = int(page.get("offset", 0))
-    start = offset + 1
-    end = offset + len(data)
-
     # The zone is stated once here rather than repeated on every row.
     header = (
-      f"<b>{emojis.CHART} Trades</b> ({start}–{end} / {total}) · "
+      f"<b>{emojis.CHART} Trades</b> ({_page_range(page, len(data))}) · "
       f"times in {format_utc_label(tz_offset_hours)}"
     )
     table = render_table(
@@ -192,24 +210,36 @@ class AdminMessages:
   }
 
   @staticmethod
-  def format_accounts_admin(accounts: list[dict[str, Any]]) -> str:
+  def format_accounts_admin(
+    accounts: list[dict[str, Any]], page: dict[str, Any]
+  ) -> str:
+    """One page of the full account table (see ``utils.pagination``)."""
     if not accounts:
       return f"{emojis.EMPTY_MAILBOX} No accounts yet."
-    lines = [f"<b>{emojis.FOLDER} Accounts</b> ({len(accounts)})", ""]
-    for a in accounts:
-      # An account may be managed by several people now, so show how many
-      # rather than a yes/no mark.
-      user_count = len(a.get("linked_user_ids") or [])
-      linked = f"{emojis.CHECK}{user_count}" if user_count else "—"
-      lines.append(
-        f"{linked} <b>{_esc(a.get('account_name'))}</b> "
-        f"<code>{_esc(a.get('account_id'))}</code>\n"
-        f"   balance {_fmt_num(a.get('account_balance'))} · {_esc(a.get('market'))}"
-      )
-      token = a.get("link_token")
-      if token:
-        # Hidden in a spoiler, wrapped in code for tap-to-copy to hand to the end user.
-        lines.append(f"   token: <tg-spoiler><code>{_esc(token)}</code></tg-spoiler>")
+    table = render_table(
+      headers=("MARKET", "GATEWAY", "ACCOUNT", "NAME", "BALANCE", "USERS"),
+      rows=[
+        (
+          a.get("market"),
+          a.get("gateway") or "?",
+          a.get("account_id"),
+          a.get("account_name") or "—",
+          _fmt_num(a.get("account_balance")),
+          # An account may be managed by several people now, so show how many
+          # rather than a yes/no mark.
+          len(a.get("linked_user_ids") or []),
+        )
+        for a in accounts
+      ],
+      aligns=("l", "l", "l", "l", "r", "r"),
+      max_widths=(None, None, 24, 20, None, None),
+    )
+    lines = [
+      f"<b>{emojis.FOLDER} Accounts</b> ({_page_range(page, len(accounts))})",
+      "",
+      table,
+    ]
+
     return "\n".join(lines)
 
   @staticmethod
@@ -222,25 +252,48 @@ class AdminMessages:
 
   @staticmethod
   def format_settings(states: list[dict[str, Any]]) -> str:
-    lines = [f"<b>{emojis.GEAR} Broker settings</b>", ""]
-    for s in states:
-      label = AdminMessages.SETTING_META.get(str(s.get("setting")), (str(s.get("setting")), ""))[0]
-      on = str(s.get("state")) == "ENABLED"
-      dot = emojis.GREEN_CIRCLE if on else emojis.WHITE_CIRCLE
-      lines.append(f"{dot} {_esc(label)}: <b>{_esc(s.get('state'))}</b>")
-    lines.append("\n<i>Tap a button below to toggle.</i>")
-    return "\n".join(lines)
+    if not states:
+      return f"{emojis.EMPTY_MAILBOX} No settings found."
+    table = render_table(
+      headers=("STATE", "SETTING"),
+      rows=[
+        (
+          s.get("state"),
+          AdminMessages.SETTING_META.get(str(s.get("setting")), (str(s.get("setting")), ""))[0],
+        )
+        for s in states
+      ],
+    )
+    return (
+      f"<b>{emojis.GEAR} Broker settings</b>\n\n{table}\n\n"
+      "<i>Tap a button below to toggle.</i>"
+    )
 
   @staticmethod
-  def format_account_created(account: dict[str, Any]) -> str:
+  def format_account_created(
+    account: dict[str, Any], invite_url: Optional[str] = None
+  ) -> str:
+    """Fresh account plus its link token, and — when the deep link could be
+    built — the one-tap invite URL, saving a trip through /admin_invite_url.
+
+    *invite_url* is None when the bot username wasn't reachable; the raw token
+    above still works, so the line is simply omitted rather than erroring."""
+    invite = (
+      f"{emojis.LINK} Invite link:\n"
+      f"<tg-spoiler>{_esc(invite_url)}</tg-spoiler>\n\n"
+      if invite_url
+      else ""
+    )
     return (
       f"{emojis.CHECK} <b>Account created</b>\n"
       f"• ID: <code>{_esc(account.get('account_id'))}</code>\n"
       f"• Market: {_esc(account.get('market'))}\n"
       f"• Gateway: {_esc(account.get('gateway'))}\n\n"
       f"{emojis.KEY} Link token:\n"
-      f"<tg-spoiler><code>{_esc(account.get('link_token'))}</code></tg-spoiler>\n\n"
-      "<i>Send this token to the end user so they can link via /start.</i>"
+      # No <code> inside the spoiler: Telegram renders code/pre entities through
+      # the spoiler overlay, so the token stays readable before it is tapped.
+      f"<tg-spoiler>{_esc(account.get('link_token'))}</tg-spoiler>\n\n"
+      f"{invite}"
     )
 
   @staticmethod
@@ -253,6 +306,28 @@ class AdminMessages:
       "should have access now — the new token is the only way back in.</i>"
     )
 
+  @staticmethod
+  def format_invite_url(url: str, account: Optional[dict[str, Any]] = None) -> str:
+    """One-tap invite link. The link token rides inside the URL, so the URL is
+    itself the bearer secret — spoilered like the raw tokens above.
+
+    *account* is omitted when the admin passed a bare code, since nothing was
+    looked up to name it."""
+    who = (
+      f"• Account: <code>{_esc(account.get('account_id'))}</code> "
+      f"({_esc(account.get('market'))}/{_esc(account.get('gateway'))})\n"
+      if account is not None
+      else ""
+    )
+    return (
+      f"{emojis.LINK} <b>Invite link</b>\n"
+      f"{who}\n"
+      f"<tg-spoiler>{_esc(url)}</tg-spoiler>\n\n"
+      "<i>Send this to the end user. Opening it starts the bot and links the "
+      "account straight away — no UUID to type. It carries the link token, so "
+      "share it privately; /admin_rotate revokes it.</i>"
+    )
+
   ADMIN_HELP = (
     f"{emojis.GEAR} <b>Admin commands</b>\n"
     "/admin_accounts — Account list\n"
@@ -262,23 +337,8 @@ class AdminMessages:
     "/admin_rotate — Rotate token + unlink users\n"
     "/admin_settings — Broker settings\n"
     "/admin_linkaccount — Link a Telegram user to an account\n"
-    "/admin_uuid — Get an account's UUID"
+    "/admin_invite_url — One-tap invite link for an account"
   )
-
-  @staticmethod
-  def format_account_uuids(accounts: list[dict[str, Any]]) -> str:
-    """List accounts with their row UUID (tap-to-copy) for the admin."""
-    if not accounts:
-      return f"{emojis.EMPTY_MAILBOX} No accounts yet."
-    lines = [f"<b>{emojis.FOLDER} Account UUIDs</b> ({len(accounts)})", ""]
-    for a in accounts:
-      lines.append(
-        f"<b>{_esc(a.get('account_name') or a.get('account_id'))}</b> "
-        f"<code>{_esc(a.get('account_id'))}</code> "
-        f"· {_esc(a.get('market'))}/{_esc(a.get('gateway'))}\n"
-        f"   uuid: <code>{_esc(a.get('id'))}</code>"
-      )
-    return "\n".join(lines)
 
   @staticmethod
   def format_linked_account(account: dict[str, Any], telegram_user_id: int) -> str:

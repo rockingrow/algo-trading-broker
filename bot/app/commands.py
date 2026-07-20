@@ -57,7 +57,7 @@ ADMIN_EXTRA_COMMANDS = [
   BotCommand(command="admin_rotate", description="[ADMIN] Rotate token + unlink users"),
   BotCommand(command="admin_settings", description="[ADMIN] Broker settings"),
   BotCommand(command="admin_linkaccount", description="[ADMIN] Link a Telegram user"),
-  BotCommand(command="admin_uuid", description="[ADMIN] Get an account's UUID"),
+  BotCommand(command="admin_invite_url", description="[ADMIN] One-tap invite link"),
 ]
 
 ADMIN_COMMANDS = USER_COMMANDS + ADMIN_EXTRA_COMMANDS

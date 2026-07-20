@@ -9,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app import emojis
-from app.config import settings
+from app.constants import TRADES_PER_PAGE
 from app.presenters import messages
 from app.utils.telegram import safe_edit_text
 from app.utils.timezone import offset_hours_from_payload
@@ -18,14 +18,12 @@ from app.services.broker_client import BrokerClientAdmin, BrokerClientUser
 
 router = Router(name="trades")
 
-PAGE_SIZE = settings.BOT_VIEW_TRADES_PER_PAGE
-
 
 @router.message(Command("trades"))
 async def cmd_trades(
   message: Message, broker: BrokerClientUser, broker_admin: BrokerClientAdmin
 ) -> None:
-  payload = await broker.list_trades(message.from_user.id, limit=PAGE_SIZE, offset=0)
+  payload = await broker.list_trades(message.from_user.id, limit=TRADES_PER_PAGE, offset=0)
   if payload is None:
     await message.answer(
       f"{emojis.WARNING} Failed to fetch trade data. Try again later."
@@ -48,7 +46,7 @@ async def cb_trades_page(
     await call.answer()
     return
 
-  payload = await broker.list_trades(call.from_user.id, limit=PAGE_SIZE, offset=offset)
+  payload = await broker.list_trades(call.from_user.id, limit=TRADES_PER_PAGE, offset=offset)
   if payload is None:
     await call.answer("Failed to load data", show_alert=True)
     return

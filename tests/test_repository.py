@@ -354,6 +354,20 @@ async def test_upsert_uses_closed_price_when_present(monkeypatch):
   assert result.is_running is False
 
 
+async def test_upsert_falls_back_to_open_price_when_closed_price_is_zero(monkeypatch):
+  # FLATTED events arrive with closed_price=0, which is not a real price —
+  # persisting it surfaces as "Close price: 0" in the owner's broadcast DM.
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(status="FLATTED", closed_price=0.0)
+  )
+
+  assert result.price == 100.0
+  assert result.status == TradeStatusEnum.FLAT
+
+
 async def test_upsert_inserts_rejected_trade_with_reason(monkeypatch):
   # A worker that hits its MAX ORDER limit still persists the order and fires a
   # TRADE with status REJECTED; the broker records it as a terminal, non-running

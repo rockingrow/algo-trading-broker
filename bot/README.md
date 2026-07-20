@@ -27,6 +27,10 @@ gets an extended chat-scoped menu.
 
 `FLAT`/`PREVENT`/`ALLOW` each require a confirmation tap.
 
+`/start` also takes the link code as a deep-link payload (`/start <code>`) and
+links the account immediately, skipping the "paste your UUID" step. That is what
+an `/admin_invite_url` link produces — see [Invite links](#invite-links).
+
 One linked account is **active** at a time; `/status`, `/trades`, `/flat`,
 `/prevent`, `/allow` and `/unlink` all act on it. `/myaccounts` lists the linked
 accounts, `/link` adds one, and `/switch` lists them with a button per account
@@ -59,7 +63,7 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_flat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |
 | `/admin_rotate [account_id]` | Rotate a link token — revokes old **and unlinks every linked user** (confirm) | `POST /admin/accounts/{id}/link-token/rotate` |
 | `/admin_linkaccount` | Bind a Telegram user to an account directly (pick account → type user id) | `POST /admin/accounts/{uuid}/link-telegram` |
-| `/admin_uuid [account_id]` | Show accounts' internal row UUIDs | `GET /v1/accounts` |
+| `/admin_invite_url [code]` | One-tap invite link for an account (picker if no arg) | `GET /v1/accounts` (picker only) |
 | `/admin_settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
 
 ### Link-token semantics
@@ -80,6 +84,29 @@ their `account_bot_links` row).
 (the admin already knows which account row to bind). It addresses the account by
 its row UUID (`accounts.id`) so the target is unambiguous even when a bare
 `account_id` is reused across gateways. Linking stays additive and idempotent.
+
+### Invite links
+
+`/admin_invite_url` packages a link token as a Telegram deep link:
+
+```text
+https://t.me/<bot_username>?start=b5dc037496394861acf42d239aa5c1b4
+```
+
+Opening it starts the bot with the token already in the `/start` payload, so the
+account is linked on the first tap — the end user never sees or types a UUID.
+Called with a code it just wraps that code; called bare it lists the accounts and
+takes the token from the one picked (the button carries the account's row UUID,
+not the token, so a bearer secret never rides in `callback_data`).
+
+The payload is the token in **bare hex** (32 chars, no dashes) purely to keep the
+URL short — Telegram's payload alphabet is `[A-Za-z0-9_-]` up to 64 chars, so the
+dashed form would be legal too. `/start` and the manual prompt both accept either
+form and normalise before calling the broker.
+
+An invite URL is **exactly as sensitive as the token inside it** — same access,
+no expiry, still additive, and revoked by the same `/admin_rotate`. It buys
+convenience, not a second security model, so share it as privately as the token.
 
 ## Rendering
 
@@ -136,7 +163,8 @@ app/
 ├── keyboards/         # inline keyboards (confirm, pagination, pickers, settings)
 ├── presenters/        # render API payloads → Telegram HTML
 └── utils/             # table (monospace tables), timezone (local time),
-                       # telegram (safe_edit_text), pagination
+                       # telegram (safe_edit_text), pagination,
+                       # invite (link code ↔ /start deep-link payload)
 ```
 
 ## Configuration (env / `.env`)
@@ -150,7 +178,11 @@ app/
 | `BOT_BROKER_BASE_URL` | `http://broker:8080` | Broker base URL (Docker service name). |
 | `BOT_LOG_LEVEL` | `DEBUG` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). |
 | `BOT_REQUEST_TIMEOUT` | `10.0` | HTTP timeout (seconds). |
-| `BOT_VIEW_TRADES_PER_PAGE` | `50` | Trades per page. |
+
+Page sizes are not env vars. Every command that renders a table paginates, and
+how many rows fit follows from how wide that table is — so they live as code
+constants (`TRADES_PER_PAGE`, `ACCOUNTS_PER_PAGE`, `ADMIN_ACCOUNTS_PER_PAGE`)
+in [`app/constants.py`](app/constants.py).
 
 ## Run
 

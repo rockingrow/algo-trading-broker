@@ -380,7 +380,6 @@ TELEGRAM_ADMIN_IDS=            # comma-separated admin user ids, e.g. 123,456
 BOT_BROKER_BASE_URL=http://localhost:8080   # → http://broker:8080 in Docker
 BOT_LOG_LEVEL=INFO
 BOT_REQUEST_TIMEOUT=10.0
-BOT_VIEW_TRADES_PER_PAGE=50
 ```
 
 ### Not in `.env`

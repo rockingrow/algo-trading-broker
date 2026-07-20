@@ -22,9 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by its row UUID (`accounts.id`, unambiguous even when a bare `account_id` is
   reused across gateways) and calls the new
   `POST /admin/accounts/{account_uuid}/link-telegram`. Additive and idempotent.
-- **`/admin_uuid`** — Admin command that shows accounts' internal row UUIDs
-  (optionally filtered to one bare `account_id`), the id the link-account and
-  broker-side calls address.
+- **`/admin_invite_url` + `/start <code>` deep links** — Admins can hand out a
+  one-tap invite URL (`https://t.me/<bot>?start=<code>`) instead of a bare UUID.
+  Tapping it opens the bot with the account's link token already in the `/start`
+  payload, so the account links on the first tap and the end user never types a
+  code. `/admin_invite_url <code>` wraps a code the admin already has; called
+  bare it offers the account picker and reads the token from the account picked
+  (the button carries the row UUID, so the token never enters `callback_data`).
+  The payload is the token in bare hex (32 chars) just to shorten the URL;
+  `/start` and the manual prompt both accept dashed or hex and normalise before
+  calling the broker. Bot-only — no broker or schema change, and no new secret:
+  the URL is exactly as sensitive as the token in it, and `/admin_rotate`
+  revokes both together.
+- **Account row UUIDs in `/admin_accounts`** — The account list now carries a
+  second table with each account's internal row UUID (the id the link-account
+  and broker-side calls address). It's a separate table rather than another
+  column because a 36-char UUID would blow out the width of the main one.
 - **Completed-trade broadcasts (`/subscribe`, `/unsubscribe`)** — Owners can opt
   in to a Telegram DM whenever one of their linked accounts closes a trade. The
   opt-in is a per-user preference stored in the new
@@ -39,6 +52,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every table listing paginates** — `/myaccounts`, `/switch` and
+  `/admin_accounts` now page through Prev/Next buttons like `/trades` and
+  `/admin_trades` already did, and each header states its range
+  (`(9–16 / 23)`). Telegram rejects a message over 4096 characters outright,
+  so an unpaginated account table didn't degrade as the list grew — it stopped
+  sending. The broker returns these lists whole, so the bot slices them
+  client-side (`utils.pagination.paginate`) and synthesises the same `page`
+  metadata the trade endpoints return; in `/switch` the table and the account
+  picker are built from one slice, so each button stays under its row.
+- **Page sizes moved from `.env` to code** — `BOT_VIEW_TRADES_PER_PAGE` is
+  **removed**; page sizes are now `TRADES_PER_PAGE`, `ACCOUNTS_PER_PAGE` and
+  `ADMIN_ACCOUNTS_PER_PAGE` in [`bot/app/constants.py`](bot/app/constants.py).
+  The right value follows from how wide each table is, which is a property of
+  the code rather than of the deployment, and an over-large value (the shipped
+  example was `50`) breaks the send instead of tuning it. No action needed on
+  upgrade: a leftover `BOT_VIEW_TRADES_PER_PAGE` in an existing `.env` is
+  ignored.
 - **`/admin_rotate` now resets access, not just the token** — Rotating an
   account's link token additionally unlinks every Telegram user currently bound
   to the account and clears any active-session pointer at it, so the freshly
