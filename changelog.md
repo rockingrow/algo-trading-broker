@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.1] - Unreleased
+## [1.1.1] - 2026-07-21
 
 ### Added
 
@@ -59,44 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`BOT_TELEGRAM_TOKEN`, read from the shared `.env`) — the bot the user
   actually started. Best-effort: a lookup or send failure never blocks `TRADE`
   consumption.
-
-### Changed
-
-- **Every table listing paginates** — `/myaccounts`, `/switch` and
-  `/admin_accounts` now page through Prev/Next buttons like `/trades` and
-  `/admin_trades` already did, and each header states its range
-  (`(9–16 / 23)`). Telegram rejects a message over 4096 characters outright,
-  so an unpaginated account table didn't degrade as the list grew — it stopped
-  sending. The broker returns these lists whole, so the bot slices them
-  client-side (`utils.pagination.paginate`) and synthesises the same `page`
-  metadata the trade endpoints return; in `/switch` the table and the account
-  picker are built from one slice, so each button stays under its row.
-- **Page sizes moved from `.env` to code** — `BOT_VIEW_TRADES_PER_PAGE` is
-  **removed**; page sizes are now `TRADES_PER_PAGE`, `ACCOUNTS_PER_PAGE` and
-  `ADMIN_ACCOUNTS_PER_PAGE` in [`bot/app/constants.py`](bot/app/constants.py).
-  The right value follows from how wide each table is, which is a property of
-  the code rather than of the deployment, and an over-large value (the shipped
-  example was `50`) breaks the send instead of tuning it. No action needed on
-  upgrade: a leftover `BOT_VIEW_TRADES_PER_PAGE` in an existing `.env` is
-  ignored.
-- **An admin FLAT counts as a completed trade for broadcasts** — A `FLATTED`
-  event (a `POST /admin/flat`) now DMs subscribed owners just like a normal
-  close. The position is over and the owner did not close it themselves, so
-  they arguably need the notice more, not less. The gate is still the event's
-  own status rather than the persisted row's, so the DM stays keyed to the one
-  discrete close event the worker emits and a later touch of an already-closed
-  row still fires nothing.
-- **Completed-trade DM shows the gateway instead of the strategy** — The
-  account line alone doesn't say which gateway the account is on, and
-  `account_id` is no longer unique across gateways; the strategy name it
-  replaces was of no use to the owner reading a close.
-- **`/admin_rotate` now resets access, not just the token** — Rotating an
-  account's link token additionally unlinks every Telegram user currently bound
-  to the account and clears any active-session pointer at it, so the freshly
-  issued token is the only way back in. Previously already-linked users kept
-  their access.
-
-### Added
 
 - **Telegram bot service** (`bot/`) — A new, self-contained **aiogram v3**
   service serving two roles from one process: endusers and admins. It is a
@@ -164,6 +126,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every table listing paginates** — `/myaccounts`, `/switch` and
+  `/admin_accounts` now page through Prev/Next buttons like `/trades` and
+  `/admin_trades` already did, and each header states its range
+  (`(9–16 / 23)`). Telegram rejects a message over 4096 characters outright,
+  so an unpaginated account table didn't degrade as the list grew — it stopped
+  sending. The broker returns these lists whole, so the bot slices them
+  client-side (`utils.pagination.paginate`) and synthesises the same `page`
+  metadata the trade endpoints return; in `/switch` the table and the account
+  picker are built from one slice, so each button stays under its row.
+- **Page sizes moved from `.env` to code** — `BOT_VIEW_TRADES_PER_PAGE` is
+  **removed**; page sizes are now `TRADES_PER_PAGE`, `ACCOUNTS_PER_PAGE` and
+  `ADMIN_ACCOUNTS_PER_PAGE` in [`bot/app/constants.py`](bot/app/constants.py).
+  The right value follows from how wide each table is, which is a property of
+  the code rather than of the deployment, and an over-large value (the shipped
+  example was `50`) breaks the send instead of tuning it. No action needed on
+  upgrade: a leftover `BOT_VIEW_TRADES_PER_PAGE` in an existing `.env` is
+  ignored.
+- **An admin FLAT counts as a completed trade for broadcasts** — A `FLATTED`
+  event (a `POST /admin/flat`) now DMs subscribed owners just like a normal
+  close. The position is over and the owner did not close it themselves, so
+  they arguably need the notice more, not less. The gate is still the event's
+  own status rather than the persisted row's, so the DM stays keyed to the one
+  discrete close event the worker emits and a later touch of an already-closed
+  row still fires nothing.
+- **Completed-trade DM shows the gateway instead of the strategy** — The
+  account line alone doesn't say which gateway the account is on, and
+  `account_id` is no longer unique across gateways; the strategy name it
+  replaces was of no use to the owner reading a close.
+- **`/admin_rotate` now resets access, not just the token** — Rotating an
+  account's link token additionally unlinks every Telegram user currently bound
+  to the account and clears any active-session pointer at it, so the freshly
+  issued token is the only way back in. Previously already-linked users kept
+  their access.
 - **`accounts` unique constraint: `account_id` → `(market, gateway, account_id)`** —
   Two unrelated real accounts on different gateways can coincidentally share a
   bare id (an MT5 login `100234` and a Binance account `100234`), which the old
