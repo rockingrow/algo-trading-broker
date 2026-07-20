@@ -97,6 +97,13 @@ class AccountRepository(Protocol):
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> Account | None: ...
 
+  async def admin_link_telegram(
+    self,
+    account_uuid: uuid.UUID,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> Account | None: ...
+
   async def unlink_telegram(
     self,
     telegram_user_id: int,
@@ -104,6 +111,37 @@ class AccountRepository(Protocol):
   ) -> bool: ...
 
   async def rotate_link_token(self, account_id: str) -> uuid.UUID | None: ...
+
+
+@runtime_checkable
+class TradeBroadcastRepository(Protocol):
+  """Per-user opt-in for completed-trade Telegram broadcasts and target lookup."""
+
+  async def subscribe(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool: ...
+
+  async def unsubscribe(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool: ...
+
+  async def is_subscribed(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool: ...
+
+  async def list_broadcast_targets(
+    self,
+    account_id: str,
+    market: MarketTypeEnum | None,
+    gateway: str | None,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> list[str]: ...
 
 
 @runtime_checkable

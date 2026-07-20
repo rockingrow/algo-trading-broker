@@ -73,6 +73,34 @@ async def cb_switch_account(call: CallbackQuery, broker: BrokerClientUser) -> No
   await call.answer()
 
 
+# ── /subscribe, /unsubscribe — completed-trade broadcast opt-in ───────
+# A per-user preference (spans every linked account), toggled here. Lives on
+# the protected router so only linked owners can opt in — an unlinked user has
+# no account whose trades could complete.
+
+
+@router.message(Command("subscribe"))
+async def cmd_subscribe(message: Message, broker: BrokerClientUser) -> None:
+  result = await broker.subscribe_broadcast(message.from_user.id)
+  if result is None:
+    await message.answer(
+      f"{emojis.WARNING} Failed to update subscription. Try again later."
+    )
+    return
+  await message.answer(messages.UserMessages.format_broadcast_subscription(True))
+
+
+@router.message(Command("unsubscribe"))
+async def cmd_unsubscribe(message: Message, broker: BrokerClientUser) -> None:
+  result = await broker.unsubscribe_broadcast(message.from_user.id)
+  if result is None:
+    await message.answer(
+      f"{emojis.WARNING} Failed to update subscription. Try again later."
+    )
+    return
+  await message.answer(messages.UserMessages.format_broadcast_subscription(False))
+
+
 @router.message(Command("unlink"))
 async def cmd_unlink(message: Message, account: dict[str, Any]) -> None:
   await message.answer(

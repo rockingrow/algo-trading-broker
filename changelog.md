@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Admin command prefix + menu divider** — Bot admin commands are now prefixed
+  `admin_` (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
+  `/admin_flat`, `/admin_rotate`, `/admin_settings`) so they group as a distinct
+  set, separated from the user commands by a divider row (`/admin_help`, which
+  also lists them). Telegram command names may only contain `[a-z0-9_]`, so the
+  prefix uses an underscore and the divider is a real command rather than a
+  literal `-----` token. The legacy un-prefixed names still work (handler
+  aliases); only the prefixed form is advertised in the menu.
+- **`/admin_linkaccount`** — Admins can bind a Telegram user to an account
+  directly, without handing out an invite token. The bot resolves the account
+  by its row UUID (`accounts.id`, unambiguous even when a bare `account_id` is
+  reused across gateways) and calls the new
+  `POST /admin/accounts/{account_uuid}/link-telegram`. Additive and idempotent.
+- **`/admin_uuid`** — Admin command that shows accounts' internal row UUIDs
+  (optionally filtered to one bare `account_id`), the id the link-account and
+  broker-side calls address.
+- **Completed-trade broadcasts (`/subscribe`, `/unsubscribe`)** — Owners can opt
+  in to a Telegram DM whenever one of their linked accounts closes a trade. The
+  opt-in is a per-user preference stored in the new
+  `trade_broadcast_subscriptions` table (migration `a1b2c3d4e5f6`), toggled via
+  `POST /v1/telegram/{id}/broadcast/subscribe` · `/unsubscribe` (and read via
+  `GET /v1/telegram/{id}/broadcast`). When a worker's `TRADE` event closes a
+  trade, the broker DMs every subscribed owner (the intersection of
+  `account_bot_links` and the subscription table) via the bot-service bot token
+  (`BOT_TELEGRAM_TOKEN`, read from the shared `.env`) — the bot the user
+  actually started. Best-effort: a lookup or send failure never blocks `TRADE`
+  consumption.
+
+### Changed
+
+- **`/admin_rotate` now resets access, not just the token** — Rotating an
+  account's link token additionally unlinks every Telegram user currently bound
+  to the account and clears any active-session pointer at it, so the freshly
+  issued token is the only way back in. Previously already-linked users kept
+  their access.
+
 - **Telegram bot service** (`bot/`) — A new, self-contained **aiogram v3**
   service serving two roles from one process: endusers and admins. It is a
   thin HTTP client of the broker (authenticated with `X-API-KEY`) and never

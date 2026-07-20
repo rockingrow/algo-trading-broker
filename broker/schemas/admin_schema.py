@@ -44,6 +44,13 @@ class CreateAccountRequest(BaseModel):
   account_name: Optional[str] = None
 
 
+class AdminLinkTelegramRequest(BaseModel):
+  """Request body for POST /admin/accounts/{account_uuid}/link-telegram —
+  admin-bind a Telegram user to an account directly, skipping the token flow."""
+
+  telegram_user_id: int = Field(..., description="Telegram user id to bind to the account.")
+
+
 class FlatRequest(BaseModel):
   """Request body for the POST /flat admin endpoint.
 

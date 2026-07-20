@@ -35,7 +35,7 @@ from app.config import settings
 from app.constants import GATEWAYS_BY_MARKET, MARKETS
 from app.filters.is_admin import IsAdmin
 from app.presenters import messages
-from app.states import CreateAccount
+from app.states import AdminLinkAccount, CreateAccount
 from app.utils.telegram import safe_edit_text
 from app.utils.timezone import offset_hours_from_payload
 from app.keyboards import inline
@@ -51,7 +51,7 @@ PAGE_SIZE = settings.BOT_VIEW_TRADES_PER_PAGE
 # ── /accounts ───────────────────────────────────────────────────────
 
 
-@router.message(Command("accounts"))
+@router.message(Command("admin_accounts", "accounts"))
 async def cmd_accounts(message: Message, broker_admin: BrokerClientAdmin) -> None:
   accounts = await broker_admin.admin_list_accounts()
   if accounts is None:
@@ -76,7 +76,7 @@ async def _atrades_view(
   )
 
 
-@router.message(Command("atrades"))
+@router.message(Command("admin_trades", "atrades"))
 async def cmd_atrades(
   message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
 ) -> None:
@@ -142,7 +142,7 @@ def _aflat_confirm_text(account: dict) -> str:
   )
 
 
-@router.message(Command("aflat"))
+@router.message(Command("admin_flat", "aflat"))
 async def cmd_aflat(
   message: Message,
   command: CommandObject,
@@ -238,7 +238,7 @@ def _rotate_prompt(account_id: str) -> str:
   )
 
 
-@router.message(Command("rotate"))
+@router.message(Command("admin_rotate", "rotate"))
 async def cmd_rotate(
   message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
 ) -> None:
@@ -286,6 +286,107 @@ async def cb_rotate(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> Non
   await call.answer()
 
 
+# ── /admin_help ─────────────────────────────────────────────────────
+# The menu divider between the user and admin command groups is a real
+# command; running it lists the admin commands.
+
+
+@router.message(Command("admin_help"))
+async def cmd_admin_help(message: Message) -> None:
+  await message.answer(messages.AdminMessages.ADMIN_HELP)
+
+
+# ── /admin_uuid ─────────────────────────────────────────────────────
+# Show the internal row UUID(s) of accounts (the id the admin link-account and
+# broker-side calls address). Optional arg filters to one bare account_id.
+
+
+@router.message(Command("admin_uuid", "auuid"))
+async def cmd_admin_uuid(
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
+) -> None:
+  accounts = await broker_admin.admin_list_accounts()
+  if accounts is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch account list.")
+    return
+  arg = (command.args or "").strip()
+  if arg:
+    accounts = [a for a in accounts if a.get("account_id") == arg]
+  await message.answer(messages.AdminMessages.format_account_uuids(accounts))
+
+
+# ── /admin_linkaccount ──────────────────────────────────────────────
+# Admin binds a Telegram user to an account directly (no invite token). Pick
+# the account (resolved by its unambiguous UUID), then type the Telegram id.
+
+
+@router.message(Command("admin_linkaccount", "linkaccount"))
+async def cmd_admin_linkaccount(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  await state.clear()
+  accounts = await broker_admin.admin_list_accounts()
+  if not accounts:
+    await message.answer("No accounts.")
+    return
+  await message.answer(
+    "Choose an account to link a Telegram user to:",
+    reply_markup=inline.accounts_uuid_picker(accounts, "alink"),
+  )
+
+
+@router.callback_query(F.data.startswith("alink:"))
+async def cb_admin_linkaccount_pick(call: CallbackQuery, state: FSMContext) -> None:
+  account_uuid = call.data.split(":", 1)[1]
+  await state.update_data(alink_account_uuid=account_uuid)
+  await state.set_state(AdminLinkAccount.waiting_for_telegram_id)
+  await safe_edit_text(
+    call.message,
+    "Send the <b>Telegram user id</b> (numeric) to link to account "
+    f"<code>{html.escape(account_uuid)}</code>:",
+    None,
+  )
+  await call.answer()
+
+
+@router.message(AdminLinkAccount.waiting_for_telegram_id, F.text & ~F.text.startswith("/"))
+async def receive_link_telegram_id(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  if not raw.isdigit():
+    await message.answer(
+      f"{emojis.WARNING} Please send a numeric Telegram user id."
+    )
+    return
+
+  data = await state.get_data()
+  account_uuid = data.get("alink_account_uuid")
+  if not account_uuid:
+    await state.clear()
+    await message.answer(
+      f"{emojis.CROSS} Session expired. Run /admin_linkaccount again."
+    )
+    return
+
+  account = await broker_admin.admin_link_telegram(account_uuid, int(raw))
+  await state.clear()
+  if account is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to link (account not found?). "
+      "Run /admin_linkaccount to retry."
+    )
+    return
+  await message.answer(
+    messages.AdminMessages.format_linked_account(account, int(raw))
+  )
+
+
+@router.message(AdminLinkAccount.waiting_for_telegram_id, ~F.text)
+async def prompt_link_telegram_id_text(message: Message) -> None:
+  await message.answer(f"{emojis.WARNING} Please send the Telegram user id as text.")
+
+
 # ── /newaccount ─────────────────────────────────────────────────────
 # Pre-register an account (market + gateway + admin-typed suffix) before it
 # has traded, so a link token can be issued right away. account_id itself
@@ -293,7 +394,7 @@ async def cb_rotate(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> Non
 # spares the admin from typing/misformatting the <market>-<gateway>- prefix.
 
 
-@router.message(Command("newaccount"))
+@router.message(Command("admin_newaccount", "newaccount"))
 async def cmd_newaccount(message: Message, state: FSMContext) -> None:
   await state.clear()
   await message.answer(
@@ -394,7 +495,7 @@ async def _render_settings(
   return messages.AdminMessages.format_settings(states), inline.settings_keyboard(states)
 
 
-@router.message(Command("settings"))
+@router.message(Command("admin_settings", "settings"))
 async def cmd_settings(message: Message, broker_admin: BrokerClientAdmin) -> None:
   text, kb = await _render_settings(broker_admin)
   if text is None:

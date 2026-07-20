@@ -32,20 +32,35 @@ One linked account is **active** at a time; `/status`, `/trades`, `/flat`,
 accounts, `/link` adds one, and `/switch` lists them with a button per account
 to change the active one.
 
+`/subscribe` opts you in to a DM whenever one of your linked accounts **completes
+(closes) a trade**; `/unsubscribe` turns it off. The DM is sent by this same bot,
+so it lands in your existing chat. This is a per-user preference spanning every
+account you hold.
+
 > ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_ENTRIES`/`ALLOW_ENTRIES` admin command
 > over NATS (via the broker). The **worker** must be updated to honor it —
 > worker code lives outside this repo.
 
 ### Admin commands
 
+Admin commands are prefixed `admin_` so they group under a divider (`/admin_help`,
+a header row that also lists them) below the user commands in the menu. Telegram
+command names may only contain `[a-z0-9_]`, so the prefix uses an underscore (a
+literal `/admin-…` dash or a bare `-----` divider isn't a valid command name).
+The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`,
+…) for backward compatibility; only the prefixed form is shown in the menu.
+
 | Command | Action | Broker endpoint |
 | ------- | ------ | --------------- |
-| `/accounts` | List accounts + linked-user count + link token (spoiler) | `GET /v1/accounts` |
-| `/newaccount` | Register an account (pick market → gateway → type id) | `POST /admin/accounts` |
-| `/atrades [account_id]` | Trades of any account (picker if no arg) | `GET /v1/{account_id}/trades` |
-| `/aflat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |
-| `/rotate [account_id]` | Rotate a link token (revokes old, confirm) | `POST /admin/accounts/{id}/link-token/rotate` |
-| `/settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
+| `/admin_help` | List the admin commands (also the menu divider) | — |
+| `/admin_accounts` | List accounts + linked-user count + link token (spoiler) | `GET /v1/accounts` |
+| `/admin_newaccount` | Register an account (pick market → gateway → type id) | `POST /admin/accounts` |
+| `/admin_trades [account_id]` | Trades of any account (picker if no arg) | `GET /v1/{account_id}/trades` |
+| `/admin_flat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |
+| `/admin_rotate [account_id]` | Rotate a link token — revokes old **and unlinks every linked user** (confirm) | `POST /admin/accounts/{id}/link-token/rotate` |
+| `/admin_linkaccount` | Bind a Telegram user to an account directly (pick account → type user id) | `POST /admin/accounts/{uuid}/link-telegram` |
+| `/admin_uuid [account_id]` | Show accounts' internal row UUIDs | `GET /v1/accounts` |
+| `/admin_settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
 
 ### Link-token semantics
 
@@ -54,10 +69,17 @@ Linking is **additive** — several people can hold the same account (each keeps
 their own active-account selection), and one person can hold several accounts.
 A token stays reusable after a successful link.
 
-`/rotate` issues a fresh token and revokes every token that was still valid, so
-the old secret stops working immediately. It does **not** evict anyone who
-already linked — a token only grants the initial claim. To remove a specific
-person, they `/unlink` (or delete their `account_bot_links` row).
+`/admin_rotate` issues a fresh token and revokes every token that was still
+valid, so the old secret stops working immediately. It is now a **full access
+reset**: it also unlinks every Telegram user currently bound to the account and
+clears any active-session pointer at it, so the new token is the only way back
+in. To remove a specific person without rotating, they `/unlink` (or delete
+their `account_bot_links` row).
+
+`/admin_linkaccount` binds a Telegram user to an account **without** a token
+(the admin already knows which account row to bind). It addresses the account by
+its row UUID (`accounts.id`) so the target is unambiguous even when a bare
+`account_id` is reused across gateways. Linking stays additive and idempotent.
 
 ## Rendering
 

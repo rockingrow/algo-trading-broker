@@ -30,16 +30,34 @@ USER_COMMANDS = [
   BotCommand(command="link", description="Add another account"),
   BotCommand(command="switch", description="Change active account"),
   BotCommand(command="unlink", description="Unlink active account"),
+  BotCommand(command="subscribe", description="Get completed-trade alerts"),
+  BotCommand(command="unsubscribe", description="Stop completed-trade alerts"),
   BotCommand(command="help", description="Help"),
 ]
 
+# Visual separator between the user commands and the admin commands in the
+# admin menu. Telegram command names may only contain [a-z0-9_] (a literal
+# "-----—" divider isn't a valid command), so the divider is a real command —
+# ``/admin_help``, which lists the admin commands — carrying a dashed
+# description that reads as a section header in the menu.
+ADMIN_DIVIDER = BotCommand(
+  command="admin_help", description="───────── ADMIN ─────────"
+)
+
+# Admin commands are prefixed ``admin_`` so they group under the divider and
+# read as a distinct set. The handlers also accept the legacy un-prefixed names
+# (see app/handlers/admin.py) so existing muscle memory keeps working; only the
+# prefixed form is advertised in the menu.
 ADMIN_EXTRA_COMMANDS = [
-  BotCommand(command="accounts", description="[ADMIN] Account list"),
-  BotCommand(command="newaccount", description="[ADMIN] Register a new account"),
-  BotCommand(command="atrades", description="[ADMIN] Trades for an account"),
-  BotCommand(command="aflat", description="[ADMIN] FLAT system-wide / account"),
-  BotCommand(command="rotate", description="[ADMIN] Rotate link token"),
-  BotCommand(command="settings", description="[ADMIN] Broker settings"),
+  ADMIN_DIVIDER,
+  BotCommand(command="admin_accounts", description="[ADMIN] Account list"),
+  BotCommand(command="admin_newaccount", description="[ADMIN] Register a new account"),
+  BotCommand(command="admin_trades", description="[ADMIN] Trades for an account"),
+  BotCommand(command="admin_flat", description="[ADMIN] FLAT system-wide / account"),
+  BotCommand(command="admin_rotate", description="[ADMIN] Rotate token + unlink users"),
+  BotCommand(command="admin_settings", description="[ADMIN] Broker settings"),
+  BotCommand(command="admin_linkaccount", description="[ADMIN] Link a Telegram user"),
+  BotCommand(command="admin_uuid", description="[ADMIN] Get an account's UUID"),
 ]
 
 ADMIN_COMMANDS = USER_COMMANDS + ADMIN_EXTRA_COMMANDS

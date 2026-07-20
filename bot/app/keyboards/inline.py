@@ -76,6 +76,28 @@ def accounts_picker(
   return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def accounts_uuid_picker(
+  accounts: list[dict[str, Any]], action_prefix: str
+) -> InlineKeyboardMarkup:
+  """One button per account → callback ``{action_prefix}:{account_uuid}``.
+
+  Uses the account's row UUID (``id``) rather than the bare ``account_id`` so
+  the target is unambiguous when an id is reused across gateways — used by the
+  admin link-account flow. The UUID (36 chars) plus a short prefix stays well
+  under Telegram's 64-byte callback-data limit."""
+  rows = [
+    [
+      InlineKeyboardButton(
+        text=f"{a.get('market')}/{a.get('gateway') or '?'} · "
+        f"{a.get('account_name') or a.get('account_id')} · {a.get('account_id')}",
+        callback_data=f"{action_prefix}:{a.get('id')}",
+      )
+    ]
+    for a in accounts
+  ]
+  return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def aflat_candidates_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMarkup:
   """One button per account sharing a colliding account_id → callback
   ``aflatc:{index}`` (the account itself is resolved from FSM data by index,

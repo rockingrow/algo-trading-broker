@@ -86,8 +86,24 @@ class UserMessages:
     "/myaccounts — List linked accounts\n"
     "/link — Add another account\n"
     "/switch — Change active account\n"
-    "/unlink — Unlink active account"
+    "/unlink — Unlink active account\n"
+    "/subscribe — Get completed-trade alerts\n"
+    "/unsubscribe — Stop completed-trade alerts"
   )
+
+  @staticmethod
+  def format_broadcast_subscription(subscribed: bool) -> str:
+    if subscribed:
+      return (
+        f"{emojis.CHECK} <b>Subscribed.</b>\n\n"
+        "You'll now get a DM here whenever one of your linked accounts "
+        "completes (closes) a trade. Use /unsubscribe to stop."
+      )
+    return (
+      f"{emojis.CHECK} <b>Unsubscribed.</b>\n\n"
+      "You'll no longer get completed-trade alerts. Use /subscribe to turn "
+      "them back on."
+    )
 
   HELP_TEXT = (
     f"{emojis.ROBOT} <b>Trading Bot</b>\n\n"
@@ -232,6 +248,46 @@ class AdminMessages:
     return (
       f"{emojis.KEY} New link token for <code>{_esc(result.get('account_id'))}</code>:\n"
       f"<tg-spoiler><code>{_esc(result.get('link_token'))}</code></tg-spoiler>\n\n"
-      "<i>Previous tokens have been revoked. Send this new token to the end "
-      "user. Anyone already linked keeps their access.</i>"
+      "<i>Previous tokens have been revoked and every Telegram user that was "
+      "linked to this account has been unlinked. Send this new token to whoever "
+      "should have access now — the new token is the only way back in.</i>"
+    )
+
+  ADMIN_HELP = (
+    f"{emojis.GEAR} <b>Admin commands</b>\n"
+    "/admin_accounts — Account list\n"
+    "/admin_newaccount — Register a new account\n"
+    "/admin_trades — Trades for an account\n"
+    "/admin_flat — FLAT system-wide / account\n"
+    "/admin_rotate — Rotate token + unlink users\n"
+    "/admin_settings — Broker settings\n"
+    "/admin_linkaccount — Link a Telegram user to an account\n"
+    "/admin_uuid — Get an account's UUID"
+  )
+
+  @staticmethod
+  def format_account_uuids(accounts: list[dict[str, Any]]) -> str:
+    """List accounts with their row UUID (tap-to-copy) for the admin."""
+    if not accounts:
+      return f"{emojis.EMPTY_MAILBOX} No accounts yet."
+    lines = [f"<b>{emojis.FOLDER} Account UUIDs</b> ({len(accounts)})", ""]
+    for a in accounts:
+      lines.append(
+        f"<b>{_esc(a.get('account_name') or a.get('account_id'))}</b> "
+        f"<code>{_esc(a.get('account_id'))}</code> "
+        f"· {_esc(a.get('market'))}/{_esc(a.get('gateway'))}\n"
+        f"   uuid: <code>{_esc(a.get('id'))}</code>"
+      )
+    return "\n".join(lines)
+
+  @staticmethod
+  def format_linked_account(account: dict[str, Any], telegram_user_id: int) -> str:
+    """Confirmation after an admin binds a Telegram user to an account."""
+    users = account.get("linked_user_ids") or []
+    return (
+      f"{emojis.CHECK} <b>Telegram user linked</b>\n"
+      f"• Account: <code>{_esc(account.get('account_id'))}</code> "
+      f"({_esc(account.get('market'))}/{_esc(account.get('gateway'))})\n"
+      f"• Telegram user: <code>{_esc(telegram_user_id)}</code>\n"
+      f"• Linked users now: {_esc(len(users))}"
     )

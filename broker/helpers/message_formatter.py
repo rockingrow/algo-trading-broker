@@ -128,6 +128,39 @@ def format_signal_message(
   return base + (f"\n{flags}" if flags else "") + raw
 
 
+def format_completed_trade_message(trade, *, timezone_offset: str | None = None) -> str:
+  """Telegram DM body sent to an account owner when one of their trades closes.
+
+  Renders the persisted ``trades`` row (see ``broker.db.models.Trade``) — not a
+  webhook payload — because this fires off the worker's TRADE completion event,
+  after the trade has been upserted. Shows realised PnL when both the initial
+  and current account balance are known.
+  """
+  status = getattr(trade.status, "value", str(trade.status))
+  action = getattr(trade.action, "value", str(trade.action))
+
+  lines = [
+    f"{em.FLAT} <b>Trade completed</b>",
+    f"Account: <code>{trade.account_id}</code>",
+    f"Symbol: <b>{trade.symbol}</b>",
+    f"Action: <b>{action}</b>",
+    f"Status: <b>{status}</b>",
+    f"Close price: <code>{trade.price}</code>",
+    f"Quantity: <code>{trade.quantity}</code>",
+  ]
+  if trade.account_balance is not None:
+    lines.append(f"Balance: <b>{trade.account_balance}</b>")
+  if trade.account_balance is not None and trade.account_balance_init is not None:
+    pnl = float(trade.account_balance) - float(trade.account_balance_init)
+    sign = "+" if pnl >= 0 else ""
+    lines.append(f"PnL: <b>{sign}{pnl:.2f}</b>")
+  lines.append(f"Strategy: <b>{trade.strategy}</b>")
+  lines.append(
+    f"Time: {format_notification_time(trade.updatedAt, timezone_offset)}"
+  )
+  return "\n".join(lines)
+
+
 def format_blocked_message(payload: WebhookPayload) -> str:
   """Telegram body sent when signal processing is disabled."""
   return (

@@ -19,16 +19,23 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from broker.db.models import Account
-from broker.interfaces import AccountRepository, SignalPublisher, TradeRepository
+from broker.interfaces import (
+  AccountRepository,
+  SignalPublisher,
+  TradeBroadcastRepository,
+  TradeRepository,
+)
 from broker.logger import get_logger
 from broker.openapi import AUTH_RESPONSES
 from broker.providers import (
   get_account_repository,
   get_publisher,
+  get_trade_broadcast_repository,
   get_trade_repository,
 )
 from broker.schemas.publisher_schema import AdminActionEnum
 from broker.schemas.telegram_schema import (
+  BroadcastSubscriptionResponse,
   CommandResultResponse,
   FlatCommandRequest,
   LinkedAccountResponse,
@@ -248,5 +255,59 @@ def get_telegram_router() -> APIRouter:
     scope = _scope(account.account_id, strategy=None, symbol=None)
     log.info("Telegram %s published scope=%s", action.value, scope)
     return CommandResultResponse(action=action.value, scope=scope)
+
+  # ── Completed-trade broadcast opt-in ─────────────────────────────
+  # A per-user preference (spans every account the user holds), so these are
+  # keyed by the path ``telegram_user_id`` alone and need no linked-account
+  # resolution — an owner may subscribe before or after linking.
+
+  @router.get(
+    "/{telegram_user_id}/broadcast",
+    summary="Whether the caller receives completed-trade broadcast DMs",
+    response_model=BroadcastSubscriptionResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_broadcast_subscription(
+    telegram_user_id: int,
+    broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
+  ) -> BroadcastSubscriptionResponse:
+    subscribed = await broadcast_repo.is_subscribed(telegram_user_id)
+    return BroadcastSubscriptionResponse(subscribed=subscribed)
+
+  @router.post(
+    "/{telegram_user_id}/broadcast/subscribe",
+    summary="Opt in to completed-trade broadcast DMs",
+    response_model=BroadcastSubscriptionResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def subscribe_broadcast(
+    telegram_user_id: int,
+    broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
+  ) -> BroadcastSubscriptionResponse:
+    ok = await broadcast_repo.subscribe(telegram_user_id)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broadcast subscription",
+      )
+    return BroadcastSubscriptionResponse(subscribed=True)
+
+  @router.post(
+    "/{telegram_user_id}/broadcast/unsubscribe",
+    summary="Opt out of completed-trade broadcast DMs",
+    response_model=BroadcastSubscriptionResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def unsubscribe_broadcast(
+    telegram_user_id: int,
+    broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
+  ) -> BroadcastSubscriptionResponse:
+    ok = await broadcast_repo.unsubscribe(telegram_user_id)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broadcast subscription",
+      )
+    return BroadcastSubscriptionResponse(subscribed=False)
 
   return router

@@ -18,3 +18,10 @@ class CreateAccount(StatesGroup):
   account_id suffix is typed as free text."""
 
   waiting_for_account_id = State()
+
+
+class AdminLinkAccount(StatesGroup):
+  """Admin flow: pick an account via inline keyboard, then type the Telegram
+  user id to bind to it."""
+
+  waiting_for_telegram_id = State()

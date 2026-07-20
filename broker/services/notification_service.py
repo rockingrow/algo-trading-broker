@@ -108,6 +108,57 @@ class TelegramNotification(Notification):
       logger.exception("Exception sending Telegram message: %s", exc)
 
 
+class OwnerBroadcastNotifier:
+  """Sends a Telegram DM to a specific chat id via the bot-service bot token.
+
+  Unlike :class:`TelegramNotification` (one fixed chat, wraps every message in a
+  ``<pre>`` box), this targets an arbitrary ``chat_id`` per call and sends the
+  HTML body as-is — completed-trade broadcasts carry their own ``<b>`` markup.
+
+  The token defaults to ``BOT_TELEGRAM_TOKEN`` (the bot users actually DM),
+  not the broker's own notification bot: a user can only be messaged by the bot
+  they started. Silently no-ops when Telegram is disabled or the token is
+  unset, so a deployment that doesn't share the bot token simply never
+  broadcasts."""
+
+  def __init__(self, bot_token: str | None = None) -> None:
+    self.enabled = settings.TELEGRAM_ENABLED
+    self.bot_token = (
+      bot_token if bot_token is not None else settings.BOT_TELEGRAM_TOKEN
+    )
+
+  async def send_to(self, chat_id: str, message_text: str) -> bool:
+    """Deliver *message_text* (HTML) to *chat_id*. Returns True on a 200 send,
+    False on any skip/failure (never raises — broadcasts are best-effort)."""
+    if not self.enabled:
+      logger.debug("Telegram disabled; skipping owner broadcast.")
+      return False
+    if not self.bot_token:
+      logger.warning(
+        "BOT_TELEGRAM_TOKEN must be set to DM account owners; skipping broadcast."
+      )
+      return False
+
+    url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+    payload = {
+      "chat_id": chat_id,
+      "text": message_text,
+      "parse_mode": "HTML",
+    }
+    try:
+      async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        response = await client.post(url, json=payload)
+      if response.status_code != 200:
+        logger.error(
+          "Failed to DM owner chat_id=%s: %s", chat_id, response.text
+        )
+        return False
+      return True
+    except Exception as exc:
+      logger.exception("Exception DMing owner chat_id=%s: %s", chat_id, exc)
+      return False
+
+
 # ── Telegram error-log hook ────────────────────────────────────────────────
 
 # Loggers whose records must never be forwarded, to avoid an infinite

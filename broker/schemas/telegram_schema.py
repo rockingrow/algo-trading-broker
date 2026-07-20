@@ -77,3 +77,9 @@ class CommandResultResponse(BaseModel):
   action: str
   scope: str
   status: str = "published"
+
+
+class BroadcastSubscriptionResponse(BaseModel):
+  """Whether the caller is opted in to completed-trade broadcast DMs."""
+
+  subscribed: bool
