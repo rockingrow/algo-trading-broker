@@ -71,7 +71,7 @@ class FakeOwnerNotifier:
   def __init__(self):
     self.sent: list[tuple[str, str]] = []
 
-  async def send_to(self, chat_id, message_text):
+  async def send_message(self, message_text, chat_id=None):
     self.sent.append((chat_id, message_text))
     return True
 

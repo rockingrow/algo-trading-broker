@@ -81,7 +81,7 @@ class TradeBroadcastService:
     message = format_completed_trade_message(trade, timezone_offset=timezone_offset)
 
     for chat_id in targets:
-      await self._notifier.send_to(chat_id, message)
+      await self._notifier.send_message(message, chat_id=chat_id)
 
     log.info(
       "Broadcast completed trade account_id=%s ref_id=%s to %d owner(s)",
