@@ -357,6 +357,39 @@ class BotSession(Base):
     )
 
 
+class TradeBroadcastSubscription(Base):
+  """
+  One row per (platform, bot user) who has opted in to receive a Telegram DM
+  whenever one of their linked accounts completes (closes) a trade.
+
+  Kept as its own table — rather than a column on ``bot_sessions`` or
+  ``account_bot_links`` — because the opt-in is a per-user preference that
+  spans every account the user holds, independent of which one is active or of
+  any single link row. A user is "subscribed" when a row exists here for their
+  ``(platform, platform_user_id)``; unsubscribing deletes it.
+  """
+
+  __tablename__ = "trade_broadcast_subscriptions"
+  __table_args__ = (
+    UniqueConstraint(
+      "platform",
+      "platform_user_id",
+      name="uq_trade_broadcast_subscriptions_platform_user",
+    ),
+  )
+
+  platform: Mapped[BotPlatformTypeEnum] = mapped_column(
+    Enum(BotPlatformTypeEnum), nullable=False
+  )
+  platform_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+  def __repr__(self) -> str:
+    return (
+      f"<TradeBroadcastSubscription platform={self.platform} "
+      f"platform_user_id={self.platform_user_id}>"
+    )
+
+
 class BrokerSetting(Base):
   """
   One row per broker setting.

@@ -15,15 +15,35 @@ from app.commands import (
 
 
 def test_command_list_sizes():
-  assert len(USER_COMMANDS) == 11
-  assert len(ADMIN_EXTRA_COMMANDS) == 6
+  assert len(USER_COMMANDS) == 13
+  # 8 admin commands + 1 divider/header row.
+  assert len(ADMIN_EXTRA_COMMANDS) == 9
   # Admin sees user commands plus the extras.
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)
   user_names = {c.command for c in USER_COMMANDS}
   assert user_names.issubset({c.command for c in ADMIN_COMMANDS})
-  assert {"accounts", "newaccount", "atrades", "aflat", "rotate", "settings"} <= {
-    c.command for c in ADMIN_COMMANDS
-  }
+  # User commands include the completed-trade broadcast opt-in.
+  assert {"subscribe", "unsubscribe"} <= user_names
+  # Admin commands are prefixed and grouped after the divider.
+  admin_names = {c.command for c in ADMIN_COMMANDS}
+  assert {
+    "admin_accounts",
+    "admin_newaccount",
+    "admin_trades",
+    "admin_flat",
+    "admin_rotate",
+    "admin_settings",
+    "admin_linkaccount",
+    "admin_invite_url",
+  } <= admin_names
+  # The divider is the first admin extra so it separates the two groups.
+  assert ADMIN_EXTRA_COMMANDS[0].command == "admin_help"
+  # All admin command names are valid Telegram commands ([a-z0-9_], 1-32).
+  import re
+
+  assert all(
+    re.fullmatch(r"[a-z0-9_]{1,32}", c.command) for c in ADMIN_COMMANDS
+  )
 
 
 class FakeBot:

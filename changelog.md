@@ -19,6 +19,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path, and Pydantic validation error details. Previously, FastAPI's default
   handler returned the 422 silently — the only trace was uvicorn's one-line
   access log with no payload context.
+- **Admin command prefix + menu divider** — Bot admin commands are now prefixed
+  `admin_` (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
+  `/admin_flat`, `/admin_rotate`, `/admin_settings`) so they group as a distinct
+  set, separated from the user commands by a divider row (`/admin_help`, which
+  also lists them). Telegram command names may only contain `[a-z0-9_]`, so the
+  prefix uses an underscore and the divider is a real command rather than a
+  literal `-----` token. The legacy un-prefixed names still work (handler
+  aliases); only the prefixed form is advertised in the menu.
+- **`/admin_linkaccount`** — Admins can bind a Telegram user to an account
+  directly, without handing out an invite token. The bot resolves the account
+  by its row UUID (`accounts.id`, unambiguous even when a bare `account_id` is
+  reused across gateways) and calls the new
+  `POST /admin/accounts/{account_uuid}/link-telegram`. Additive and idempotent.
+- **`/admin_invite_url` + `/start <code>` deep links** — Admins can hand out a
+  one-tap invite URL (`https://t.me/<bot>?start=<code>`) instead of a bare UUID.
+  Tapping it opens the bot with the account's link token already in the `/start`
+  payload, so the account links on the first tap and the end user never types a
+  code. `/admin_invite_url <code>` wraps a code the admin already has; called
+  bare it offers the account picker and reads the token from the account picked
+  (the button carries the row UUID, so the token never enters `callback_data`).
+  The payload is the token in bare hex (32 chars) just to shorten the URL;
+  `/start` and the manual prompt both accept dashed or hex and normalise before
+  calling the broker. Bot-only — no broker or schema change, and no new secret:
+  the URL is exactly as sensitive as the token in it, and `/admin_rotate`
+  revokes both together.
+- **Account row UUIDs in `/admin_accounts`** — The account list now carries a
+  second table with each account's internal row UUID (the id the link-account
+  and broker-side calls address). It's a separate table rather than another
+  column because a 36-char UUID would blow out the width of the main one.
+- **Completed-trade broadcasts (`/subscribe`, `/unsubscribe`)** — Owners can opt
+  in to a Telegram DM whenever one of their linked accounts closes a trade. The
+  opt-in is a per-user preference stored in the new
+  `trade_broadcast_subscriptions` table (migration `a1b2c3d4e5f6`), toggled via
+  `POST /v1/telegram/{id}/broadcast/subscribe` · `/unsubscribe` (and read via
+  `GET /v1/telegram/{id}/broadcast`). When a worker's `TRADE` event closes a
+  trade, the broker DMs every subscribed owner (the intersection of
+  `account_bot_links` and the subscription table) via the bot-service bot token
+  (`BOT_TELEGRAM_TOKEN`, read from the shared `.env`) — the bot the user
+  actually started. Best-effort: a lookup or send failure never blocks `TRADE`
+  consumption.
+
+### Changed
+
+- **Every table listing paginates** — `/myaccounts`, `/switch` and
+  `/admin_accounts` now page through Prev/Next buttons like `/trades` and
+  `/admin_trades` already did, and each header states its range
+  (`(9–16 / 23)`). Telegram rejects a message over 4096 characters outright,
+  so an unpaginated account table didn't degrade as the list grew — it stopped
+  sending. The broker returns these lists whole, so the bot slices them
+  client-side (`utils.pagination.paginate`) and synthesises the same `page`
+  metadata the trade endpoints return; in `/switch` the table and the account
+  picker are built from one slice, so each button stays under its row.
+- **Page sizes moved from `.env` to code** — `BOT_VIEW_TRADES_PER_PAGE` is
+  **removed**; page sizes are now `TRADES_PER_PAGE`, `ACCOUNTS_PER_PAGE` and
+  `ADMIN_ACCOUNTS_PER_PAGE` in [`bot/app/constants.py`](bot/app/constants.py).
+  The right value follows from how wide each table is, which is a property of
+  the code rather than of the deployment, and an over-large value (the shipped
+  example was `50`) breaks the send instead of tuning it. No action needed on
+  upgrade: a leftover `BOT_VIEW_TRADES_PER_PAGE` in an existing `.env` is
+  ignored.
+- **An admin FLAT counts as a completed trade for broadcasts** — A `FLATTED`
+  event (a `POST /admin/flat`) now DMs subscribed owners just like a normal
+  close. The position is over and the owner did not close it themselves, so
+  they arguably need the notice more, not less. The gate is still the event's
+  own status rather than the persisted row's, so the DM stays keyed to the one
+  discrete close event the worker emits and a later touch of an already-closed
+  row still fires nothing.
+- **Completed-trade DM shows the gateway instead of the strategy** — The
+  account line alone doesn't say which gateway the account is on, and
+  `account_id` is no longer unique across gateways; the strategy name it
+  replaces was of no use to the owner reading a close.
+- **`/admin_rotate` now resets access, not just the token** — Rotating an
+  account's link token additionally unlinks every Telegram user currently bound
+  to the account and clears any active-session pointer at it, so the freshly
+  issued token is the only way back in. Previously already-linked users kept
+  their access.
 
 ### Added
 
@@ -140,6 +216,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A FLATTED trade was persisted with a close price of `0`** — Workers report
+  `closed_price=0` on a FLAT when they have no close price to give, and the
+  repository only fell back to the open price when the field was `None`, so the
+  `0` was written to the row and surfaced as `Close price: 0` in the owner's
+  broadcast DM. No instrument ever closes at 0, so a falsy close price is now
+  treated as missing and the open price is kept.
+- **Broadcast DMs leaked the column scale of `Numeric` values** — `str()` on a
+  `Numeric(20,8)` Decimal renders the stored scale, not the number a human
+  writes: a zero came out as `0E-8` and `0.104` as `0.10400000`. Price,
+  quantity and balance now normalise to plain digits (trailing zeros dropped,
+  the scientific forms Decimal falls back to for zero and for large integers
+  expanded back out).
 - **`/trades` and `/atrades` showed a bare UTC timestamp** — The bot rendered
   each trade's `updatedAt` as raw UTC digits with no indication of the zone.
   It now reads the broker's `notification_timezone` setting (new

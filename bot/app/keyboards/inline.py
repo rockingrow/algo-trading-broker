@@ -14,7 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app import emojis
 from app.constants import GATEWAYS_BY_MARKET, MARKETS
 from app.presenters.messages import AdminMessages
-from app.utils.pagination import build_pagination_keyboard
+from app.utils.pagination import build_pagination_keyboard, build_pagination_row
 
 
 def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
@@ -33,11 +33,16 @@ def confirm_keyboard(action: str) -> InlineKeyboardMarkup:
   )
 
 
-def linked_accounts_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+def linked_accounts_picker(
+  accounts: list[dict[str, Any]], page: dict
+) -> InlineKeyboardMarkup:
   """One button per account linked to the caller → callback ``swacc:{id}``
   (the account's row id — a UUID, well under the 64-byte callback-data limit,
   so unlike ``aflat_candidates_picker`` no FSM-index indirection is needed).
-  The active account is marked with a star."""
+  The active account is marked with a star.
+
+  *accounts* is one page of the list; a Prev/Next row (``swpg:{offset}``) sits
+  below the buttons so the picker pages in step with the table above it."""
   rows = [
     [
       InlineKeyboardButton(
@@ -48,6 +53,9 @@ def linked_accounts_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMark
     ]
     for a in accounts
   ]
+  nav = build_pagination_row(page, lambda offset: f"swpg:{offset}")
+  if nav:
+    rows.append(nav)
   return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -55,6 +63,11 @@ def trades_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
   """Prev/Next buttons derived from the trades page metadata, or None when a
   single page covers everything."""
   return build_pagination_keyboard(page, lambda offset: f"trades:{offset}")
+
+
+def accounts_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
+  """Prev/Next for /myaccounts → callback ``myacc:{offset}``."""
+  return build_pagination_keyboard(page, lambda offset: f"myacc:{offset}")
 
 
 # ── Admin keyboards ─────────────────────────────────────────────────
@@ -69,6 +82,28 @@ def accounts_picker(
       InlineKeyboardButton(
         text=f"{a.get('account_name') or a.get('account_id')} · {a.get('account_id')}",
         callback_data=f"{action_prefix}:{a.get('account_id')}",
+      )
+    ]
+    for a in accounts
+  ]
+  return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def accounts_uuid_picker(
+  accounts: list[dict[str, Any]], action_prefix: str
+) -> InlineKeyboardMarkup:
+  """One button per account → callback ``{action_prefix}:{account_uuid}``.
+
+  Uses the account's row UUID (``id``) rather than the bare ``account_id`` so
+  the target is unambiguous when an id is reused across gateways — used by the
+  admin link-account flow. The UUID (36 chars) plus a short prefix stays well
+  under Telegram's 64-byte callback-data limit."""
+  rows = [
+    [
+      InlineKeyboardButton(
+        text=f"{a.get('market')}/{a.get('gateway') or '?'} · "
+        f"{a.get('account_name') or a.get('account_id')} · {a.get('account_id')}",
+        callback_data=f"{action_prefix}:{a.get('id')}",
       )
     ]
     for a in accounts
@@ -91,6 +126,11 @@ def aflat_candidates_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMar
     for i, a in enumerate(accounts)
   ]
   return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_accounts_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
+  """Prev/Next for /admin_accounts → callback ``aacc:{offset}``."""
+  return build_pagination_keyboard(page, lambda offset: f"aacc:{offset}")
 
 
 def admin_trades_pagination(

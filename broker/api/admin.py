@@ -1,3 +1,4 @@
+import uuid as uuid_lib
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -35,6 +36,7 @@ from broker.schemas.account_schema import (
   compose_worker_id,
 )
 from broker.schemas.admin_schema import (
+  AdminLinkTelegramRequest,
   AdminResponse,
   CreateAccountRequest,
   CryptoAllowedSymbolRequest,
@@ -529,5 +531,47 @@ def get_admin_router() -> APIRouter:
       )
     log.info("Link token rotated for account_id=%s", account_id)
     return RotateTokenResponse(account_id=account_id, link_token=new_token)
+
+  @router.post(
+    "/accounts/{account_uuid}/link-telegram",
+    tags=["accounts"],
+    summary="Admin-link a Telegram user to an account",
+    description=(
+      "Bind a Telegram user to an account directly, without handing out a link "
+      "token. The account is addressed by its row UUID (``accounts.id``) rather "
+      "than the reusable bare ``account_id`` so the target is unambiguous. "
+      "Additive and idempotent: re-linking the same user is a no-op, and other "
+      "linked users are untouched."
+    ),
+    response_model=AccountResponse,
+    responses={
+      **AUTH_RESPONSES,
+      404: {"description": "Account not found."},
+    },
+  )
+  async def link_telegram_to_account(
+    account_uuid: uuid_lib.UUID,
+    body: AdminLinkTelegramRequest,
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> AccountResponse:
+    account = await account_repo.admin_link_telegram(
+      account_uuid, body.telegram_user_id
+    )
+    if account is None:
+      raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Account not found",
+      )
+    log.info(
+      "Admin linked telegram_user_id=%s to account uuid=%s",
+      body.telegram_user_id,
+      account_uuid,
+    )
+    resp = AccountResponse.model_validate(account)
+    summary = (await account_repo.get_link_summaries([account.id])).get(account.id)
+    if summary is not None:
+      resp.link_token = summary.link_token
+      resp.linked_user_ids = summary.linked_user_ids
+    return resp
 
   return router

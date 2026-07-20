@@ -70,6 +70,14 @@ class Settings(BaseSettings):
   TELEGRAM_CHAT_ID: str = ""  # management: NATS events, service start/stop
   TELEGRAM_CHAT_CHANNEL_ID: str = ""  # signals: NATS published trades
 
+  # Token of the *bot-service* BotFather bot (the one end-users actually DM to
+  # link and drive their account — BOT_TELEGRAM_TOKEN in the bot's config).
+  # Read from the shared .env so the broker can DM an account's owner directly
+  # (completed-trade broadcasts): a user can only be messaged by the bot they
+  # started, and that is this bot, not the broker's own notification bot
+  # (TELEGRAM_BOT_TOKEN). Empty disables owner broadcasts.
+  BOT_TELEGRAM_TOKEN: str = ""
+
   # ── Telegram error-log hook ──────────────────────────────────────
   # When enabled (and TELEGRAM_ENABLED is true), log records at ERROR
   # level or above are forwarded to the management chat (TELEGRAM_CHAT_ID).

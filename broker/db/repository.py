@@ -29,6 +29,7 @@ from broker.db.models import (
   BrokerSetting,
   Signal,
   Trade,
+  TradeBroadcastSubscription,
 )
 from broker.domain.trade_status import TradeStatusPolicy
 from broker.logger import get_logger
@@ -534,6 +535,89 @@ class SqlAlchemyAccountRepository:
       )
       return None
 
+  async def admin_link_telegram(
+    self,
+    account_uuid: uuid.UUID,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> Account | None:
+    """Admin-link ``telegram_user_id`` directly to the account with row id
+    ``account_uuid``, bypassing the invite-token flow.
+
+    Unlike ``link_telegram`` (which resolves the account from a token an
+    end-user typed), this is called by an admin who already knows exactly which
+    account row to bind, so it keys off the unambiguous ``accounts.id`` UUID
+    rather than the reusable bare ``account_id``. Otherwise the semantics match
+    ``link_telegram``: additive (never removes a link), idempotent on the unique
+    constraint, and it makes the account active for the user only when they have
+    no active selection yet.
+
+    Returns the account, or None if no account with that id exists.
+    """
+    platform_user_id = str(telegram_user_id)
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account).where(Account.id == account_uuid)
+        )
+        account: Optional[Account] = result.scalars().first()
+        if account is None:
+          return None
+
+        result = await session.execute(
+          select(AccountBotLink).where(
+            AccountBotLink.account_id == account.id,
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == platform_user_id,
+          )
+        )
+        if result.scalars().first() is None:
+          session.add(
+            AccountBotLink(
+              id=uuid.uuid4(),
+              account_id=account.id,
+              platform=platform,
+              platform_user_id=platform_user_id,
+            )
+          )
+
+        result = await session.execute(
+          select(BotSession).where(
+            BotSession.platform == platform,
+            BotSession.platform_user_id == platform_user_id,
+          )
+        )
+        bot_session: Optional[BotSession] = result.scalars().first()
+        if bot_session is None:
+          session.add(
+            BotSession(
+              id=uuid.uuid4(),
+              platform=platform,
+              platform_user_id=platform_user_id,
+              active_account_id=account.id,
+            )
+          )
+        elif bot_session.active_account_id is None:
+          bot_session.active_account_id = account.id
+
+        await session.flush()
+        await session.refresh(account)
+        log.info(
+          "Admin-linked telegram_user_id=%s to account_id=%s (uuid=%s)",
+          telegram_user_id,
+          account.account_id,
+          account.id,
+        )
+        return account
+    except Exception as exc:
+      log.exception(
+        "Failed to admin-link telegram_user_id=%s to account uuid=%s: %s",
+        telegram_user_id,
+        account_uuid,
+        exc,
+      )
+      return None
+
   async def unlink_telegram(
     self,
     telegram_user_id: int,
@@ -606,8 +690,14 @@ class SqlAlchemyAccountRepository:
     still valid. Returns the new token, or None if the account doesn't exist.
 
     Revoking is a state change (``revoked_at``), not a delete, so an issued
-    secret's history survives rotation. Already-linked users are unaffected —
-    a token only grants the initial claim.
+    secret's history survives rotation.
+
+    Rotation is also a full reset of *who may drive the account*: every platform
+    (Telegram) user currently linked to it is unlinked, and any active-session
+    pointer aimed at it is cleared. A rotated token therefore hands the account
+    to whoever the admin next gives the new secret to, with no leftover access
+    from the previous holders — the account_bot_links for it are deleted, not
+    just the token revoked.
 
     KNOWN LIMITATION: resolves by bare ``account_id`` alone, which is not
     guaranteed unique (see ``uq_accounts_market_gateway_account_id`` — the
@@ -637,6 +727,18 @@ class SqlAlchemyAccountRepository:
         for stale in result.scalars().all():
           stale.revoked_at = now
 
+        # Unlink every platform user bound to this account and clear any
+        # active-session pointer aimed at it. Rotating is a reset of access,
+        # not just a new invite secret — see the docstring.
+        await session.execute(
+          delete(AccountBotLink).where(AccountBotLink.account_id == account.id)
+        )
+        result = await session.execute(
+          select(BotSession).where(BotSession.active_account_id == account.id)
+        )
+        for bot_session in result.scalars().all():
+          bot_session.active_account_id = None
+
         new_token = uuid.uuid4()
         session.add(
           AccountLinkToken(
@@ -652,6 +754,146 @@ class SqlAlchemyAccountRepository:
         "Failed to rotate link token for account_id=%s: %s", account_id, exc
       )
       return None
+
+
+class SqlAlchemyTradeBroadcastRepository:
+  """Manages per-user opt-in for completed-trade Telegram broadcasts, and
+  resolves which subscribed users should be notified for a given account."""
+
+  async def subscribe(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool:
+    """Opt a bot user in to completed-trade broadcasts. Idempotent — returns
+    True whether the row was created now or already existed."""
+    platform_user_id = str(telegram_user_id)
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TradeBroadcastSubscription).where(
+            TradeBroadcastSubscription.platform == platform,
+            TradeBroadcastSubscription.platform_user_id == platform_user_id,
+          )
+        )
+        if result.scalars().first() is None:
+          session.add(
+            TradeBroadcastSubscription(
+              id=uuid.uuid4(),
+              platform=platform,
+              platform_user_id=platform_user_id,
+            )
+          )
+          log.info("Trade broadcast subscribed telegram_user_id=%s", telegram_user_id)
+      return True
+    except Exception as exc:
+      log.exception(
+        "Failed to subscribe telegram_user_id=%s to broadcasts: %s",
+        telegram_user_id,
+        exc,
+      )
+      return False
+
+  async def unsubscribe(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool:
+    """Opt a bot user out of completed-trade broadcasts. Idempotent — returns
+    True even when there was no subscription to remove."""
+    platform_user_id = str(telegram_user_id)
+    try:
+      async with get_session() as session:
+        await session.execute(
+          delete(TradeBroadcastSubscription).where(
+            TradeBroadcastSubscription.platform == platform,
+            TradeBroadcastSubscription.platform_user_id == platform_user_id,
+          )
+        )
+      log.info("Trade broadcast unsubscribed telegram_user_id=%s", telegram_user_id)
+      return True
+    except Exception as exc:
+      log.exception(
+        "Failed to unsubscribe telegram_user_id=%s from broadcasts: %s",
+        telegram_user_id,
+        exc,
+      )
+      return False
+
+  async def is_subscribed(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool:
+    """Whether a bot user is currently opted in to completed-trade broadcasts."""
+    platform_user_id = str(telegram_user_id)
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TradeBroadcastSubscription).where(
+            TradeBroadcastSubscription.platform == platform,
+            TradeBroadcastSubscription.platform_user_id == platform_user_id,
+          )
+        )
+        return result.scalars().first() is not None
+    except Exception as exc:
+      log.exception(
+        "Failed to read broadcast subscription telegram_user_id=%s: %s",
+        telegram_user_id,
+        exc,
+      )
+      return False
+
+  async def list_broadcast_targets(
+    self,
+    account_id: str,
+    market: MarketTypeEnum | None,
+    gateway: str | None,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> list[str]:
+    """Return the platform user ids that should receive a completed-trade DM for
+    the account identified by ``(account_id, market, gateway)``: those both
+    linked to a matching account *and* opted in to broadcasts.
+
+    Scoped by ``account_id`` + ``market`` + ``gateway`` (with a NULL-gateway
+    fallback, mirroring the trade/account upsert path) so a bare id reused
+    across gateways doesn't leak a completion to the wrong owner.
+    """
+    try:
+      async with get_session() as session:
+        account_filters = [Account.account_id == account_id]
+        if market is not None:
+          account_filters.append(Account.market == market)
+        if gateway is not None:
+          account_filters.append(
+            or_(Account.gateway == gateway, Account.gateway.is_(None))
+          )
+        result = await session.execute(
+          select(AccountBotLink.platform_user_id)
+          .join(Account, Account.id == AccountBotLink.account_id)
+          .join(
+            TradeBroadcastSubscription,
+            (TradeBroadcastSubscription.platform == AccountBotLink.platform)
+            & (
+              TradeBroadcastSubscription.platform_user_id
+              == AccountBotLink.platform_user_id
+            ),
+          )
+          .where(
+            AccountBotLink.platform == platform,
+            *account_filters,
+          )
+        )
+        # dict.fromkeys de-dupes while keeping order — a user linked to two
+        # matching account rows must be notified once, not twice.
+        return list(dict.fromkeys(result.scalars().all()))
+    except Exception as exc:
+      log.exception(
+        "Failed to resolve broadcast targets for account_id=%s: %s",
+        account_id,
+        exc,
+      )
+      return []
 
 
 class SqlAlchemySettingRepository:
@@ -983,7 +1225,10 @@ class SqlAlchemyTradeRepository:
       return None
 
     is_running = self._policy.is_open(event.status)
-    price = event.closed_price if event.closed_price is not None else event.opened_price
+    # A close price of 0 means the worker had none to report (seen on FLATTED
+    # events) — no instrument ever closes at 0, so treat it like a missing
+    # value and keep the open price rather than persisting a bogus 0.
+    price = event.closed_price if event.closed_price else event.opened_price
     market = MarketTypeEnum(event.market)
 
     async with get_session() as session:

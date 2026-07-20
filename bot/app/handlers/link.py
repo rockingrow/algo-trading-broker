@@ -4,8 +4,6 @@ app/handlers/link.py — FSM step: receive the UUID and link the account.
 
 from __future__ import annotations
 
-import uuid
-
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -15,6 +13,7 @@ from app import emojis
 from app.presenters import messages
 from app.services.broker_client import BrokerClientUser
 from app.states import LinkAccount
+from app.utils.invite import parse_code
 
 router = Router(name="link")
 
@@ -48,26 +47,28 @@ async def cmd_link(
   await start_link_flow(message, state, already_linked=account is not None)
 
 
-# Only treat non-command text as a candidate token while onboarding.
-@router.message(LinkAccount.waiting_for_token, F.text & ~F.text.startswith("/"))
-async def receive_token(
-  message: Message, state: FSMContext, broker: BrokerClientUser
-) -> None:
-  raw = (message.text or "").strip()
-  try:
-    token = str(uuid.UUID(raw))
-  except ValueError:
+async def apply_link_token(
+  message: Message, state: FSMContext, broker: BrokerClientUser, raw: str
+) -> bool:
+  """Link the account behind code *raw* to the sender, answering with the
+  outcome either way; returns whether it worked.
+
+  Shared by the FSM step below (the user typed the code) and start.py's
+  deep-link entry (the code came from an invite URL) — the latter falls back to
+  prompting manually when this returns False."""
+  token = parse_code(raw)
+  if token is None:
     await message.answer(
       f"{emojis.WARNING} Invalid code. Please send the correct <b>UUID</b> your admin gave you."
     )
-    return
+    return False
 
   account = await broker.link(token, message.from_user.id)
   if account is None:
     await message.answer(
       f"{emojis.CROSS} No account found with this code. Double-check it or contact your admin."
     )
-    return
+    return False
 
   await state.clear()
   headline = (
@@ -83,6 +84,15 @@ async def receive_token(
     + "\n\n"
     + messages.UserMessages.COMMANDS_HINT
   )
+  return True
+
+
+# Only treat non-command text as a candidate token while onboarding.
+@router.message(LinkAccount.waiting_for_token, F.text & ~F.text.startswith("/"))
+async def receive_token(
+  message: Message, state: FSMContext, broker: BrokerClientUser
+) -> None:
+  await apply_link_token(message, state, broker, message.text or "")
 
 
 # Non-text messages (photo, sticker…) while onboarding: prompt for UUID as text.

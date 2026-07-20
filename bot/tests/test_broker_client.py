@@ -293,6 +293,43 @@ async def test_admin_flat_scoped_body_includes_market_and_gateway():
   await client.aclose()
 
 
+async def test_broadcast_subscribe_unsubscribe_status_paths():
+  seen = []
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    seen.append((request.method, request.url.path))
+    return httpx.Response(200, json={"subscribed": True})
+
+  client = _client(handler)
+  await client.subscribe_broadcast(555)
+  await client.unsubscribe_broadcast(555)
+  await client.get_broadcast_subscription(555)
+  assert seen == [
+    ("POST", "/v1/telegram/555/broadcast/subscribe"),
+    ("POST", "/v1/telegram/555/broadcast/unsubscribe"),
+    ("GET", "/v1/telegram/555/broadcast"),
+  ]
+  await client.aclose()
+
+
+async def test_admin_link_telegram_path_and_body():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["body"] = request.content.decode()
+    return httpx.Response(200, json={"account_id": "acc-1", "linked_user_ids": ["999"]})
+
+  client = _admin_client(handler)
+  res = await client.admin_link_telegram("3fa85f64-5717-4562-b3fc-2c963f66afa6", 999)
+  assert res["linked_user_ids"] == ["999"]
+  assert captured["path"] == (
+    "/admin/accounts/3fa85f64-5717-4562-b3fc-2c963f66afa6/link-telegram"
+  )
+  assert '"telegram_user_id":999' in captured["body"].replace(" ", "")
+  await client.aclose()
+
+
 async def test_admin_rotate_settings_toggle_paths():
   seen = []
 

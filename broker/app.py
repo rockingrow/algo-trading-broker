@@ -11,6 +11,7 @@ from broker.db.repository import (
   SqlAlchemyAccountRepository,
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
+  SqlAlchemyTradeBroadcastRepository,
   SqlAlchemyTradeRepository,
 )
 from broker.helpers import emoji_constants as em
@@ -30,6 +31,7 @@ from broker.services.signal_processing_service import (
   SignalWorker,
 )
 from broker.services.signal_retry_job import SignalRetryJob
+from broker.services.trade_broadcast_service import TradeBroadcastService
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -53,8 +55,14 @@ async def lifespan(app: FastAPI):
   publisher = NatsPublisher(connection=nats_client)
   setting_repo = SqlAlchemySettingRepository()
   signal_repo = SqlAlchemySignalRepository()
+  trade_broadcast_service = TradeBroadcastService(
+    broadcast_repository=SqlAlchemyTradeBroadcastRepository(),
+    setting_repository=setting_repo,
+  )
   consumer = TradeEventConsumer(
-    trade_repository=SqlAlchemyTradeRepository(), connection=nats_client
+    trade_repository=SqlAlchemyTradeRepository(),
+    connection=nats_client,
+    broadcast_service=trade_broadcast_service,
   )
   system_consumer = SystemEventConsumer(
     setting_repository=setting_repo,

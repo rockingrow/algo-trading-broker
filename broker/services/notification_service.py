@@ -52,12 +52,73 @@ def _box(text: str) -> str:
 
 
 class Notification(abc.ABC):
-  """Abstract base class defining the interface for notification channels."""
+  """Base class for Telegram notification channels.
 
-  @abc.abstractmethod
-  async def send_message(self, message_text: str) -> None:
-    """Deliver *message_text* to the channel."""
-    raise NotImplementedError
+  Owns everything the channels share: the enabled flag, the credentials, the
+  Bot API ``url`` built from the token, and the send itself (payload, HTTP
+  call, error logging). Subclasses only customise *which* credentials they
+  default to, how the body is formatted (:meth:`format_text`) and whether a
+  send should be skipped (:meth:`should_send`)."""
+
+  #: Name of the setting a subclass reads its token from, for warning messages.
+  token_setting_name = "TELEGRAM_BOT_TOKEN"
+
+  def __init__(self, chat_id: str | None = None, bot_token: str | None = None):
+    self.enabled = settings.TELEGRAM_ENABLED
+    self.bot_token = bot_token
+    self.chat_id = chat_id
+
+  @property
+  def url(self) -> str:
+    """Bot API sendMessage endpoint for this channel's token."""
+    return f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+
+  def format_text(self, message_text: str) -> str:
+    """Hook: transform the body just before sending. Default is as-is."""
+    return message_text
+
+  async def should_send(self) -> bool:
+    """Hook: per-send veto, checked after the enabled/credential guards."""
+    return True
+
+  async def send_message(self, message_text: str, chat_id: str | None = None) -> bool:
+    """Deliver *message_text* (HTML) to *chat_id*, or to the channel's own
+    ``chat_id`` when omitted. Returns True on a 200 send, False on any
+    skip/failure — never raises, since notifications are best-effort."""
+    if not self.enabled:
+      logger.debug("Telegram notifications are disabled in settings.")
+      return False
+
+    target = chat_id if chat_id is not None else self.chat_id
+    if not self.bot_token or not target:
+      logger.warning(
+        "%s and a chat id must be set for notifications.", self.token_setting_name
+      )
+      return False
+
+    if not await self.should_send():
+      return False
+
+    payload = {
+      "chat_id": target,
+      "text": self.format_text(message_text),
+      "parse_mode": "HTML",
+    }
+
+    try:
+      async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        response = await client.post(self.url, json=payload)
+      if response.status_code != 200:
+        logger.error(
+          "Failed to send Telegram message chat_id=%s: %s", target, response.text
+        )
+        return False
+      return True
+    except Exception as exc:
+      logger.exception(
+        "Exception sending Telegram message chat_id=%s: %s", target, exc
+      )
+      return False
 
 
 class TelegramNotification(Notification):
@@ -70,42 +131,44 @@ class TelegramNotification(Notification):
     bot_token: str | None = None,
     setting_repository: SettingRepository | None = None,
   ):
-    self.enabled = settings.TELEGRAM_ENABLED
-    self.bot_token = bot_token if bot_token is not None else settings.TELEGRAM_BOT_TOKEN
-    self.chat_id = chat_id if chat_id is not None else settings.TELEGRAM_CHAT_ID
+    super().__init__(
+      chat_id=chat_id if chat_id is not None else settings.TELEGRAM_CHAT_ID,
+      bot_token=bot_token if bot_token is not None else settings.TELEGRAM_BOT_TOKEN,
+    )
     self._setting_repository = setting_repository
 
-  async def send_message(self, message_text: str) -> None:
-    if not self.enabled:
-      logger.debug("Telegram notifications are disabled in settings.")
-      return
+  def format_text(self, message_text: str) -> str:
+    return _box(message_text)
 
-    if self._setting_repository is not None:
-      silent = await self._setting_repository.get(SILENT_SIGNAL)
-      if silent == "1":
-        logger.debug("SILENT_SIGNAL is enabled; skipping notification.")
-        return
+  async def should_send(self) -> bool:
+    if self._setting_repository is None:
+      return True
+    silent = await self._setting_repository.get(SILENT_SIGNAL)
+    if silent == "1":
+      logger.debug("SILENT_SIGNAL is enabled; skipping notification.")
+      return False
+    return True
 
-    if not self.bot_token or not self.chat_id:
-      logger.warning(
-        "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set for notifications."
-      )
-      return
 
-    url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-    payload = {
-      "chat_id": self.chat_id,
-      "text": _box(message_text),
-      "parse_mode": "HTML",
-    }
+class OwnerBroadcastNotifier(Notification):
+  """Sends a Telegram DM to a specific chat id via the bot-service bot token.
 
-    try:
-      async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-        response = await client.post(url, json=payload)
-      if response.status_code != 200:
-        logger.error("Failed to send Telegram message: %s", response.text)
-    except Exception as exc:
-      logger.exception("Exception sending Telegram message: %s", exc)
+  Unlike :class:`TelegramNotification` (one fixed chat, wraps every message in a
+  ``<pre>`` box), this targets an arbitrary ``chat_id`` per call and sends the
+  HTML body as-is — completed-trade broadcasts carry their own ``<b>`` markup.
+
+  The token defaults to ``BOT_TELEGRAM_TOKEN`` (the bot users actually DM),
+  not the broker's own notification bot: a user can only be messaged by the bot
+  they started. Silently no-ops when Telegram is disabled or the token is
+  unset, so a deployment that doesn't share the bot token simply never
+  broadcasts."""
+
+  token_setting_name = "BOT_TELEGRAM_TOKEN"
+
+  def __init__(self, bot_token: str | None = None) -> None:
+    super().__init__(
+      bot_token=bot_token if bot_token is not None else settings.BOT_TELEGRAM_TOKEN
+    )
 
 
 # ── Telegram error-log hook ────────────────────────────────────────────────

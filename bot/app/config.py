@@ -36,9 +36,10 @@ class BotSettings(BaseSettings):
   BOT_BROKER_BASE_URL: str = "http://broker:8080"
 
   # Bot behaviour.
+  # Page sizes are not here: they're sized to each table's width, so they live
+  # as code constants in app/constants.py rather than as deployment knobs.
   BOT_LOG_LEVEL: str = "INFO"
   BOT_REQUEST_TIMEOUT: float = 10.0
-  BOT_VIEW_TRADES_PER_PAGE: int = 5
 
   @property
   def admin_ids(self) -> set[int]:

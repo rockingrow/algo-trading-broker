@@ -118,6 +118,9 @@ class BrokerClientUser(BrokerClient):
     FLAT = "{telegram_id}/commands/flat"
     PREVENT = "{telegram_id}/commands/prevent"
     UNLINK = "{telegram_id}/unlink"
+    BROADCAST = "{telegram_id}/broadcast"
+    BROADCAST_SUBSCRIBE = "{telegram_id}/broadcast/subscribe"
+    BROADCAST_UNSUBSCRIBE = "{telegram_id}/broadcast/unsubscribe"
 
   async def link(self, token: str, telegram_user_id: int) -> Optional[dict[str, Any]]:
     """Bind a Telegram user to an account via its link token (None if invalid)."""
@@ -204,6 +207,39 @@ class BrokerClientUser(BrokerClient):
     )
     return resp is not None and resp.status_code < 400
 
+  async def get_broadcast_subscription(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Whether the user is opted in to completed-trade broadcast DMs
+    (``{"subscribed": bool}``), or None on failure."""
+    return self._json_or_none(
+      await self._request(
+        "GET", self._path(self.ENDPOINTS.BROADCAST, telegram_id=telegram_user_id)
+      )
+    )
+
+  async def subscribe_broadcast(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Opt the user in to completed-trade broadcast DMs."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.BROADCAST_SUBSCRIBE, telegram_id=telegram_user_id),
+      )
+    )
+
+  async def unsubscribe_broadcast(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Opt the user out of completed-trade broadcast DMs."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.BROADCAST_UNSUBSCRIBE, telegram_id=telegram_user_id),
+      )
+    )
+
 
 class BrokerClientAdmin(BrokerClient):
   """Admin endpoints, reusing the broker's existing management API.
@@ -220,6 +256,7 @@ class BrokerClientAdmin(BrokerClient):
     ACCOUNTS = "accounts"
     FLAT = "flat"
     ROTATE_TOKEN = "accounts/{account_id}/link-token/rotate"
+    LINK_TELEGRAM = "accounts/{account_uuid}/link-telegram"
     SETTINGS = "settings"
     SETTINGS_TOGGLE = "settings/{slug}"
     NOTIFICATION_TIMEZONE = "settings/notification-timezone"
@@ -291,10 +328,27 @@ class BrokerClientAdmin(BrokerClient):
     )
 
   async def admin_rotate_token(self, account_id: str) -> Optional[dict[str, Any]]:
-    """Rotate an account's Telegram link token; returns the new token."""
+    """Rotate an account's Telegram link token; returns the new token.
+
+    Rotating also unlinks every Telegram user currently bound to the account
+    (broker-side), so the new token is the only way back in."""
     return self._json_or_none(
       await self._request(
         "POST", self._path(self.ENDPOINTS.ROTATE_TOKEN, account_id=account_id)
+      )
+    )
+
+  async def admin_link_telegram(
+    self, account_uuid: str, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Admin-bind a Telegram user to an account (by its row UUID), bypassing the
+    token flow. Returns the account (with linked_user_ids), or None on failure /
+    unknown account."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.LINK_TELEGRAM, account_uuid=account_uuid),
+        json={"telegram_user_id": telegram_user_id},
       )
     )
 
