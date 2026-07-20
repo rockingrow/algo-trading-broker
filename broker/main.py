@@ -14,7 +14,7 @@ import uvicorn
 
 from broker.app import create_app
 from broker.settings import settings
-from broker.logger import get_logger
+from broker.logger import get_logger, uvicorn_log_config
 
 log = get_logger("broker")
 
@@ -39,6 +39,7 @@ def main() -> None:
     port=settings.WEBHOOK_PORT,
     workers=1,
     log_level=settings.LOG_LEVEL.lower(),
+    log_config=uvicorn_log_config(),
     loop="asyncio",  # uvloop's libuv DNS can't resolve Docker service names on Linux 24.04
     timeout_keep_alive=settings.WEBHOOK_KEEPALIVE_TIMEOUT,
   )

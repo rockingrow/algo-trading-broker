@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Timezone in all log output** — Uvicorn access logs and application logs
+  now include the local timezone suffix (e.g. `ICT`, `UTC`, `+0700`) in every
+  timestamp, so operators can tell at a glance which clock the log refers to.
+  Uvicorn receives a custom `log_config` from `uvicorn_log_config()`; the
+  application formatter's `datefmt` is updated to match.
+- **422 validation errors are now logged** — A `RequestValidationError`
+  exception handler logs every 422 response at `WARNING` level with method,
+  path, and Pydantic validation error details. Previously, FastAPI's default
+  handler returned the 422 silently — the only trace was uvicorn's one-line
+  access log with no payload context.
 - **Admin command prefix + menu divider** — Bot admin commands are now prefixed
   `admin_` (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
   `/admin_flat`, `/admin_rotate`, `/admin_settings`) so they group as a distinct
@@ -85,6 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the account and clears any active-session pointer at it, so the freshly
   issued token is the only way back in. Previously already-linked users kept
   their access.
+
+### Added
 
 - **Telegram bot service** (`bot/`) — A new, self-contained **aiogram v3**
   service serving two roles from one process: endusers and admins. It is a
