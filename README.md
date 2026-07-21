@@ -862,10 +862,10 @@ repairs the row.
 | Command | Admin action | Notes |
 | ------- | ------------ | ----- |
 | `/flat` | `FLAT` | Close positions for the **active** account. |
-| `/prevent` | `BLOCK_ENTRIES` | Block new entries (worker must honor it). |
-| `/allow` | `ALLOW_ENTRIES` | Re-enable new entries. |
+| `/prevent` | `BLOCK_SIGNAL` | Block new signals (worker must honor it). |
+| `/allow` | `ALLOW_SIGNAL` | Re-enable new signals. |
 
-> `BLOCK_ENTRIES` / `ALLOW_ENTRIES` are scoped by `account_id` in the `AdminSignal`
+> `BLOCK_SIGNAL` / `ALLOW_SIGNAL` are scoped by `account_id` in the `AdminSignal`
 > payload. Enforcement is the **worker's** responsibility — worker code lives
 > outside this repo, so the bot/broker only publish the directive.
 

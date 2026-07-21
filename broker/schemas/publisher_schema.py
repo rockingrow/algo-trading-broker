@@ -37,10 +37,10 @@ class AdminActionEnum(str, Enum):
   """Admin actions that can be published to the ADMIN topic."""
 
   FLAT = "FLAT"
-  # Block / allow new entries for a scope (strategy/symbol/account). Workers
+  # Block / allow new signals for a scope (strategy/symbol/account). Workers
   # must honor these to take effect — enforcement lives in the worker code.
-  BLOCK_ENTRIES = "BLOCK_ENTRIES"
-  ALLOW_ENTRIES = "ALLOW_ENTRIES"
+  BLOCK_SIGNAL = "BLOCK_SIGNAL"
+  ALLOW_SIGNAL = "ALLOW_SIGNAL"
 
 
 class SystemActionEnum(str, Enum):

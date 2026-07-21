@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Renamed admin actions `BLOCK_ENTRIES`/`ALLOW_ENTRIES` →
+  `BLOCK_SIGNAL`/`ALLOW_SIGNAL`** — The `AdminActionEnum` members and their
+  on-the-wire values (published by the bot's `/prevent` and `/allow` commands)
+  are renamed for clarity. Workers matching on the old `BLOCK_ENTRIES` /
+  `ALLOW_ENTRIES` strings must be updated to the new values.
 - **Account-scoped ADMIN actions now use private per-account subjects** — Any
   admin action carrying an `account_id` (e.g. an account-scoped `/admin/flat`)
   is no longer fanned out on the shared `ADMIN` subject. It is published to the

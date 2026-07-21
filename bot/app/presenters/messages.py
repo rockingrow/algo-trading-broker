@@ -15,11 +15,11 @@ from app.utils.table import ACTIVE_MARK, render_table
 from app.utils.timezone import SHORT_TIME_FMT, format_local_time, format_utc_label
 
 # Broker wire action → the bot command that triggered it. Users type /prevent,
-# not BLOCK_ENTRIES; echoing the enum back leaks broker vocabulary at them.
+# not BLOCK_SIGNAL; echoing the enum back leaks broker vocabulary at them.
 _ACTION_LABEL = {
   "FLAT": "Flat",
-  "BLOCK_ENTRIES": "Prevent",
-  "ALLOW_ENTRIES": "Allow",
+  "BLOCK_SIGNAL": "Prevent",
+  "ALLOW_SIGNAL": "Allow",
 }
 
 # Table cells must stay single-width, so the status shows as an abbreviation

@@ -57,7 +57,7 @@ again inside a `SYSTEM.RETRY_SIGNALS` replay can drop the duplicate by id.
 
 Payload is an `AdminSignal` (`action`, `timestamp`, optional `strategy` /
 `symbol` / `account_id` / `market` / `gateway`). `action` is one of
-`AdminActionEnum`: `FLAT`, `BLOCK_ENTRIES`, `ALLOW_ENTRIES`.
+`AdminActionEnum`: `FLAT`, `BLOCK_SIGNAL`, `ALLOW_SIGNAL`.
 
 **Routing depends on whether the directive is scoped to a single account:**
 
@@ -72,8 +72,8 @@ Payload is an `AdminSignal` (`action`, `timestamp`, optional `strategy` /
   directive). Published to the shared `ADMIN` subject and fanned out to **every**
   connected worker, which filters for itself client-side.
 
-`BLOCK_ENTRIES` / `ALLOW_ENTRIES` are always account-scoped today (a user
-toggling new-entry blocking for their own account), so they always go to the
+`BLOCK_SIGNAL` / `ALLOW_SIGNAL` are always account-scoped today (a user
+toggling new-signal blocking for their own account), so they always go to the
 private subject.
 
 | Action | Scope | Subject | Example |
@@ -81,8 +81,8 @@ private subject.
 | `FLAT` | one account | `ADMIN.FOREX.MT5.123456` (private) | [`admin.flat.json`](admin.flat.json) |
 | `FLAT` | strategy / symbol | `ADMIN` (broadcast) | [`admin.flat.broadcast.json`](admin.flat.broadcast.json) |
 | `FLAT` | everything | `ADMIN` (broadcast) | [`admin.flat.all.json`](admin.flat.all.json) |
-| `BLOCK_ENTRIES` | one account | `ADMIN.FOREX.MT5.123456` (private) | [`admin.block_entries.json`](admin.block_entries.json) |
-| `ALLOW_ENTRIES` | one account | `ADMIN.FOREX.MT5.123456` (private) | [`admin.allow_entries.json`](admin.allow_entries.json) |
+| `BLOCK_SIGNAL` | one account | `ADMIN.FOREX.MT5.123456` (private) | [`admin.block_signal.json`](admin.block_signal.json) |
+| `ALLOW_SIGNAL` | one account | `ADMIN.FOREX.MT5.123456` (private) | [`admin.allow_signal.json`](admin.allow_signal.json) |
 
 ## `SYSTEM` — configuration & handshake replies (broker side)
 

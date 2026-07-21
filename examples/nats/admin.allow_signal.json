@@ -1,5 +1,5 @@
 {
-  "action": "ALLOW_ENTRIES",
+  "action": "ALLOW_SIGNAL",
   "timestamp": "2026-06-02T08:00:00+00:00",
   "account_id": "123456",
   "market": "FOREX",
