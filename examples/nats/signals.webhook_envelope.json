@@ -1,0 +1,39 @@
+{
+  "payload": {
+    "strategy": "wt_bb_atr",
+    "symbol": "BTCUSDT",
+    "timeframe": "15",
+    "timestamp": "2026-06-02T10:15:00Z",
+    "position": {
+      "action": "LONG",
+      "price": 68250.5,
+      "quantity": 0.05,
+      "sl": 67800.0,
+      "tp1": 68900.0,
+      "tp2": 69500.0,
+      "risk_percent": 1.0,
+      "tp1_percent": 50.0,
+      "move_sl_to_be": true,
+      "is_running": true,
+      "is_scale_position": false,
+      "scale_strategy": null,
+      "scaling": null
+    },
+    "indicators": {
+      "wt1": -53.2,
+      "wt2": -48.9,
+      "close": 68250.5,
+      "atr_val": 210.4,
+      "in_session": true,
+      "vol_spike": false
+    },
+    "inputs": {
+      "risk_percent": 1.0,
+      "atr_len": 14,
+      "atr_sl_mult": 1.5,
+      "min_rr_ratio": 1.8,
+      "tp1_qty_pc": 50.0
+    },
+    "token": "shared-webhook-token"
+  }
+}
