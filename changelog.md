@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Grouped broker settings into nested `*Settings` sub-models** — The flat
+  `Settings` fields are reorganised into focused sub-models
+  (`settings.webhook`, `settings.broker_api`, `settings.nats`,
+  `settings.postgres`, `settings.logging`, `settings.docs`, `settings.telegram`,
+  `settings.notification`, `settings.signal`, `settings.jetstream`), e.g.
+  `settings.WEBHOOK_HOST` → `settings.webhook.HOST`. Env var names are unchanged
+  (each sub-model carries an `env_prefix`), so `.env` files and deployments need
+  no changes; the `settings.broker_url` / `nats_url` / `postgres_dsn`
+  convenience properties are preserved too.
 - **Renamed admin actions `BLOCK_ENTRIES`/`ALLOW_ENTRIES` →
   `BLOCK_SIGNAL`/`ALLOW_SIGNAL`** — The `AdminActionEnum` members and their
   on-the-wire values (published by the bot's `/prevent` and `/allow` commands)

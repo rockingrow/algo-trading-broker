@@ -172,7 +172,7 @@ async def test_log_signal_seeds_status_queued_and_max_attempts(monkeypatch):
   await SqlAlchemySignalRepository().log_signal(_payload())
   row = session.added[0]
   assert row.status == SignalStatusEnum.QUEUED
-  assert row.attempts == settings.SIGNAL_MAX_ATTEMPTS
+  assert row.attempts == settings.signal.MAX_ATTEMPTS
   assert row.last_attempt is None
 
 

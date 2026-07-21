@@ -988,7 +988,7 @@ class SqlAlchemySignalRepository:
       is_scale_position=bool(pos.is_scale_position),
       scale_strategy=pos.scale_strategy,
       status=SignalStatusEnum.QUEUED,
-      attempts=settings.SIGNAL_MAX_ATTEMPTS,
+      attempts=settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       indicators=json.loads(payload.indicators.model_dump_json())
       if payload.indicators is not None

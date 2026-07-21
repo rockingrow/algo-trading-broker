@@ -89,8 +89,8 @@ class NatsClient:
       "closed_cb": self._on_closed,
       "error_cb": self._on_error,
     }
-    if settings.NATS_TOKEN:
-      opts["token"] = settings.NATS_TOKEN
+    if settings.nats.TOKEN:
+      opts["token"] = settings.nats.TOKEN
 
     self._nc = await nats_lib.connect(**opts)
     log.info("NATS connected to %s", settings.nats_url)

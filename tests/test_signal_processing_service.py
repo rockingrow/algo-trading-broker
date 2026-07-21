@@ -39,7 +39,7 @@ class FakeSignalRepository:
     self._rows[row_id] = SimpleNamespace(
       id=uuid.UUID(row_id),
       status=SignalStatusEnum.QUEUED,
-      attempts=settings.SIGNAL_MAX_ATTEMPTS,
+      attempts=settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       raw=payload.model_dump(mode="json"),
     )
@@ -294,7 +294,7 @@ async def test_handle_enqueued_publish_failure_records_attempt_and_returns():
   # Row is still QUEUED with one attempt consumed.
   row = signal_repo._rows[result["signal_id"]]
   assert row.status == SignalStatusEnum.QUEUED
-  assert row.attempts == settings.SIGNAL_MAX_ATTEMPTS - 1
+  assert row.attempts == settings.signal.MAX_ATTEMPTS - 1
 
 
 # ── Retry path (retry job) ───────────────────────────────────────────
