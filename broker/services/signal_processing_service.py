@@ -104,7 +104,7 @@ def _attempt_number_for_notification(attempts_before: int) -> int | None:
   """
   if attempts_before > 2:
     return None
-  return settings.SIGNAL_MAX_ATTEMPTS - attempts_before + 1
+  return settings.signal.MAX_ATTEMPTS - attempts_before + 1
 
 
 class SignalProcessingService:
@@ -174,7 +174,7 @@ class SignalProcessingService:
     return await self._fanout(
       signal_id=signal_id,
       payload=payload,
-      attempts_before=settings.SIGNAL_MAX_ATTEMPTS,
+      attempts_before=settings.signal.MAX_ATTEMPTS,
     )
 
   # ── Retry path (called from the retry job) ─────────────────────────
@@ -339,13 +339,13 @@ class SignalWorker:
     try:
       self._sub = await self._conn.js.pull_subscribe(
         subject=JETSTREAM_SIGNAL_SUBJECT_FILTER,
-        durable=settings.JETSTREAM_SIGNAL_CONSUMER,
+        durable=settings.jetstream.SIGNAL_CONSUMER,
         stream=JETSTREAM_SIGNAL_STREAM,
       )
     except BadRequestError as exc:
       log.error(
         "Failed to create JetStream pull consumer '%s': %s",
-        settings.JETSTREAM_SIGNAL_CONSUMER,
+        settings.jetstream.SIGNAL_CONSUMER,
         exc,
       )
       raise
@@ -355,7 +355,7 @@ class SignalWorker:
     log.info(
       "JetStream signal worker started stream=%s consumer=%s subject=%s",
       JETSTREAM_SIGNAL_STREAM,
-      settings.JETSTREAM_SIGNAL_CONSUMER,
+      settings.jetstream.SIGNAL_CONSUMER,
       JETSTREAM_SIGNAL_SUBJECT_FILTER,
     )
 
@@ -379,8 +379,8 @@ class SignalWorker:
     while not self._stop.is_set():
       try:
         msgs = await self._sub.fetch(
-          settings.JETSTREAM_FETCH_BATCH,
-          timeout=settings.JETSTREAM_FETCH_TIMEOUT_SECONDS,
+          settings.jetstream.FETCH_BATCH,
+          timeout=settings.jetstream.FETCH_TIMEOUT_SECONDS,
         )
       except NatsTimeoutError:
         continue

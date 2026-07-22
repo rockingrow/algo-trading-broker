@@ -96,7 +96,7 @@ class Signal(Base):
     server_default=SignalStatusEnum.QUEUED.value,
     index=True,
   )
-  # Remaining fan-out attempts. Seeded from ``settings.SIGNAL_MAX_ATTEMPTS``
+  # Remaining fan-out attempts. Seeded from ``settings.signal.MAX_ATTEMPTS``
   # on insert and decremented on every failed attempt; when it would drop to
   # ``0`` the row is flipped to ``FAILED`` instead.
   attempts: Mapped[int] = mapped_column(

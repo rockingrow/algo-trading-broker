@@ -10,7 +10,7 @@ from broker.helpers.timezone_helper import (
 from broker.settings import settings
 
 DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS = (
-  settings.DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS
+  settings.notification.DEFAULT_TIMEZONE_OFFSET_HOURS
 )
 
 

@@ -64,7 +64,7 @@ class Notification(abc.ABC):
   token_setting_name = "TELEGRAM_BOT_TOKEN"
 
   def __init__(self, chat_id: str | None = None, bot_token: str | None = None):
-    self.enabled = settings.TELEGRAM_ENABLED
+    self.enabled = settings.telegram.ENABLED
     self.bot_token = bot_token
     self.chat_id = chat_id
 
@@ -132,8 +132,8 @@ class TelegramNotification(Notification):
     setting_repository: SettingRepository | None = None,
   ):
     super().__init__(
-      chat_id=chat_id if chat_id is not None else settings.TELEGRAM_CHAT_ID,
-      bot_token=bot_token if bot_token is not None else settings.TELEGRAM_BOT_TOKEN,
+      chat_id=chat_id if chat_id is not None else settings.telegram.CHAT_ID,
+      bot_token=bot_token if bot_token is not None else settings.telegram.BOT_TOKEN,
     )
     self._setting_repository = setting_repository
 
@@ -167,7 +167,7 @@ class OwnerBroadcastNotifier(Notification):
 
   def __init__(self, bot_token: str | None = None) -> None:
     super().__init__(
-      bot_token=bot_token if bot_token is not None else settings.BOT_TELEGRAM_TOKEN
+      bot_token=bot_token if bot_token is not None else settings.telegram.SERVICE_BOT_TOKEN
     )
 
 
@@ -189,8 +189,8 @@ class TelegramLogNotification(TelegramNotification):
 
   def __init__(self) -> None:
     super().__init__(
-      chat_id=settings.TELEGRAM_LOG_CHAT_ID or settings.TELEGRAM_CHAT_ID,
-      bot_token=settings.TELEGRAM_LOG_BOT_TOKEN or settings.TELEGRAM_BOT_TOKEN,
+      chat_id=settings.telegram.LOG_CHAT_ID or settings.telegram.CHAT_ID,
+      bot_token=settings.telegram.LOG_BOT_TOKEN or settings.telegram.BOT_TOKEN,
     )
 
 
@@ -255,7 +255,7 @@ class TelegramLogHandler(logging.Handler):
   # ── internals ────────────────────────────────────────────────────
   def _is_duplicate(self, message: str) -> bool:
     """Return True if *message* was forwarded within the dedup window."""
-    window = settings.TELEGRAM_LOG_DEDUP_WINDOW
+    window = settings.telegram.LOG_DEDUP_WINDOW
     now = time.monotonic()
     # Prune stale entries so the dict cannot grow unbounded.
     self._recent = {msg: ts for msg, ts in self._recent.items() if now - ts < window}

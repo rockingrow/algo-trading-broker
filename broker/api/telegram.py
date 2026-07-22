@@ -243,7 +243,7 @@ def get_telegram_router() -> APIRouter:
     publisher: SignalPublisher = Depends(get_publisher),
   ) -> CommandResultResponse:
     action = (
-      AdminActionEnum.BLOCK_ENTRIES if body.enabled else AdminActionEnum.ALLOW_ENTRIES
+      AdminActionEnum.BLOCK_SIGNAL if body.enabled else AdminActionEnum.ALLOW_SIGNAL
     )
     await publisher.publish_admin_signal(
       action=action,

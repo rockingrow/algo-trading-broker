@@ -44,7 +44,7 @@ admin `/admin_flat`, since the position is over either way and you did not close
 it yourself. Each DM carries the account, gateway, symbol, action, status, close
 price, quantity, balance and PnL.
 
-> ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_ENTRIES`/`ALLOW_ENTRIES` admin command
+> ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_SIGNAL`/`ALLOW_SIGNAL` admin command
 > over NATS (via the broker). The **worker** must be updated to honor it —
 > worker code lives outside this repo.
 

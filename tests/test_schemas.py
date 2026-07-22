@@ -11,6 +11,7 @@ from broker.schemas.publisher_schema import (
   AdminSignal,
   PublishTopicEnum,
   TradingSignal,
+  compose_admin_subject,
 )
 from broker.schemas.trade_event_schema import PositionEvent, PositionEventType
 from broker.schemas.webhook_schema import (
@@ -141,6 +142,22 @@ def test_publish_topic_enum_values():
   assert PublishTopicEnum.SIGNAL.value == "SIGNAL"
   assert PublishTopicEnum.ADMIN.value == "ADMIN"
   assert PublishTopicEnum.TRADE.value == "TRADE"
+
+
+def test_compose_admin_subject_from_enum_market():
+  from broker.schemas.account_schema import MarketTypeEnum
+
+  assert (
+    compose_admin_subject(MarketTypeEnum.FOREX, "MT5", "12345678")
+    == "ADMIN.FOREX.MT5.12345678"
+  )
+
+
+def test_compose_admin_subject_from_string_market():
+  assert (
+    compose_admin_subject("CRYPTO", "BINANCE", "7654321")
+    == "ADMIN.CRYPTO.BINANCE.7654321"
+  )
 
 
 # ── PositionEvent ──────────────────────────────────────────────────

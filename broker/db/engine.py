@@ -33,9 +33,9 @@ async def init_db() -> None:
 
   log.info(
     "Connecting to PostgreSQL: %s:%d/%s",
-    settings.POSTGRES_HOST,
-    settings.POSTGRES_PORT,
-    settings.POSTGRES_DB,
+    settings.postgres.HOST,
+    settings.postgres.PORT,
+    settings.postgres.DB,
   )
 
   _engine = create_async_engine(

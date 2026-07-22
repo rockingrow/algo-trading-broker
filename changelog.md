@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Grouped broker settings into nested `*Settings` sub-models** — The flat
+  `Settings` fields are reorganised into focused sub-models
+  (`settings.webhook`, `settings.broker_api`, `settings.nats`,
+  `settings.postgres`, `settings.logging`, `settings.docs`, `settings.telegram`,
+  `settings.notification`, `settings.signal`, `settings.jetstream`), e.g.
+  `settings.WEBHOOK_HOST` → `settings.webhook.HOST`. Env var names are unchanged
+  (each sub-model carries an `env_prefix`), so `.env` files and deployments need
+  no changes; the `settings.broker_url` / `nats_url` / `postgres_dsn`
+  convenience properties are preserved too.
+- **Renamed admin actions `BLOCK_ENTRIES`/`ALLOW_ENTRIES` →
+  `BLOCK_SIGNAL`/`ALLOW_SIGNAL`** — The `AdminActionEnum` members and their
+  on-the-wire values (published by the bot's `/prevent` and `/allow` commands)
+  are renamed for clarity. Workers matching on the old `BLOCK_ENTRIES` /
+  `ALLOW_ENTRIES` strings must be updated to the new values.
+- **Account-scoped ADMIN actions now use private per-account subjects** — Any
+  admin action carrying an `account_id` (e.g. an account-scoped `/admin/flat`)
+  is no longer fanned out on the shared `ADMIN` subject. It is published to the
+  private subject `ADMIN.<market>.<gateway>.<account_id>` (e.g.
+  `ADMIN.FOREX.MT5.12345678`) that only that account's worker is subscribed to,
+  so the `account_id` is never exposed to any other worker — each worker stays
+  fully isolated to its own account. Unscoped admin actions (no `account_id`,
+  e.g. a strategy/symbol-scoped or flat-everything directive) still broadcast on
+  the shared `ADMIN` subject. Workers subscribed to an account must subscribe to
+  their own `ADMIN.<market>.<gateway>.<account_id>` subject to keep receiving
+  account-scoped directives.
+
 ## [1.1.1] - 2026-07-21
 
 ### Added
