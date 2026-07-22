@@ -132,7 +132,7 @@ algo-trading-broker/
 │   ├── openapi.py       # Shared OpenAPI response definitions
 │   ├── constants.py     # Broker setting keys
 │   ├── logger.py        # Logging configuration
-│   └── settings.py      # Pydantic settings loaded from .env
+│   └── settings.py      # Pydantic settings (grouped sub-models) loaded from .env
 ├── bot/                 # Telegram bot service (aiogram v3) — see bot/README.md
 │   ├── app/             # handlers, services, middlewares, keyboards, presenters, utils
 │   └── tests/           # Bot pytest suite (own pyproject.toml / uv project)
@@ -188,7 +188,7 @@ The webhook endpoint is a fast enqueue-only path. Everything else runs from a ba
 1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
 2. **`SignalWorker`** (`broker/services/signal_processing_service.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
 3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
-4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.SIGNAL_RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
+4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.signal.RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
 5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
 
 **Retry-aware notifications**: the Telegram signal / FLAT message carries an `Attempt: N` line on the 2nd and 3rd attempts (not on the fresh first attempt) so the operator sees when the broker is retrying.
@@ -389,14 +389,22 @@ A few knobs live in [`broker/settings.py`](broker/settings.py) only, because the
 change behaviour rather than deployment topology. Override them via the
 environment if you really need to:
 
-| Setting | Default | Effect |
-| ------- | ------- | ------ |
-| `SIGNAL_MAX_ATTEMPTS` | `3` | Total fan-out attempts before a signal is marked `FAILED` |
-| `SIGNAL_RETRY_INTERVAL_SECONDS` | `15` | Retry-job tick, and the minimum gap between two attempts on one row |
-| `JETSTREAM_SIGNAL_CONSUMER` | `broker_signal_handler` | Durable consumer name on the `SIGNALS` stream |
-| `JETSTREAM_FETCH_BATCH` | `10` | Envelopes pulled per fetch |
-| `JETSTREAM_FETCH_TIMEOUT_SECONDS` | `1.0` | Pull-fetch timeout |
-| `DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS` | `7.0` | Fallback offset when the `notification_timezone` broker setting is unset |
+| Env var | In-code path | Default | Effect |
+| ------- | ------------ | ------- | ------ |
+| `SIGNAL_MAX_ATTEMPTS` | `settings.signal.MAX_ATTEMPTS` | `3` | Total fan-out attempts before a signal is marked `FAILED` |
+| `SIGNAL_RETRY_INTERVAL_SECONDS` | `settings.signal.RETRY_INTERVAL_SECONDS` | `15` | Retry-job tick, and the minimum gap between two attempts on one row |
+| `JETSTREAM_SIGNAL_CONSUMER` | `settings.jetstream.SIGNAL_CONSUMER` | `broker_signal_handler` | Durable consumer name on the `SIGNALS` stream |
+| `JETSTREAM_FETCH_BATCH` | `settings.jetstream.FETCH_BATCH` | `10` | Envelopes pulled per fetch |
+| `JETSTREAM_FETCH_TIMEOUT_SECONDS` | `settings.jetstream.FETCH_TIMEOUT_SECONDS` | `1.0` | Pull-fetch timeout |
+| `DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS` | `settings.notification.DEFAULT_TIMEZONE_OFFSET_HOURS` | `7.0` | Fallback offset when the `notification_timezone` broker setting is unset |
+
+> **Settings layout** — In code, settings are grouped into nested sub-models on
+> the `Settings` object (`settings.webhook`, `.broker_api`, `.nats`,
+> `.postgres`, `.logging`, `.docs`, `.telegram`, `.notification`, `.signal`,
+> `.jetstream`), e.g. `settings.webhook.HOST`. The **env var names are flat and
+> unchanged** — each sub-model carries an `env_prefix`, so `WEBHOOK_HOST` still
+> populates `settings.webhook.HOST`. The `settings.broker_url` / `nats_url` /
+> `postgres_dsn` convenience properties remain on the top-level object.
 
 ---
 
@@ -901,7 +909,7 @@ and local development.
 | `is_scale_position` | Boolean | Whether this signal scales into an existing position |
 | `scale_strategy` | String(50) (Nullable) | Scale-in strategy name (e.g. `add_on_pullback`) |
 | `status` | Enum | Delivery state: `QUEUED` on insert, `PUBLISHED` after a successful fan-out, `FAILED` once every attempt has been exhausted |
-| `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.SIGNAL_MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
+| `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.signal.MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
 | `last_attempt` | DateTime (Nullable) | Timestamp of the most recent fan-out attempt (`NULL` before the first attempt). Drives the retry job's minimum-gap filter. |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
