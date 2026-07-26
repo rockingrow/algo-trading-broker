@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`REJECTED` TRADE now covers the "worker already has an open position"
+  case** — When the broker fires a `SIGNAL` but the worker is already holding
+  an open position for that symbol/strategy, the worker refuses the new signal
+  and emits a `TRADE` (`PositionEvent`) with `status: "REJECTED"`, the same
+  status previously documented only for a hit MAX ORDER limit. No new status is
+  needed: `TradeStatusPolicy` already maps `REJECTED` →
+  `TradeStatusEnum.REJECTED` and `upsert_by_position_event` persists the row as
+  a terminal, non-running trade carrying the worker's `reject_reason` (e.g.
+  `"Open position already exists for BTCUSDT"`). The domain/schema comments,
+  `examples/nats/subjects.md`, and tests are broadened to recognise this second
+  reject trigger, and a new
+  [`trade.created.rejected.open_position.json`](examples/nats/trade.created.rejected.open_position.json)
+  example payload is added.
+
 - **Grouped broker settings into nested `*Settings` sub-models** — The flat
   `Settings` fields are reorganised into focused sub-models
   (`settings.webhook`, `settings.broker_api`, `settings.nats`,

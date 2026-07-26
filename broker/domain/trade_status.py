@@ -19,10 +19,13 @@ class TradeStatusPolicy:
   # Map worker position status → broker trade status.
   _POSITION_STATUS_TO_TRADE_STATUS: dict[str, TradeStatusEnum] = {
     "OPENED": TradeStatusEnum.OPENED,
-    # Emitted when the worker refuses to place an order (e.g. its MAX ORDER
-    # limit is reached). The position is still persisted worker-side and the
-    # TRADE event is fired, so the broker records it as a terminal, non-running
-    # trade carrying the worker's reject reason.
+    # Emitted when the worker refuses to act on a SIGNAL. Two triggers today:
+    #   * its MAX ORDER limit is reached, or
+    #   * it already holds an open position for that symbol/strategy, so the
+    #     broker's new SIGNAL cannot be taken.
+    # Either way the worker persists the rejection worker-side and fires a
+    # TRADE event, so the broker records it as a terminal, non-running trade
+    # carrying the worker's reject reason.
     "REJECTED": TradeStatusEnum.REJECTED,
     "TP1": TradeStatusEnum.PARTIALLY_CLOSED,
     "TP2": TradeStatusEnum.CLOSED,

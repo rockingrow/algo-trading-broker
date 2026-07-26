@@ -198,6 +198,18 @@ def test_position_event_carries_reject_reason():
   assert ev.reject_reason == "MAX ORDER limit reached"
 
 
+def test_position_event_rejected_for_open_position():
+  # A worker that already holds an open position rejects the broker's new
+  # SIGNAL and fires the same REJECTED TRADE, only the reason differs.
+  ev = PositionEvent(
+    **_event_dict(
+      status="REJECTED", reject_reason="Open position already exists for XAUUSD"
+    )
+  )
+  assert ev.status == "REJECTED"
+  assert ev.reject_reason == "Open position already exists for XAUUSD"
+
+
 def test_position_event_missing_required_rejected():
   d = _event_dict()
   del d["account_id"]
