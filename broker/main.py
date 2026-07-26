@@ -21,13 +21,13 @@ log = get_logger("broker")
 
 def main() -> None:
   log.info("Starting Algo Trading Broker v1.0")
-  log.info("Webhook    → http://%s:%d", settings.WEBHOOK_HOST, settings.WEBHOOK_PORT)
+  log.info("Webhook    → http://%s:%d", settings.webhook.HOST, settings.webhook.PORT)
   log.info("NATS       → %s (signals to subscribers)", settings.nats_url)
   log.info(
     "PostgreSQL → %s:%d/%s",
-    settings.POSTGRES_HOST,
-    settings.POSTGRES_PORT,
-    settings.POSTGRES_DB,
+    settings.postgres.HOST,
+    settings.postgres.PORT,
+    settings.postgres.DB,
   )
 
   # ── Start Webhook Server ────────────────────────
@@ -35,13 +35,13 @@ def main() -> None:
 
   uvicorn.run(
     app,
-    host=settings.WEBHOOK_HOST,
-    port=settings.WEBHOOK_PORT,
+    host=settings.webhook.HOST,
+    port=settings.webhook.PORT,
     workers=1,
-    log_level=settings.LOG_LEVEL.lower(),
+    log_level=settings.logging.LEVEL.lower(),
     log_config=uvicorn_log_config(),
     loop="asyncio",  # uvloop's libuv DNS can't resolve Docker service names on Linux 24.04
-    timeout_keep_alive=settings.WEBHOOK_KEEPALIVE_TIMEOUT,
+    timeout_keep_alive=settings.webhook.KEEPALIVE_TIMEOUT,
   )
 
 

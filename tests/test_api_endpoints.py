@@ -803,7 +803,7 @@ def test_flat_rejects_account_id_with_only_gateway(ctx):
 
 @pytest.fixture
 def auth_client():
-  """App where ensure_api_key is enforced (settings.BROKER_API_KEY is
+  """App where ensure_api_key is enforced (settings.broker_api.API_KEY is
   'test-api-key' from conftest)."""
   app = FastAPI()
   app.include_router(get_core_router())

@@ -287,7 +287,7 @@ def test_flat_publishes_scoped_to_account(ctx):
   assert published["gateway"] is None
 
 
-def test_prevent_block_publishes_block_entries(ctx):
+def test_prevent_block_publishes_block_signal(ctx):
   _link(ctx)
   resp = ctx["client"].post(
     f"/v1/telegram/{TG_ID}/commands/prevent",
@@ -295,11 +295,11 @@ def test_prevent_block_publishes_block_entries(ctx):
     headers=_headers(),
   )
   assert resp.status_code == 200
-  assert resp.json()["action"] == "BLOCK_ENTRIES"
-  assert ctx["publisher"].admin_signals[-1]["action"].value == "BLOCK_ENTRIES"
+  assert resp.json()["action"] == "BLOCK_SIGNAL"
+  assert ctx["publisher"].admin_signals[-1]["action"].value == "BLOCK_SIGNAL"
 
 
-def test_prevent_allow_publishes_allow_entries(ctx):
+def test_prevent_allow_publishes_allow_signal(ctx):
   _link(ctx)
   resp = ctx["client"].post(
     f"/v1/telegram/{TG_ID}/commands/prevent",
@@ -307,7 +307,7 @@ def test_prevent_allow_publishes_allow_entries(ctx):
     headers=_headers(),
   )
   assert resp.status_code == 200
-  assert resp.json()["action"] == "ALLOW_ENTRIES"
+  assert resp.json()["action"] == "ALLOW_SIGNAL"
 
 
 def test_command_requires_link(ctx):

@@ -89,8 +89,8 @@ class NatsClient:
       "closed_cb": self._on_closed,
       "error_cb": self._on_error,
     }
-    if settings.NATS_TOKEN:
-      opts["token"] = settings.NATS_TOKEN
+    if settings.nats.TOKEN:
+      opts["token"] = settings.nats.TOKEN
 
     self._nc = await nats_lib.connect(**opts)
     log.info("NATS connected to %s", settings.nats_url)
@@ -142,7 +142,7 @@ class NatsClient:
     log.warning("NATS disconnected")
     await self._notify(
       f"{em.NATS_DISCONNECTED} <b>NATS Disconnected</b>\n"
-      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
+      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
       f"{em.LISTEN} Listening: <code>{self.listen_subjects_line()}</code>"
     )
 
@@ -150,7 +150,7 @@ class NatsClient:
     log.info("NATS reconnected to %s", settings.nats_url)
     await self._notify(
       f"{em.NATS_RECONNECTED} <b>NATS Reconnected</b>\n"
-      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy)\n"
+      f"{em.PUBLISH} Publishing: <code>{self.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
       f"{em.LISTEN} Listening: <code>{self.listen_subjects_line()}</code>"
     )
 

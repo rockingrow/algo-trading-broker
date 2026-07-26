@@ -33,7 +33,7 @@ def upgrade() -> None:
   # Remaining attempts and the last-attempt timestamp — added together so a
   # partial upgrade never leaves rows queued forever without a way to track
   # their retries. Default 0 for the column, but every new insert overwrites
-  # it with settings.SIGNAL_MAX_ATTEMPTS (repository-side); pre-existing rows
+  # it with settings.signal.MAX_ATTEMPTS (repository-side); pre-existing rows
   # therefore stop retrying by default until an operator resets them.
   op.execute("""
         ALTER TABLE signals

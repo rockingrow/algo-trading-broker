@@ -1,0 +1,6 @@
+{
+  "action": "FLAT",
+  "timestamp": "2026-06-02T08:00:00+00:00",
+  "strategy": "MT5_GOLD_M5_V1",
+  "symbol": "XAUUSD"
+}

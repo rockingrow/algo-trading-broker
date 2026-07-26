@@ -67,7 +67,7 @@ class PreventCommandRequest(BaseModel):
   """Toggle new-entry blocking for the caller's account."""
 
   enabled: bool = Field(
-    True, description="True publishes BLOCK_ENTRIES, False publishes ALLOW_ENTRIES."
+    True, description="True publishes BLOCK_SIGNAL, False publishes ALLOW_SIGNAL."
   )
 
 

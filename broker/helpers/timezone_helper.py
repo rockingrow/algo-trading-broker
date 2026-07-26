@@ -36,7 +36,7 @@ def parse_offset_hours(raw: str | None) -> float:
       hours = None
     if hours is not None and abs(hours) < _MAX_ABS_OFFSET_HOURS:
       return hours
-  return settings.DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS
+  return settings.notification.DEFAULT_TIMEZONE_OFFSET_HOURS
 
 
 def format_offset_value(hours: float) -> str:

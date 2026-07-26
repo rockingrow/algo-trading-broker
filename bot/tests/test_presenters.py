@@ -189,14 +189,14 @@ def test_format_command_result():
 
 
 def test_format_command_result_names_the_command_not_the_wire_enum():
-  # The user typed /prevent; BLOCK_ENTRIES is broker vocabulary.
-  prevent = messages.format_command_result({"action": "BLOCK_ENTRIES", "scope": "account=a"})
+  # The user typed /prevent; BLOCK_SIGNAL is broker vocabulary.
+  prevent = messages.format_command_result({"action": "BLOCK_SIGNAL", "scope": "account=a"})
   assert "Prevent" in prevent
-  assert "BLOCK_ENTRIES" not in prevent
+  assert "BLOCK_SIGNAL" not in prevent
 
-  allow = messages.format_command_result({"action": "ALLOW_ENTRIES", "scope": "account=a"})
+  allow = messages.format_command_result({"action": "ALLOW_SIGNAL", "scope": "account=a"})
   assert "Allow" in allow
-  assert "ALLOW_ENTRIES" not in allow
+  assert "ALLOW_SIGNAL" not in allow
 
 
 def test_format_command_result_unknown_action_falls_through():

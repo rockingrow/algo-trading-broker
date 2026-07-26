@@ -417,11 +417,11 @@ def get_admin_router() -> APIRouter:
       "account, account_id, market, and gateway are all REQUIRED together (422 if only "
       "account_id is given) — account_id alone no longer identifies a single account. Omit "
       "all three (strategy/symbol still allowed) to flat everything.\n\n"
-      "KNOWN LIMITATION: broadcast on the shared ADMIN subject to every worker; each worker "
-      "filters for itself client-side (worker code, outside this repo). Broker now always "
-      "sends the full (account_id, market, gateway) triple when scoped, but a worker "
-      "that still matches on account_id alone can act on a FLAT meant for a different "
-      "account sharing that id — the worker side must be updated to check all three."
+      "When scoped to an account, the FLAT is delivered on the private subject "
+      "ADMIN.<market>.<gateway>.<account_id> that only that account's worker is subscribed "
+      "to — no other worker sees the account_id, keeping each worker isolated to its own "
+      "account. Unscoped FLATs are broadcast on the shared ADMIN subject to every worker, "
+      "which filters for itself client-side (worker code, outside this repo)."
     ),
     responses={
       **AUTH_RESPONSES,

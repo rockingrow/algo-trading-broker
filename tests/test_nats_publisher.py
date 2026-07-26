@@ -96,7 +96,7 @@ async def test_publish_flat_payload_shape():
   }
 
 
-async def test_publish_admin_signal_to_admin_subject():
+async def test_publish_admin_signal_account_scoped_uses_private_subject():
   conn = FakeConn()
   publisher = NatsPublisher(connection=conn)
   await publisher.publish_admin_signal(
@@ -109,12 +109,30 @@ async def test_publish_admin_signal_to_admin_subject():
   )
 
   subject, body = conn.nc.published[0]
-  assert subject == PublishTopicEnum.ADMIN.value
+  # Account-scoped admin actions go to the per-account private subject so no
+  # other worker learns the account_id.
+  assert subject == "ADMIN.FOREX.MT5.acc-1"
   # use_enum_values=True means the action is serialised as its string value.
   assert body["action"] == "FLAT"
   assert body["account_id"] == "acc-1"
   assert body["market"] == "FOREX"
   assert body["gateway"] == "MT5"
+
+
+async def test_publish_admin_signal_broadcast_uses_shared_subject():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_admin_signal(
+    action=AdminActionEnum.FLAT,
+    strategy="s",
+    symbol="XAUUSD",
+  )
+
+  subject, body = conn.nc.published[0]
+  # No account_id -> broadcast on the shared ADMIN subject for every worker.
+  assert subject == PublishTopicEnum.ADMIN.value
+  assert body["action"] == "FLAT"
+  assert body["account_id"] is None
 
 
 async def test_publish_system_signal_to_system_subject():

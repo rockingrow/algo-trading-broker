@@ -92,6 +92,7 @@ from broker.schemas.core import MarketEnum, SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminSignal,
   PublishTopicEnum,
+  compose_admin_subject,
   SystemActionEnum,
   SystemCryptoLeverageInitSignal,
   SystemRetrySignal,
@@ -614,12 +615,26 @@ class NatsPublisher:
     )
 
   async def publish_admin_signal(self, **kwargs) -> None:
-    """Broadcast an admin signal on the ADMIN subject."""
+    """Publish an admin signal to workers.
+
+    When the signal is account-scoped (``account_id`` set — ``market``/``gateway``
+    are required alongside it) it goes to the per-account private subject
+    ``ADMIN.<market>.<gateway>.<account_id>``, so only that account's worker
+    receives it and no other worker learns the ``account_id``. Otherwise it is
+    broadcast on the shared ``ADMIN`` subject for every worker to filter itself.
+    """
     signal = AdminSignal(**kwargs)
+    if signal.account_id is not None:
+      subject = compose_admin_subject(
+        signal.market, signal.gateway, signal.account_id
+      )
+    else:
+      subject = PublishTopicEnum.ADMIN.value
     payload = signal.model_dump_json().encode()
-    await self._conn.nc.publish(PublishTopicEnum.ADMIN.value, payload)
+    await self._conn.nc.publish(subject, payload)
     log.info(
-      "Published [ADMIN] action=%s strategy=%s symbol=%s account_id=%s market=%s gateway=%s",
+      "Published [%s] action=%s strategy=%s symbol=%s account_id=%s market=%s gateway=%s",
+      subject,
       signal.action,
       signal.strategy,
       signal.symbol,

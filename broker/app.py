@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
 
   # Start the background worker that forwards ERROR logs to Telegram. Cheap and
   # idempotent when the feature is disabled (no records ever reach the handler).
-  if settings.TELEGRAM_ENABLED and settings.TELEGRAM_LOG_ERRORS_ENABLED:
+  if settings.telegram.ENABLED and settings.telegram.LOG_ERRORS_ENABLED:
     from broker.services.notification_service import telegram_log_handler
 
     telegram_log_handler.start(asyncio.get_running_loop())
@@ -76,13 +76,13 @@ async def lifespan(app: FastAPI):
     setting_repository=setting_repo,
     publisher=publisher,
     notifier=make_signals_notifier(setting_repo),
-    webhook_secret=settings.WEBHOOK_SECRET,
+    webhook_secret=settings.webhook.SECRET,
   )
   signal_worker = SignalWorker(service=signal_service, connection=nats_client)
   signal_retry_job = SignalRetryJob(
     service=signal_service,
     signal_repository=signal_repo,
-    interval_seconds=settings.SIGNAL_RETRY_INTERVAL_SECONDS,
+    interval_seconds=settings.signal.RETRY_INTERVAL_SECONDS,
   )
   await consumer.start()
   await system_consumer.start()
@@ -90,12 +90,12 @@ async def lifespan(app: FastAPI):
   await signal_retry_job.start()
   app.state.publisher = publisher
 
-  api_prefix = f"/{settings.BROKER_API_PREFIX}" if settings.BROKER_API_PREFIX else ""
+  api_prefix = f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
 
   # Notification: Startup
   await notifier.send_message(
     f"{em.BROKER_STARTED} <b>Broker Node Started</b>\n"
-    f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy)\n"
+    f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
     f"{em.PLUG} NATS Listening: <code>{nats_client.listen_subjects_line()}</code>\n"
     f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
@@ -115,7 +115,7 @@ async def lifespan(app: FastAPI):
   await nats_client.close()
   await close_db()
 
-  if settings.TELEGRAM_ENABLED and settings.TELEGRAM_LOG_ERRORS_ENABLED:
+  if settings.telegram.ENABLED and settings.telegram.LOG_ERRORS_ENABLED:
     from broker.services.notification_service import telegram_log_handler
 
     await telegram_log_handler.stop()
@@ -164,7 +164,7 @@ def create_app() -> FastAPI:
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
   # Include Core Router — mount under secret prefix if configured
-  api_prefix = f"/{settings.BROKER_API_PREFIX}" if settings.BROKER_API_PREFIX else ""
+  api_prefix = f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
   app.include_router(get_core_router(), prefix=api_prefix)
 
   return app

@@ -132,7 +132,7 @@ algo-trading-broker/
 │   ├── openapi.py       # Shared OpenAPI response definitions
 │   ├── constants.py     # Broker setting keys
 │   ├── logger.py        # Logging configuration
-│   └── settings.py      # Pydantic settings loaded from .env
+│   └── settings.py      # Pydantic settings (grouped sub-models) loaded from .env
 ├── bot/                 # Telegram bot service (aiogram v3) — see bot/README.md
 │   ├── app/             # handlers, services, middlewares, keyboards, presenters, utils
 │   └── tests/           # Bot pytest suite (own pyproject.toml / uv project)
@@ -156,7 +156,8 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | Direction | Subject | Purpose |
 | --------- | ------- | ------- |
 | Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
-| Publish (broker → workers) | `ADMIN` | Administrative / broadcast messages |
+| Publish (broker → workers) | `ADMIN` | Broadcast administrative messages (no `account_id`) — every worker receives and filters for itself |
+| Publish (broker → one worker) | `ADMIN.<market>.<gateway>.<account_id>` | Account-scoped administrative message on a private per-account subject; only that account's worker is subscribed, so no other worker learns the `account_id` |
 | Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` and `RETRY_SIGNALS` sent back after a worker announces itself |
 | Publish (broker → broker) | `SIGNALS.<strategy>` (JetStream stream `SIGNALS`) | Durable webhook envelope buffer — the webhook endpoint enqueues here, the broker's own `SignalWorker` consumes and fans out to `{strategy}` |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
@@ -187,7 +188,7 @@ The webhook endpoint is a fast enqueue-only path. Everything else runs from a ba
 1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
 2. **`SignalWorker`** (`broker/services/signal_processing_service.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
 3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
-4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.SIGNAL_RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
+4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.signal.RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
 5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
 
 **Retry-aware notifications**: the Telegram signal / FLAT message carries an `Attempt: N` line on the 2nd and 3rd attempts (not on the fresh first attempt) so the operator sees when the broker is retrying.
@@ -388,14 +389,22 @@ A few knobs live in [`broker/settings.py`](broker/settings.py) only, because the
 change behaviour rather than deployment topology. Override them via the
 environment if you really need to:
 
-| Setting | Default | Effect |
-| ------- | ------- | ------ |
-| `SIGNAL_MAX_ATTEMPTS` | `3` | Total fan-out attempts before a signal is marked `FAILED` |
-| `SIGNAL_RETRY_INTERVAL_SECONDS` | `15` | Retry-job tick, and the minimum gap between two attempts on one row |
-| `JETSTREAM_SIGNAL_CONSUMER` | `broker_signal_handler` | Durable consumer name on the `SIGNALS` stream |
-| `JETSTREAM_FETCH_BATCH` | `10` | Envelopes pulled per fetch |
-| `JETSTREAM_FETCH_TIMEOUT_SECONDS` | `1.0` | Pull-fetch timeout |
-| `DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS` | `7.0` | Fallback offset when the `notification_timezone` broker setting is unset |
+| Env var | In-code path | Default | Effect |
+| ------- | ------------ | ------- | ------ |
+| `SIGNAL_MAX_ATTEMPTS` | `settings.signal.MAX_ATTEMPTS` | `3` | Total fan-out attempts before a signal is marked `FAILED` |
+| `SIGNAL_RETRY_INTERVAL_SECONDS` | `settings.signal.RETRY_INTERVAL_SECONDS` | `15` | Retry-job tick, and the minimum gap between two attempts on one row |
+| `JETSTREAM_SIGNAL_CONSUMER` | `settings.jetstream.SIGNAL_CONSUMER` | `broker_signal_handler` | Durable consumer name on the `SIGNALS` stream |
+| `JETSTREAM_FETCH_BATCH` | `settings.jetstream.FETCH_BATCH` | `10` | Envelopes pulled per fetch |
+| `JETSTREAM_FETCH_TIMEOUT_SECONDS` | `settings.jetstream.FETCH_TIMEOUT_SECONDS` | `1.0` | Pull-fetch timeout |
+| `DEFAULT_NOTIFICATION_TIMEZONE_OFFSET_HOURS` | `settings.notification.DEFAULT_TIMEZONE_OFFSET_HOURS` | `7.0` | Fallback offset when the `notification_timezone` broker setting is unset |
+
+> **Settings layout** — In code, settings are grouped into nested sub-models on
+> the `Settings` object (`settings.webhook`, `.broker_api`, `.nats`,
+> `.postgres`, `.logging`, `.docs`, `.telegram`, `.notification`, `.signal`,
+> `.jetstream`), e.g. `settings.webhook.HOST`. The **env var names are flat and
+> unchanged** — each sub-model carries an `env_prefix`, so `WEBHOOK_HOST` still
+> populates `settings.webhook.HOST`. The `settings.broker_url` / `nats_url` /
+> `postgres_dsn` convenience properties remain on the top-level object.
 
 ---
 
@@ -778,7 +787,7 @@ Returns the default `"7"` when the setting is unset or holds an unparseable valu
 
 ### POST `/admin/flat`
 
-Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subject. Scope can be narrowed by passing optional fields in the JSON body.
+Publishes a `FLAT` directive to workers over NATS. Scope can be narrowed by passing optional fields in the JSON body. An account-scoped FLAT (see below) goes to a private per-account subject; an unscoped FLAT is broadcast on the shared `ADMIN` subject.
 
 **Request Body (all fields optional):**
 
@@ -794,7 +803,7 @@ Publishes a `FLAT` directive to all connected workers via the `ADMIN` NATS subje
 
 Omit all fields (or send an empty body `{}`) to flat every open position across all workers.
 
-`market`/`gateway` optionally narrow `account_id` further and are forwarded onto the broadcast `AdminSignal`. This is broadcast on the shared `ADMIN` subject to **every** connected worker; each worker filters for itself client-side (worker-side code, outside this repo). Since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), pass `market`/`gateway` when scoping to an account whose id might collide with one on another gateway — but this only helps once the worker side is updated to check them too. A worker that still matches on `account_id` alone can act on a FLAT meant for a different account that happens to share that id.
+When `account_id` is set, `market` and `gateway` are **required** with it (422 otherwise) — since `account_id` is no longer globally unique (see [`accounts` table](#accounts-table)), all three together identify one account. The FLAT is then published to the private subject `ADMIN.<market>.<gateway>.<account_id>` that **only that account's worker** is subscribed to, so no other worker ever sees the `account_id` and each worker stays isolated to its own account. Omitting `account_id` (a strategy/symbol-scoped or flat-everything directive) broadcasts on the shared `ADMIN` subject to **every** connected worker, which filters for itself client-side (worker-side code, outside this repo).
 
 ---
 
@@ -861,10 +870,10 @@ repairs the row.
 | Command | Admin action | Notes |
 | ------- | ------------ | ----- |
 | `/flat` | `FLAT` | Close positions for the **active** account. |
-| `/prevent` | `BLOCK_ENTRIES` | Block new entries (worker must honor it). |
-| `/allow` | `ALLOW_ENTRIES` | Re-enable new entries. |
+| `/prevent` | `BLOCK_SIGNAL` | Block new signals (worker must honor it). |
+| `/allow` | `ALLOW_SIGNAL` | Re-enable new signals. |
 
-> `BLOCK_ENTRIES` / `ALLOW_ENTRIES` are scoped by `account_id` in the `AdminSignal`
+> `BLOCK_SIGNAL` / `ALLOW_SIGNAL` are scoped by `account_id` in the `AdminSignal`
 > payload. Enforcement is the **worker's** responsibility — worker code lives
 > outside this repo, so the bot/broker only publish the directive.
 
@@ -900,7 +909,7 @@ and local development.
 | `is_scale_position` | Boolean | Whether this signal scales into an existing position |
 | `scale_strategy` | String(50) (Nullable) | Scale-in strategy name (e.g. `add_on_pullback`) |
 | `status` | Enum | Delivery state: `QUEUED` on insert, `PUBLISHED` after a successful fan-out, `FAILED` once every attempt has been exhausted |
-| `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.SIGNAL_MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
+| `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.signal.MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
 | `last_attempt` | DateTime (Nullable) | Timestamp of the most recent fan-out attempt (`NULL` before the first attempt). Drives the retry job's minimum-gap filter. |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
