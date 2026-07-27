@@ -117,13 +117,16 @@ ties the event back to the originating signal.
 
 `status` is the **worker** position status; the broker maps it onto its own
 trade lifecycle state via `broker/domain/trade_status.py` (shown in the last
-column). A `REJECTED` event carries a `reject_reason` (e.g. the worker's MAX
-ORDER limit was hit).
+column). A `REJECTED` event carries a `reject_reason` explaining why the worker
+refused the SIGNAL — e.g. its MAX ORDER limit was hit, or it already holds an
+open position for that symbol/strategy so the broker's new SIGNAL cannot be
+taken.
 
 | `event` | `status` | → Broker trade status | Example |
 | ------- | -------- | --------------------- | ------- |
 | `CREATED` | `OPENED` | `OPENED` | [`trade.created.opened.json`](trade.created.opened.json) |
-| `CREATED` | `REJECTED` | `REJECTED` (has `reject_reason`) | [`trade.created.rejected.json`](trade.created.rejected.json) |
+| `CREATED` | `REJECTED` | `REJECTED` (MAX ORDER limit, has `reject_reason`) | [`trade.created.rejected.json`](trade.created.rejected.json) |
+| `CREATED` | `REJECTED` | `REJECTED` (open position exists, has `reject_reason`) | [`trade.created.rejected.open_position.json`](trade.created.rejected.open_position.json) |
 | `UPDATED` | `TP1` | `PARTIALLY_CLOSED` | [`trade.updated.tp1.json`](trade.updated.tp1.json) |
 | `UPDATED` | `TP2` | `CLOSED` | [`trade.updated.tp2.json`](trade.updated.tp2.json) |
 | `UPDATED` | `SL` | `CLOSED` | [`trade.updated.sl.json`](trade.updated.sl.json) |
