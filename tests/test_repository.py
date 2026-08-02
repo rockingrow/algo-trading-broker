@@ -244,6 +244,36 @@ async def test_list_retryable_returns_rows(monkeypatch):
   assert rows == [row]
 
 
+async def test_list_retryable_excludes_never_attempted_rows(monkeypatch):
+  """Regression: a QUEUED row whose first fan-out is still in flight has
+  ``last_attempt IS NULL``. It must NOT be selected for retry — otherwise the
+  retry job races the in-flight first attempt and re-sends the signal's
+  Telegram notification (one TradingView alert, two Telegram messages).
+
+  The FakeSession ignores the WHERE clause, so we assert on the compiled SQL:
+  eligibility must key off a recorded ``last_attempt`` (``IS NOT NULL`` and a
+  freshness comparison), never treat NULL as retryable.
+  """
+  captured: dict = {}
+
+  class CapturingSession(FakeSession):
+    async def execute(self, _stmt):
+      captured["stmt"] = _stmt
+      return await super().execute(_stmt)
+
+  session = CapturingSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemySignalRepository().list_retryable(15)
+
+  sql = str(captured["stmt"]).lower()
+  # NULL rows are excluded (the bug was a `last_attempt IS NULL` disjunction
+  # that made in-flight first attempts immediately retryable)...
+  assert "is not null" in sql
+  # ...and eligibility is gated on the last recorded attempt being old enough.
+  assert "last_attempt <" in sql
+
+
 async def test_list_retryable_swallows_db_error(monkeypatch):
   class BoomSession(FakeSession):
     async def execute(self, _stmt):

@@ -2,17 +2,23 @@
 broker/services/signal_retry_job.py — periodic re-send of QUEUED signals.
 
 The JetStream ``SignalWorker`` handles a signal exactly once from the
-consumer callback. If that first fan-out fails (broker crash between publish
-and mark, worker subject unreachable for a moment, …) the row is left in
-``status=QUEUED`` with its ``attempts`` counter decremented. This job wakes
-every ``SIGNAL_RETRY_INTERVAL_SECONDS`` and hands those still-eligible rows
-back to ``SignalProcessingService.retry_signal``. When the counter hits zero
-the service flips the row to ``FAILED`` on its own; this job just stops
+consumer callback. If that first fan-out *fails and records the failure*
+(the publish raised, so ``record_attempt_failure`` decremented ``attempts``
+and stamped ``last_attempt``) the row is left in ``status=QUEUED``. This job
+wakes every ``SIGNAL_RETRY_INTERVAL_SECONDS`` and hands those still-eligible
+rows back to ``SignalProcessingService.retry_signal``. When the counter hits
+zero the service flips the row to ``FAILED`` on its own; this job just stops
 seeing it because ``list_retryable`` filters by ``attempts > 0``.
 
 The poll cadence and the eligibility gap are the same value on purpose: a
 row that just failed cannot be re-picked until the next tick, which stops
-the job from racing an in-flight attempt without needing a lock.
+the job from racing an in-flight attempt without needing a lock. Critically,
+that gap only protects rows that *have* a ``last_attempt`` — so
+``list_retryable`` excludes rows where ``last_attempt IS NULL`` (a first
+fan-out still in flight, or one interrupted before it recorded anything).
+Picking those up would let this job re-run a fan-out the ``SignalWorker`` is
+still performing and send the Telegram notification twice; a first attempt
+that crashed before recording is replayed by JetStream redelivery instead.
 """
 
 from __future__ import annotations
