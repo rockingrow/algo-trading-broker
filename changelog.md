@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Webhook now returns 422 (not 500) when the body is invalid JSON** — When
+  the client posts malformed JSON (e.g. `"max_notional_pct": 1,000` — the
+  comma in the number breaks the parse), FastAPI raises
+  `RequestValidationError` whose `errors()[i]["input"]` carries the raw body
+  as `bytes`. The 422 handler used to hand that dict straight to
+  `JSONResponse`, and `json.dumps` cannot serialize `bytes`, so the handler
+  crashed with `TypeError: Object of type bytes is not JSON serializable`
+  and Starlette fell back to **500**. `broker/app.py`'s
+  `validation_exception_handler` now runs `exc.errors()` through
+  `jsonable_encoder`, so the bytes are decoded to a string and the client
+  actually receives the 422 explaining why the payload was rejected.
+
 ### Changed
 
 - **`REJECTED` TRADE now covers the "worker already has an open position"
