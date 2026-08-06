@@ -517,7 +517,9 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/silent-signal` | `X-API-KEY` |
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
 | `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
+| `GET /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
 | `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
+| `GET /admin/settings/crypto-max-leverage` | `X-API-KEY` |
 | `GET /admin/settings/strategy-magic-map` | `X-API-KEY` |
 | `POST /admin/settings/strategy-magic-map` | `X-API-KEY` |
 | `POST /admin/settings/notification-timezone` | `X-API-KEY` |

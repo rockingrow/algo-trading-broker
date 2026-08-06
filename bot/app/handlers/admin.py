@@ -46,7 +46,13 @@ from app.constants import (
 )
 from app.filters.is_admin import IsAdmin
 from app.presenters import messages
-from app.states import AdminLinkAccount, CreateAccount, SetStrategyMagicMap
+from app.states import (
+  AdminCryptoAllowedSymbol,
+  AdminCryptoMaxLeverage,
+  AdminLinkAccount,
+  CreateAccount,
+  SetStrategyMagicMap,
+)
 from app.utils.invite import to_payload
 from app.utils.pagination import paginate
 from app.utils.telegram import safe_edit_text
@@ -701,3 +707,145 @@ async def receive_magic_map(
 @router.message(SetStrategyMagicMap.waiting_for_value, ~F.text)
 async def prompt_magic_map_text(message: Message) -> None:
   await message.answer(f"{emojis.WARNING} Please send the magic map as JSON text.")
+
+# ── /admin_crypto_symbols ───────────────────────────────────────────
+# Show the current CRYPTO_ALLOWED_SYMBOL_KEY value and prompt for a new one as
+# a comma-separated list. Normalisation (trim/upper/dedup) lives on the broker
+# side; the bot just forwards the raw split so a single validation path stays.
+
+
+@router.message(Command("admin_crypto_symbols", "crypto_symbols"))
+async def cmd_admin_crypto_symbols(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  await state.clear()
+  current = await broker_admin.get_crypto_allowed_symbol()
+  if current is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch current symbols.")
+    return
+  await state.set_state(AdminCryptoAllowedSymbol.waiting_for_symbols)
+  value = str(current.get("value") or "")
+  shown = html.escape(value) if value else "<i>(unset)</i>"
+  await message.answer(
+    f"{emojis.GEAR} <b>Crypto allowed symbols</b>\n\n"
+    f"Current: <code>{shown}</code>\n\n"
+    "Send the new list, comma-separated (e.g. <code>BTC, ETH, SOL</code>). "
+    "Send /cancel to abort."
+  )
+
+
+@router.message(AdminCryptoAllowedSymbol.waiting_for_symbols, Command("cancel"))
+async def cancel_admin_crypto_symbols(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await message.answer("Cancelled.")
+
+
+@router.message(
+  AdminCryptoAllowedSymbol.waiting_for_symbols, F.text & ~F.text.startswith("/")
+)
+async def receive_admin_crypto_symbols(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  symbols = [s.strip() for s in raw.split(",") if s.strip()]
+  if not symbols:
+    await message.answer(
+      f"{emojis.WARNING} Send at least one symbol, comma-separated. "
+      "Send /cancel to abort."
+    )
+    return
+
+  result = await broker_admin.set_crypto_allowed_symbol(symbols)
+  await state.clear()
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update allowed symbols. Run /admin_crypto_symbols to retry."
+    )
+    return
+  value = html.escape(str(result.get("value") or ""))
+  await message.answer(
+    f"{emojis.CHECK} <b>Crypto allowed symbols updated</b>\n"
+    f"New value: <code>{value}</code>"
+  )
+
+
+@router.message(AdminCryptoAllowedSymbol.waiting_for_symbols, ~F.text)
+async def prompt_admin_crypto_symbols_text(message: Message) -> None:
+  await message.answer(
+    f"{emojis.WARNING} Please send the symbols as text, comma-separated."
+  )
+
+
+# ── /admin_crypto_leverage ──────────────────────────────────────────
+# Show the current CRYPTO_MAX_LEVERAGE_KEY value and prompt for a new positive
+# integer. The bot validates locally so an obvious typo doesn't need a broker
+# round-trip; the broker's own gt=0 check remains the source of truth.
+
+
+@router.message(Command("admin_crypto_leverage", "crypto_leverage"))
+async def cmd_admin_crypto_leverage(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  await state.clear()
+  current = await broker_admin.get_crypto_max_leverage()
+  if current is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch current leverage.")
+    return
+  await state.set_state(AdminCryptoMaxLeverage.waiting_for_leverage)
+  value = str(current.get("value") or "")
+  shown = html.escape(value) if value else "<i>(unset)</i>"
+  await message.answer(
+    f"{emojis.GEAR} <b>Crypto max leverage</b>\n\n"
+    f"Current: <code>{shown}</code>\n\n"
+    "Send the new default leverage as a positive integer (e.g. <code>20</code>). "
+    "Send /cancel to abort."
+  )
+
+
+@router.message(AdminCryptoMaxLeverage.waiting_for_leverage, Command("cancel"))
+async def cancel_admin_crypto_leverage(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await message.answer("Cancelled.")
+
+
+@router.message(
+  AdminCryptoMaxLeverage.waiting_for_leverage, F.text & ~F.text.startswith("/")
+)
+async def receive_admin_crypto_leverage(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  try:
+    leverage = int(raw)
+  except ValueError:
+    await message.answer(
+      f"{emojis.WARNING} Please send an integer (e.g. <code>20</code>). "
+      "Send /cancel to abort."
+    )
+    return
+  if leverage <= 0:
+    await message.answer(
+      f"{emojis.WARNING} Leverage must be a positive integer. "
+      "Send /cancel to abort."
+    )
+    return
+
+  result = await broker_admin.set_crypto_max_leverage(leverage)
+  await state.clear()
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update leverage. Run /admin_crypto_leverage to retry."
+    )
+    return
+  value = html.escape(str(result.get("value") or ""))
+  await message.answer(
+    f"{emojis.CHECK} <b>Crypto max leverage updated</b>\n"
+    f"New value: <code>{value}</code>"
+  )
+
+
+@router.message(AdminCryptoMaxLeverage.waiting_for_leverage, ~F.text)
+async def prompt_admin_crypto_leverage_text(message: Message) -> None:
+  await message.answer(
+    f"{emojis.WARNING} Please send the leverage as a numeric text value."
+  )

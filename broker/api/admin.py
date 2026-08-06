@@ -275,6 +275,20 @@ def get_admin_router() -> APIRouter:
       setting=NOTIFICATION_INCLUDE_SIGNAL_RAW, value=new_value, state=state_label
     )
 
+  @router.get(
+    "/settings/crypto-allowed-symbol",
+    tags=["settings"],
+    summary="Get the crypto allowed-symbol list",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_crypto_allowed_symbol(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Current CRYPTO_ALLOWED_SYMBOL_KEY value (empty string if unset)."""
+    value = await setting_repo.get(CRYPTO_ALLOWED_SYMBOL_KEY) or ""
+    return SettingValueResponse(setting=CRYPTO_ALLOWED_SYMBOL_KEY, value=value)
+
   @router.post(
     "/settings/crypto-allowed-symbol",
     tags=["settings"],
@@ -318,6 +332,20 @@ def get_admin_router() -> APIRouter:
     await _push_crypto_leverage_init(publisher, setting_repo, account_repo)
 
     return SettingValueResponse(setting=CRYPTO_ALLOWED_SYMBOL_KEY, value=value)
+
+  @router.get(
+    "/settings/crypto-max-leverage",
+    tags=["settings"],
+    summary="Get the default crypto leverage",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_crypto_max_leverage(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Current CRYPTO_MAX_LEVERAGE_KEY value (empty string if unset)."""
+    value = await setting_repo.get(CRYPTO_MAX_LEVERAGE_KEY) or ""
+    return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
 
   @router.post(
     "/settings/crypto-max-leverage",

@@ -342,6 +342,8 @@ class AdminMessages:
     "/admin_rotate — Rotate token + unlink users\n"
     "/admin_settings — Broker settings\n"
     "/admin_magicmap — Edit strategy magic map\n"
+    "/admin_crypto_symbols — Set crypto allowed symbols\n"
+    "/admin_crypto_leverage — Set crypto max leverage\n"
     "/admin_linkaccount — Link a Telegram user to an account\n"
     "/admin_invite_url — One-tap invite link for an account"
   )
