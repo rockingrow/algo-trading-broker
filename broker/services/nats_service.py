@@ -29,7 +29,10 @@ inbound consumption.
   ─────────────────────────────────
   Workers should announce themselves with NATS ``request`` and wait for a
   reply. When a message carries a reply inbox (``msg.reply``), the broker
-  answers *that one worker* directly with the outcome of the handshake:
+  answers *that one worker* directly. Every handshake first receives a
+  ``STRATEGY_MAGIC_MAP`` (the strategy → magic-number map filtered to the
+  strategies the worker announced — mandatory for both markets), then the
+  market-specific outcome:
 
   * crypto worker, settings OK   → ``CRYPTO_LEVERAGE_INIT``
   * non-crypto worker            → ``WORKER_CONNECTED_ACK``
@@ -76,6 +79,7 @@ from broker.constants import (
   CRYPTO_MAX_LEVERAGE_KEY,
   DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
   MAX_RETRY_TIMEOUT_KEY,
+  STRATEGY_MAGIC_MAP_KEY,
 )
 from broker.helpers.signal_helper import parse_signal
 from broker.interfaces import (
@@ -96,6 +100,7 @@ from broker.schemas.publisher_schema import (
   SystemActionEnum,
   SystemCryptoLeverageInitSignal,
   SystemRetrySignal,
+  SystemStrategyMagicMapSignal,
   SystemWorkerConnectedAck,
   SystemWorkerConnectedError,
   SystemWorkerConnectedSignal,
@@ -126,6 +131,45 @@ def _jetstream_subject(strategy: str) -> str:
 # so a short TTL is a deliberate trade-off between freshness and load: an
 # admin update reaches new handshakes within CRYPTO_SETTINGS_CACHE_TTL_SECONDS.
 CRYPTO_SETTINGS_CACHE_TTL_SECONDS = 30.0
+
+
+def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
+  """Parse the ``strategy_magic_map`` JSON-text setting into {strategy: magic}.
+
+  Returns an empty map for a missing/blank value, invalid JSON, or a non-object
+  — anything unparseable is logged rather than raised, because the handshake
+  must still send the mandatory STRATEGY_MAGIC_MAP (an empty map is a valid
+  answer). Entries whose value isn't a plain integer are dropped individually
+  (booleans are rejected even though ``bool`` is an ``int`` subclass — a magic
+  number is never True/False).
+  """
+  if not raw:
+    return {}
+  try:
+    data = json.loads(raw)
+  except (json.JSONDecodeError, TypeError) as exc:
+    log.error("%s is not valid JSON: %s | raw=%r", STRATEGY_MAGIC_MAP_KEY, exc, raw)
+    return {}
+  if not isinstance(data, dict):
+    log.error(
+      "%s must be a JSON object, got %s | raw=%r",
+      STRATEGY_MAGIC_MAP_KEY,
+      type(data).__name__,
+      raw,
+    )
+    return {}
+  result: dict[str, int] = {}
+  for key, value in data.items():
+    if isinstance(value, bool) or not isinstance(value, int):
+      log.warning(
+        "%s: skipping non-integer magic for strategy=%r value=%r",
+        STRATEGY_MAGIC_MAP_KEY,
+        key,
+        value,
+      )
+      continue
+    result[str(key)] = value
+  return result
 
 
 class TradeEventConsumer:
@@ -198,7 +242,11 @@ class TradeEventConsumer:
 
 
 class SystemEventConsumer:
-  """Consumes SYSTEM events from NATS and responds with CRYPTO_LEVERAGE_INIT."""
+  """Consumes SYSTEM events from NATS and answers the WORKER_CONNECTED handshake.
+
+  Replies with a STRATEGY_MAGIC_MAP first (both markets), then a RETRY_SIGNALS
+  replay and the market-specific CRYPTO_LEVERAGE_INIT / WORKER_CONNECTED_ACK.
+  """
 
   SUBJECT = PublishTopicEnum.SYSTEM
 
@@ -218,6 +266,11 @@ class SystemEventConsumer:
     self._sub: Optional[Subscription] = None
     self._crypto_settings_cache: tuple[Optional[str], Optional[str]] | None = None
     self._crypto_settings_cached_at: float = 0.0
+    # The strategy_magic_map is now read on every WORKER_CONNECTED that
+    # announces strategies (both markets), so it gets the same short-TTL cache
+    # as the crypto settings to absorb reconnect-storm bursts.
+    self._magic_map_cache: dict[str, int] | None = None
+    self._magic_map_cached_at: float = 0.0
 
   async def start(self) -> None:
     """Subscribe to the SYSTEM subject using the shared NATS connection."""
@@ -290,6 +343,11 @@ class SystemEventConsumer:
 
     await self._remember_worker(event)
 
+    # STRATEGY_MAGIC_MAP is mandatory for every market and must be the first
+    # message the worker receives, so it goes out ahead of the RETRY_SIGNALS
+    # replay and the market-specific ACK / CRYPTO_LEVERAGE_INIT below.
+    await self._send_strategy_magic_map(event.account_id, event.strategies, reply_to)
+
     # Every WORKER_CONNECTED gets a RETRY_SIGNALS replay of the recent signals
     # matching the strategies the worker announced, so a reconnecting worker
     # can catch up on broadcasts it missed while offline. The replay is sent
@@ -329,6 +387,40 @@ class SystemEventConsumer:
     except Exception as exc:
       log.exception(
         "Failed to record gateway for account_id=%s: %s",
+        account_id,
+        exc,
+      )
+
+  async def _send_strategy_magic_map(
+    self, account_id: str, strategies: list[str], reply_to: str = ""
+  ) -> None:
+    """Deliver the STRATEGY_MAGIC_MAP for *account_id*, filtered to *strategies*.
+
+    Mandatory for every market and sent first in the handshake, so it is
+    published even when the resulting map is empty — the worker announced no
+    known strategy, or the setting is unset/invalid. Replies on *reply_to* when
+    set (request/reply), otherwise broadcasts on the SYSTEM subject. Best-effort:
+    a publish failure is logged, never raised, so it cannot break the rest of
+    the handshake.
+    """
+    announced = set(strategies)
+    # No announced strategies → nothing could match anyway, so skip the DB read
+    # and still send the (empty) mandatory message.
+    if announced:
+      magic_map = await self._get_strategy_magic_map()
+      filtered = {k: v for k, v in magic_map.items() if k in announced}
+    else:
+      filtered = {}
+
+    try:
+      await self._publisher.publish_system_strategy_magic_map(
+        account_id=account_id,
+        magic_map=filtered,
+        subject=reply_to or None,
+      )
+    except Exception as exc:
+      log.exception(
+        "Failed to publish STRATEGY_MAGIC_MAP for account_id=%s: %s",
         account_id,
         exc,
       )
@@ -509,6 +601,28 @@ class SystemEventConsumer:
     self._crypto_settings_cached_at = now
     return self._crypto_settings_cache
 
+  async def _get_strategy_magic_map(self) -> dict[str, int]:
+    """Return the parsed strategy → magic-number map, reusing a cached read for
+    up to ``CRYPTO_SETTINGS_CACHE_TTL_SECONDS`` (shared with the crypto cache).
+
+    The ``strategy_magic_map`` setting is stored as JSON text; parsing happens
+    once here and the result is cached, so a reconnect storm re-reads the DB at
+    most once per TTL and an admin edit reaches new handshakes within the TTL.
+    Both hits and misses (empty map) are cached.
+    """
+    now = time.monotonic()
+    if (
+      self._magic_map_cache is not None
+      and now - self._magic_map_cached_at < CRYPTO_SETTINGS_CACHE_TTL_SECONDS
+    ):
+      return self._magic_map_cache
+
+    self._magic_map_cache = _parse_strategy_magic_map(
+      await self._settings.get(STRATEGY_MAGIC_MAP_KEY)
+    )
+    self._magic_map_cached_at = now
+    return self._magic_map_cache
+
   async def _reply_ack(self, reply_to: str, account_id: str) -> None:
     """Acknowledge a handshake that needs no configuration. No-op when there is
     no reply inbox (fire-and-forget publish)."""
@@ -664,6 +778,29 @@ class NatsPublisher:
       signal.account_id,
       signal.symbols,
       signal.default_leverage,
+    )
+
+  async def publish_system_strategy_magic_map(
+    self, *, subject: str | None = None, **kwargs
+  ) -> None:
+    """Publish a STRATEGY_MAGIC_MAP system signal to a single worker.
+
+    Sent first in the WORKER_CONNECTED handshake (before RETRY_SIGNALS and the
+    market-specific ACK / CRYPTO_LEVERAGE_INIT). When *subject* is given (the
+    worker's reply inbox from NATS ``request``) the map reaches only that one
+    worker; otherwise it falls back to the shared SYSTEM subject, still carrying
+    ``account_id`` so a fire-and-forget worker can filter for itself.
+    """
+    signal = SystemStrategyMagicMapSignal(**kwargs)
+    target = subject or PublishTopicEnum.SYSTEM.value
+    payload = signal.model_dump_json().encode()
+    await self._conn.nc.publish(target, payload)
+    log.info(
+      "Published [SYSTEM→%s] action=%s account_id=%s strategies=%d",
+      target,
+      signal.action,
+      signal.account_id,
+      len(signal.magic_map),
     )
 
   async def publish_system_retry_signal(

@@ -89,12 +89,17 @@ private subject.
 The broker's outgoing half of the `SYSTEM` conversation. Each payload is a
 `SystemSignal` subclass keyed by `action` (`SystemActionEnum`) and addressed to
 a worker by its worker id (`account_id` in `<market>-<gateway>-<account_id>`
-form). The three handshake replies below are normally sent on the request's
-**reply inbox** (from the worker's NATS `request`) rather than the shared
-`SYSTEM` subject, so they reach only the worker that asked.
+form). The handshake replies below are normally sent on the request's **reply
+inbox** (from the worker's NATS `request`) rather than the shared `SYSTEM`
+subject, so they reach only the worker that asked.
+
+Every handshake first receives a `STRATEGY_MAGIC_MAP` (both markets), then the
+`RETRY_SIGNALS` replay, then the market-specific `CRYPTO_LEVERAGE_INIT`
+(crypto) / `WORKER_CONNECTED_ACK` (non-crypto).
 
 | Action | Sent | Meaning | Example |
 | ------ | ---- | ------- | ------- |
+| `STRATEGY_MAGIC_MAP` | reply inbox or `SYSTEM` | The strategy → magic-number map (from the `strategy_magic_map` setting), filtered to the strategies the worker announced. Mandatory for both markets and sent first in the handshake | [`system.strategy_magic_map.json`](system.strategy_magic_map.json) |
 | `WORKER_CONNECTED_ACK` | reply inbox | Handshake accepted; no extra config needed (e.g. a non-crypto worker) | [`system.worker_connected_ack.json`](system.worker_connected_ack.json) |
 | `WORKER_CONNECTED_ERROR` | reply inbox | Handshake received but the broker could not build the initial config (carries `reason`) | [`system.worker_connected_error.json`](system.worker_connected_error.json) |
 | `CRYPTO_LEVERAGE_INIT` | reply inbox or `SYSTEM` | Push allowed crypto `symbols` + `default_leverage` to a crypto worker (on connect, or when an admin changes the setting) | [`system.crypto_leverage_init.json`](system.crypto_leverage_init.json) |

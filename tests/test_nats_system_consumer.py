@@ -1,6 +1,10 @@
 import json
 
-from broker.constants import CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY
+from broker.constants import (
+  CRYPTO_ALLOWED_SYMBOL_KEY,
+  CRYPTO_MAX_LEVERAGE_KEY,
+  STRATEGY_MAGIC_MAP_KEY,
+)
 from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.publisher_schema import PublishTopicEnum, SystemActionEnum
 from broker.services.nats_service import SystemEventConsumer
@@ -44,9 +48,13 @@ class FakeSettingRepo:
 class FakePublisher:
   def __init__(self):
     self.calls: list[dict] = []
+    self.magic_maps: list[dict] = []
     self.retries: list[dict] = []
     self.acks: list[dict] = []
     self.errors: list[dict] = []
+    # Records the action of every SYSTEM publish in call order, so tests can
+    # assert STRATEGY_MAGIC_MAP is sent first in the handshake.
+    self.order: list[str] = []
 
   async def publish(self, signal) -> None:
     return None
@@ -59,15 +67,23 @@ class FakePublisher:
 
   async def publish_system_signal(self, **kwargs) -> None:
     self.calls.append(kwargs)
+    self.order.append("CRYPTO_LEVERAGE_INIT")
+
+  async def publish_system_strategy_magic_map(self, **kwargs) -> None:
+    self.magic_maps.append(kwargs)
+    self.order.append("STRATEGY_MAGIC_MAP")
 
   async def publish_system_retry_signal(self, **kwargs) -> None:
     self.retries.append(kwargs)
+    self.order.append("RETRY_SIGNALS")
 
   async def publish_system_ack(self, **kwargs) -> None:
     self.acks.append(kwargs)
+    self.order.append("WORKER_CONNECTED_ACK")
 
   async def publish_system_error(self, **kwargs) -> None:
     self.errors.append(kwargs)
+    self.order.append("WORKER_CONNECTED_ERROR")
 
 
 class FakeMsg:
@@ -765,3 +781,186 @@ async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
   retry = publisher.retries[0]
   assert len(retry["signals"]) == 1
   assert retry["signals"][0].signal_id == "sig-good"
+
+
+# ── STRATEGY_MAGIC_MAP on WORKER_CONNECTED ─────────────────────────────────
+
+_MAGIC_MAP_JSON = (
+  '{"MT5_GOLD_M5_V1": 20260409, "SIDEWAY_M15_V1": 20260617, '
+  '"MT5_MULTI_M5_V1": 20260708}'
+)
+
+
+def _magic_map_settings(extra: dict[str, str | None] | None = None) -> dict:
+  base = {
+    CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+    CRYPTO_MAX_LEVERAGE_KEY: "10",
+    STRATEGY_MAGIC_MAP_KEY: _MAGIC_MAP_JSON,
+  }
+  if extra:
+    base.update(extra)
+  return base
+
+
+async def test_magic_map_filtered_to_announced_strategies():
+  # A forex worker announces a subset of the mapped strategies; only those are
+  # returned.
+  consumer, _repo, publisher = _make_consumer(settings=_magic_map_settings())
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-1",
+        market="FOREX",
+        gateway="MT5",
+        strategies=["MT5_GOLD_M5_V1", "MT5_MULTI_M5_V1", "NOT_MAPPED"],
+      ),
+      reply="_INBOX.forex",
+    )
+  )
+  assert len(publisher.magic_maps) == 1
+  mm = publisher.magic_maps[0]
+  assert mm["account_id"] == "FOREX-MT5-1"
+  assert mm["subject"] == "_INBOX.forex"
+  # Only announced-and-mapped strategies survive; SIDEWAY_M15_V1 (mapped but not
+  # announced) and NOT_MAPPED (announced but not mapped) are both excluded.
+  assert mm["magic_map"] == {
+    "MT5_GOLD_M5_V1": 20260409,
+    "MT5_MULTI_M5_V1": 20260708,
+  }
+
+
+async def test_magic_map_sent_for_crypto_too():
+  consumer, _repo, publisher = _make_consumer(settings=_magic_map_settings())
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(strategies=["SIDEWAY_M15_V1"]),
+      reply="_INBOX.crypto",
+    )
+  )
+  assert len(publisher.magic_maps) == 1
+  assert publisher.magic_maps[0]["magic_map"] == {"SIDEWAY_M15_V1": 20260617}
+  # Crypto still also gets its CRYPTO_LEVERAGE_INIT.
+  assert len(publisher.calls) == 1
+
+
+async def test_magic_map_sent_first_in_handshake():
+  # For a crypto worker with strategies, the order is: STRATEGY_MAGIC_MAP,
+  # then RETRY_SIGNALS, then CRYPTO_LEVERAGE_INIT.
+  signals = FakeSignalRepo(envelopes=[_webhook_envelope("MT5_GOLD_M5_V1")])
+  consumer, _repo, publisher = _make_consumer(
+    settings=_magic_map_settings(), signals=signals
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]),
+      reply="_INBOX.crypto",
+    )
+  )
+  assert publisher.order[0] == "STRATEGY_MAGIC_MAP"
+  assert publisher.order == [
+    "STRATEGY_MAGIC_MAP",
+    "RETRY_SIGNALS",
+    "CRYPTO_LEVERAGE_INIT",
+  ]
+
+
+async def test_magic_map_sent_first_for_forex_ack():
+  # For a non-crypto worker the ACK still comes last, after the magic map.
+  consumer, _repo, publisher = _make_consumer(settings=_magic_map_settings())
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-1", market="FOREX", gateway="MT5"
+      ),
+      reply="_INBOX.forex",
+    )
+  )
+  # No strategies announced, so no RETRY_SIGNALS, but the magic map precedes ACK.
+  assert publisher.order == ["STRATEGY_MAGIC_MAP", "WORKER_CONNECTED_ACK"]
+
+
+async def test_magic_map_sent_empty_without_announced_strategies():
+  # No strategies → the mandatory message is still sent, with an empty map, and
+  # the setting is not even read (nothing could match).
+  repo = FakeSettingRepo(_magic_map_settings())
+  publisher = FakePublisher()
+  consumer = SystemEventConsumer(
+    setting_repository=repo,
+    account_repository=FakeAccountRepo(),
+    publisher=publisher,
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=[]))
+  )
+  assert len(publisher.magic_maps) == 1
+  assert publisher.magic_maps[0]["magic_map"] == {}
+  assert STRATEGY_MAGIC_MAP_KEY not in repo.get_calls
+
+
+async def test_magic_map_empty_when_setting_missing():
+  consumer, _repo, publisher = _make_consumer(
+    settings=_magic_map_settings({STRATEGY_MAGIC_MAP_KEY: None})
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]))
+  )
+  assert len(publisher.magic_maps) == 1
+  assert publisher.magic_maps[0]["magic_map"] == {}
+
+
+async def test_magic_map_empty_when_setting_invalid_json():
+  consumer, _repo, publisher = _make_consumer(
+    settings=_magic_map_settings({STRATEGY_MAGIC_MAP_KEY: "{not valid"})
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]))
+  )
+  assert len(publisher.magic_maps) == 1
+  assert publisher.magic_maps[0]["magic_map"] == {}
+
+
+async def test_magic_map_broadcast_without_reply_inbox():
+  consumer, _repo, publisher = _make_consumer(settings=_magic_map_settings())
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]))
+  )
+  # No reply inbox → subject None so NatsPublisher broadcasts on SYSTEM.
+  assert publisher.magic_maps[0]["subject"] is None
+
+
+async def test_magic_map_read_is_cached_within_ttl():
+  # Two forex handshakes (no signal repo, so no retry-timeout read) within the
+  # TTL read the strategy_magic_map setting only once.
+  consumer, repo, publisher = _make_consumer(settings=_magic_map_settings())
+  payload = _worker_connected_payload(
+    account_id="FOREX-MT5-1",
+    market="FOREX",
+    gateway="MT5",
+    strategies=["MT5_GOLD_M5_V1"],
+  )
+  await consumer.handle_subject_system(FakeMsg(payload))
+  await consumer.handle_subject_system(FakeMsg(payload))
+  assert len(publisher.magic_maps) == 2
+  assert repo.get_calls == [STRATEGY_MAGIC_MAP_KEY]
+
+
+async def test_magic_map_publish_failure_does_not_break_handshake():
+  class MagicMapExplodingPublisher(FakePublisher):
+    async def publish_system_strategy_magic_map(self, **kwargs) -> None:
+      raise RuntimeError("nats down")
+
+  consumer, _repo, _pub = _make_consumer(settings=_magic_map_settings())
+  consumer._publisher = MagicMapExplodingPublisher()  # type: ignore[attr-defined]
+  # The failing magic-map publish is swallowed; the ACK still goes out.
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-1",
+        market="FOREX",
+        gateway="MT5",
+        strategies=["MT5_GOLD_M5_V1"],
+      ),
+      reply="_INBOX.forex",
+    )
+  )
+  assert len(consumer._publisher.acks) == 1  # type: ignore[attr-defined]

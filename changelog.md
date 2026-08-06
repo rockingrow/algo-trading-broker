@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`STRATEGY_MAGIC_MAP` sent to every worker on connect** — Every
+  `WORKER_CONNECTED` handshake now begins with a new `SYSTEM.STRATEGY_MAGIC_MAP`
+  message, for **both** forex and crypto workers, carrying the strategy →
+  magic-number map the worker needs. The map is sourced from a new
+  `strategy_magic_map` `BrokerSetting` (stored as JSON text, e.g.
+  `{"MT5_GOLD_M5_V1": 20260409, …}`) and filtered down to just the strategies
+  the worker announced in `strategies`, then delivered privately on the
+  request's reply inbox (or broadcast on `SYSTEM` for a fire-and-forget
+  worker). It is mandatory and **sent first** — ahead of the `RETRY_SIGNALS`
+  replay and the market-specific `CRYPTO_LEVERAGE_INIT` / `WORKER_CONNECTED_ACK`
+  — and is sent even when the resulting map is empty. The setting read is cached
+  for ~30s, mirroring the crypto-settings cache, to absorb reconnect storms. A
+  new migration seeds the `strategy_magic_map` row, and
+  [`examples/nats/system.strategy_magic_map.json`](examples/nats/system.strategy_magic_map.json)
+  documents the payload.
+- **Edit the strategy magic map from the admin API and Telegram bot** — New
+  `GET` / `POST /admin/settings/strategy-magic-map` endpoints read and replace
+  the `strategy_magic_map` setting (values validated as integers; at least one
+  entry required so an accidental empty submission can't wipe it). The Telegram
+  bot gains an `/admin_magicmap` command that shows the current value and takes
+  the new map as pasted JSON text. There is no live push to already-connected
+  workers — they pick up the new map on their next `WORKER_CONNECTED` (within
+  the settings cache), because the broker doesn't persist which strategies each
+  connected worker holds.
+
 ### Fixed
 
 - **Webhook now returns 422 (not 500) when the body is invalid JSON** — When

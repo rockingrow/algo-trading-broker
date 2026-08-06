@@ -28,6 +28,7 @@ String(50) and never contains ':'):
 from __future__ import annotations
 
 import html
+import json
 from typing import Optional
 
 from aiogram import F, Router
@@ -45,7 +46,7 @@ from app.constants import (
 )
 from app.filters.is_admin import IsAdmin
 from app.presenters import messages
-from app.states import AdminLinkAccount, CreateAccount
+from app.states import AdminLinkAccount, CreateAccount, SetStrategyMagicMap
 from app.utils.invite import to_payload
 from app.utils.pagination import paginate
 from app.utils.telegram import safe_edit_text
@@ -615,3 +616,88 @@ async def cb_settings_toggle(
     return
   await safe_edit_text(call.message, text, kb)
   await call.answer("Updated")
+
+
+# ── /admin_magicmap ─────────────────────────────────────────────────
+# Edit the strategy → magic-number map (broker setting `strategy_magic_map`)
+# by typing a JSON object. The broker validates + stores it; workers pick up
+# the new map on their next connect. `/admin_magicmap {"X": 1}` sets it in one
+# shot; bare `/admin_magicmap` shows the current value and waits for the text.
+
+
+def _parse_magic_map_input(
+  raw: str,
+) -> tuple[Optional[dict[str, int]], Optional[str]]:
+  """Parse admin-typed text into a {strategy: magic} map, or return an error
+  message (the broker re-validates server-side, but parsing here gives the admin
+  immediate feedback)."""
+  try:
+    data = json.loads(raw)
+  except json.JSONDecodeError as exc:
+    return None, f"Invalid JSON: {html.escape(str(exc))}"
+  if not isinstance(data, dict):
+    return None, 'Expected a JSON object, e.g. {"MT5_GOLD_M5_V1": 20260409}.'
+  if not data:
+    return None, "Provide at least one strategy → magic number entry."
+  cleaned: dict[str, int] = {}
+  for key, value in data.items():
+    # bool is an int subclass, but a magic number is never true/false.
+    if isinstance(value, bool) or not isinstance(value, int):
+      return None, f"Magic number for '{html.escape(str(key))}' must be an integer."
+    cleaned[str(key)] = value
+  return cleaned, None
+
+
+async def _apply_magic_map(
+  message: Message, broker_admin: BrokerClientAdmin, raw: str
+) -> bool:
+  """Validate *raw* and push it to the broker. Returns True once applied, False
+  if the input was rejected (an error was already sent to the admin)."""
+  parsed, error = _parse_magic_map_input(raw)
+  if error is not None:
+    await message.answer(f"{emojis.WARNING} {error}")
+    return False
+  result = await broker_admin.set_strategy_magic_map(parsed)
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update the strategy magic map. Please try again."
+    )
+    return False
+  await message.answer(
+    messages.AdminMessages.format_magic_map_updated(str(result.get("value")))
+  )
+  return True
+
+
+@router.message(Command("admin_magicmap", "magicmap"))
+async def cmd_magicmap(
+  message: Message,
+  command: CommandObject,
+  state: FSMContext,
+  broker_admin: BrokerClientAdmin,
+) -> None:
+  await state.clear()
+  arg = (command.args or "").strip()
+  if arg:
+    await _apply_magic_map(message, broker_admin, arg)
+    return
+  current = await broker_admin.get_strategy_magic_map()
+  value = current.get("value") if current else None
+  await state.set_state(SetStrategyMagicMap.waiting_for_value)
+  await message.answer(messages.AdminMessages.format_magic_map_prompt(value))
+
+
+@router.message(SetStrategyMagicMap.waiting_for_value, F.text & ~F.text.startswith("/"))
+async def receive_magic_map(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  applied = await _apply_magic_map(message, broker_admin, (message.text or "").strip())
+  # On a parse/validation error stay in the state so the admin can correct and
+  # resend; only clear once the update actually lands.
+  if applied:
+    await state.clear()
+
+
+@router.message(SetStrategyMagicMap.waiting_for_value, ~F.text)
+async def prompt_magic_map_text(message: Message) -> None:
+  await message.answer(f"{emojis.WARNING} Please send the magic map as JSON text.")

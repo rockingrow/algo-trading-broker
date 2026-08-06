@@ -1,0 +1,9 @@
+{
+  "action": "STRATEGY_MAGIC_MAP",
+  "account_id": "FOREX-MT5-12345678",
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "magic_map": {
+    "MT5_GOLD_M5_V1": 20260409,
+    "MT5_MULTI_M5_V1": 20260708
+  }
+}

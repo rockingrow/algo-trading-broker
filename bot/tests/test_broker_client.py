@@ -349,6 +349,56 @@ async def test_admin_rotate_settings_toggle_paths():
   await client.aclose()
 
 
+async def test_get_strategy_magic_map_path():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    return httpx.Response(
+      200,
+      json={"setting": "strategy_magic_map", "value": '{"MT5_GOLD_M5_V1": 20260409}'},
+    )
+
+  client = _admin_client(handler)
+  result = await client.get_strategy_magic_map()
+  assert result["value"] == '{"MT5_GOLD_M5_V1": 20260409}'
+  assert captured["path"] == "/admin/settings/strategy-magic-map"
+  assert captured["method"] == "GET"
+  await client.aclose()
+
+
+async def test_set_strategy_magic_map_posts_map():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    captured["body"] = request.content.decode()
+    return httpx.Response(
+      200,
+      json={"setting": "strategy_magic_map", "value": '{"MT5_GOLD_M5_V1": 20260409}'},
+    )
+
+  client = _admin_client(handler)
+  result = await client.set_strategy_magic_map({"MT5_GOLD_M5_V1": 20260409})
+  assert result["setting"] == "strategy_magic_map"
+  assert captured["path"] == "/admin/settings/strategy-magic-map"
+  assert captured["method"] == "POST"
+  body = captured["body"].replace(" ", "")
+  assert '"magic_map":{"MT5_GOLD_M5_V1":20260409}' in body
+  await client.aclose()
+
+
+async def test_set_strategy_magic_map_rejected_returns_none():
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(422, json={"detail": "bad map"})
+
+  client = _admin_client(handler)
+  assert await client.set_strategy_magic_map({"X": 1}) is None
+  await client.aclose()
+
+
 async def test_admin_prefix_applied():
   captured = {}
 

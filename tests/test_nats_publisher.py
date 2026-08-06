@@ -170,6 +170,37 @@ async def test_publish_system_signal_to_reply_inbox():
   assert body["action"] == "CRYPTO_LEVERAGE_INIT"
 
 
+async def test_publish_system_strategy_magic_map_to_reply_inbox():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_strategy_magic_map(
+    account_id="FOREX-MT5-12345678",
+    magic_map={"MT5_GOLD_M5_V1": 20260409},
+    subject="_INBOX.reply",
+  )
+
+  subject, body = conn.nc.published[0]
+  # A reply inbox is targeted directly so only that worker gets its own map.
+  assert subject == "_INBOX.reply"
+  assert body["action"] == "STRATEGY_MAGIC_MAP"
+  assert body["account_id"] == "FOREX-MT5-12345678"
+  assert body["magic_map"] == {"MT5_GOLD_M5_V1": 20260409}
+
+
+async def test_publish_system_strategy_magic_map_broadcasts_when_no_subject():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_strategy_magic_map(
+    account_id="CRYPTO-BINANCE-7654321", magic_map={}
+  )
+
+  subject, body = conn.nc.published[0]
+  # No subject → falls back to the shared SYSTEM subject.
+  assert subject == PublishTopicEnum.SYSTEM.value
+  assert body["action"] == "STRATEGY_MAGIC_MAP"
+  assert body["magic_map"] == {}
+
+
 async def test_publish_system_ack():
   conn = FakeConn()
   publisher = NatsPublisher(connection=conn)

@@ -49,6 +49,12 @@ class SystemActionEnum(str, Enum):
   # Outgoing (broker → worker)
   CRYPTO_LEVERAGE_INIT = "CRYPTO_LEVERAGE_INIT"
 
+  # Outgoing (broker → worker): the strategy → magic-number map, filtered down
+  # to the strategies the worker announced on WORKER_CONNECTED. Mandatory for
+  # every market (forex and crypto) and sent first in the handshake, ahead of
+  # the RETRY_SIGNALS replay and the market-specific ACK / CRYPTO_LEVERAGE_INIT.
+  STRATEGY_MAGIC_MAP = "STRATEGY_MAGIC_MAP"
+
   # Outgoing (broker → worker): replay of every SIGNAL persisted in the last
   # ``max_retry_timeout`` seconds for the strategies this worker announced.
   # Delivered as part of the WORKER_CONNECTED handshake so a worker that just
@@ -201,6 +207,40 @@ class SystemCryptoLeverageInitSignal(SystemSignal):
   action: SystemActionEnum = SystemActionEnum.CRYPTO_LEVERAGE_INIT
   symbols: Optional[list[str]] = None
   default_leverage: Optional[int] = None
+
+
+class SystemStrategyMagicMapSignal(SystemSignal):
+  """Outbound STRATEGY_MAGIC_MAP signal the broker pushes to every worker on
+  connect, for both forex and crypto.
+
+  ``magic_map`` maps a strategy name to its magic number, sourced from the
+  ``strategy_magic_map`` BrokerSetting (stored as JSON text) and filtered down
+  to just the strategies the worker announced on WORKER_CONNECTED. It is sent
+  first in the handshake — ahead of the RETRY_SIGNALS replay and the
+  market-specific ACK / CRYPTO_LEVERAGE_INIT — and delivered privately on the
+  worker's reply inbox so only that worker receives its own map.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "STRATEGY_MAGIC_MAP",
+        "account_id": "FOREX-MT5-12345678",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "magic_map": {"MT5_GOLD_M5_V1": 20260409, "MT5_MULTI_M5_V1": 20260708},
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.STRATEGY_MAGIC_MAP
+  magic_map: dict[str, int] = Field(
+    default_factory=dict,
+    description=(
+      "Strategy name → magic number, filtered to the strategies the worker "
+      "announced on WORKER_CONNECTED."
+    ),
+  )
 
 
 class SystemWorkerConnectedSignal(SystemSignal):

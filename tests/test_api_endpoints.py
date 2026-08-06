@@ -20,6 +20,7 @@ from broker.constants import (
   CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_TIMEZONE_KEY,
   SIGNAL_BLOCKED,
+  STRATEGY_MAGIC_MAP_KEY,
 )
 from broker.db.models import Account, Trade
 from broker.providers import (
@@ -633,6 +634,80 @@ def test_set_crypto_max_leverage_persist_failure_returns_500(ctx):
   resp = ctx["client"].post(
     "/admin/settings/crypto-max-leverage",
     json={"default_leverage": 10},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 500
+
+
+# ── Admin settings — strategy magic map ─────────────────────────────
+
+
+def test_get_strategy_magic_map_defaults_to_empty_object(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/strategy-magic-map", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == STRATEGY_MAGIC_MAP_KEY
+  assert body["value"] == "{}"
+
+
+def test_get_strategy_magic_map_returns_stored_value(ctx):
+  ctx["setting_repo"].values[STRATEGY_MAGIC_MAP_KEY] = '{"MT5_GOLD_M5_V1": 20260409}'
+  resp = ctx["client"].get(
+    "/admin/settings/strategy-magic-map", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == '{"MT5_GOLD_M5_V1": 20260409}'
+
+
+def test_set_strategy_magic_map(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {"MT5_GOLD_M5_V1": 20260409, "SIDEWAY_M15_V1": 20260617}},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == STRATEGY_MAGIC_MAP_KEY
+  # Stored as canonical JSON text.
+  import json
+
+  assert json.loads(body["value"]) == {
+    "MT5_GOLD_M5_V1": 20260409,
+    "SIDEWAY_M15_V1": 20260617,
+  }
+  assert json.loads(ctx["setting_repo"].values[STRATEGY_MAGIC_MAP_KEY]) == {
+    "MT5_GOLD_M5_V1": 20260409,
+    "SIDEWAY_M15_V1": 20260617,
+  }
+  # The admin channel is notified.
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_strategy_magic_map_rejects_empty(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {}},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_strategy_magic_map_rejects_non_integer_value(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {"MT5_GOLD_M5_V1": "not-an-int"}},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_strategy_magic_map_persist_failure_returns_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {"MT5_GOLD_M5_V1": 20260409}},
     headers={"X-API-KEY": API_KEY},
   )
   assert resp.status_code == 500

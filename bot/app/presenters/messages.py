@@ -341,9 +341,31 @@ class AdminMessages:
     "/admin_flat — FLAT system-wide / account\n"
     "/admin_rotate — Rotate token + unlink users\n"
     "/admin_settings — Broker settings\n"
+    "/admin_magicmap — Edit strategy magic map\n"
     "/admin_linkaccount — Link a Telegram user to an account\n"
     "/admin_invite_url — One-tap invite link for an account"
   )
+
+  @staticmethod
+  def format_magic_map_prompt(current_value: Optional[str]) -> str:
+    """Show the current strategy_magic_map JSON and ask for the new value."""
+    body = _esc(current_value) if current_value else "—"
+    return (
+      f"{emojis.GEAR} <b>Strategy magic map</b>\n\n"
+      f"Current value:\n<code>{body}</code>\n\n"
+      "Send the new value as a JSON object mapping each strategy to its magic "
+      "number, e.g.\n"
+      '<code>{"MT5_GOLD_M5_V1": 20260409, "MT5_MULTI_M5_V1": 20260708}</code>'
+    )
+
+  @staticmethod
+  def format_magic_map_updated(value: str) -> str:
+    """Confirmation after the strategy_magic_map is changed."""
+    return (
+      f"{emojis.CHECK} <b>Strategy magic map updated</b>\n\n"
+      f"<code>{_esc(value)}</code>\n\n"
+      "<i>Workers apply the new map on their next connect.</i>"
+    )
 
   @staticmethod
   def format_linked_account(account: dict[str, Any], telegram_user_id: int) -> str:
