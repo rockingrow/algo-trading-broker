@@ -262,29 +262,6 @@ class TelegramNotification(Notification):
     return True
 
 
-class OwnerBroadcastNotifier(Notification):
-  """Sends a Telegram DM to a specific chat id via the bot-service bot token.
-
-  Unlike :class:`TelegramNotification` (one fixed chat, wraps every message in a
-  ``<pre>`` box), this targets an arbitrary ``chat_id`` per call and sends the
-  HTML body as-is — completed-trade broadcasts carry their own ``<b>`` markup.
-
-  The token defaults to ``BOT_TELEGRAM_TOKEN`` (the bot users actually DM),
-  not the broker's own notification bot: a user can only be messaged by the bot
-  they started. Silently no-ops when Telegram is disabled or the token is
-  unset, so a deployment that doesn't share the bot token simply never
-  broadcasts."""
-
-  token_setting_name = "BOT_TELEGRAM_TOKEN"
-
-  def __init__(self, bot_token: str | None = None) -> None:
-    super().__init__(
-      bot_token=bot_token
-      if bot_token is not None
-      else settings.telegram.SERVICE_BOT_TOKEN
-    )
-
-
 class EditOutcome(Enum):
   """Result of trying to rewrite an existing broadcast message.
 
@@ -320,7 +297,19 @@ class BroadcastNotifier:
   Like :class:`TelegramNotification`, the body is wrapped in the same
   ``<pre>`` box (see :func:`_box`) so a cycle reads the same way in the chat
   as every other broker notification.
+
+  :class:`TradeCardNotifier` reuses this whole path for the per-owner trade
+  card — same HTTP calls, same error classification — and only overrides what
+  actually differs there: the token, the body formatting, and which errors
+  count as unrecoverable.
   """
+
+  #: Body formatting applied to every send/edit. Overridable: a trade card
+  #: carries its own ``<b>`` markup and must not be boxed.
+  format_text = staticmethod(_box)
+
+  #: Errors that make a message unrecoverable for *this* channel.
+  gone_markers: tuple[str, ...] = _MESSAGE_GONE_MARKERS
 
   def __init__(self, bot_token: str | None = None) -> None:
     self.enabled = settings.telegram.ENABLED
@@ -338,18 +327,27 @@ class BroadcastNotifier:
       return False
     return True
 
-  def _payload(self, target: ChatTarget, text: str) -> dict:
+  def _payload(
+    self, target: ChatTarget, text: str, reply_markup: dict | None = None
+  ) -> dict:
     payload: dict[str, Any] = {
       "chat_id": target.chat_id,
-      "text": _box(text),
+      "text": self.format_text(text),
       "parse_mode": "HTML",
       "disable_web_page_preview": True,
     }
     if target.message_thread_id is not None:
       payload["message_thread_id"] = target.message_thread_id
+    # Deliberately absent rather than null when there is no markup: the Bot API
+    # *drops* a message's keyboard when the field is missing, which is how a
+    # trade card loses its buttons once the trade is over.
+    if reply_markup is not None:
+      payload["reply_markup"] = reply_markup
     return payload
 
-  async def send_and_get_message_id(self, target: ChatTarget, text: str) -> str | None:
+  async def send_and_get_message_id(
+    self, target: ChatTarget, text: str, reply_markup: dict | None = None
+  ) -> str | None:
     """Post *text* to *target* and return Telegram's ``message_id``.
 
     ``None`` means nothing was sent (disabled/misconfigured) or the send
@@ -362,7 +360,8 @@ class BroadcastNotifier:
     try:
       async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
         response = await client.post(
-          self._api_url("sendMessage"), json=self._payload(target, text)
+          self._api_url("sendMessage"),
+          json=self._payload(target, text, reply_markup),
         )
       if response.status_code != 200:
         logger.error(
@@ -428,7 +427,11 @@ class BroadcastNotifier:
       return False
 
   async def edit_message(
-    self, target: ChatTarget, message_id: str, text: str
+    self,
+    target: ChatTarget,
+    message_id: str,
+    text: str,
+    reply_markup: dict | None = None,
   ) -> EditOutcome:
     """Rewrite an already-sent broadcast message.
 
@@ -436,10 +439,13 @@ class BroadcastNotifier:
     rejects because the body is byte-identical (``message is not modified``)
     counts as OK — it is a no-op, and calling it a failure would make a
     re-delivered signal re-post the whole cycle.
+
+    Passing ``reply_markup=None`` also *clears* the message's buttons, since
+    the field is then omitted from the payload — see :meth:`_payload`.
     """
     if not self._ready(target):
       return EditOutcome.FAILED
-    payload = self._payload(target, text)
+    payload = self._payload(target, text, reply_markup)
     payload["message_id"] = message_id
     try:
       async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
@@ -455,7 +461,7 @@ class BroadcastNotifier:
         message_id,
         response.text,
       )
-      if any(marker in body for marker in _MESSAGE_GONE_MARKERS):
+      if any(marker in body for marker in self.gone_markers):
         return EditOutcome.MISSING
       return EditOutcome.FAILED
     except Exception as exc:
@@ -466,6 +472,58 @@ class BroadcastNotifier:
         exc,
       )
       return EditOutcome.FAILED
+
+
+#: On top of the shared markers, a *direct message* can also become
+#: unreachable because of the recipient rather than the message: they blocked
+#: the bot, deleted their account, or never started it. A broadcast channel
+#: recovers from MISSING by re-sending; for a DM those three mean re-sending
+#: would fail too, so the card is forgotten instead.
+_DM_GONE_MARKERS = _MESSAGE_GONE_MARKERS + (
+  "chat not found",
+  "bot was blocked by the user",
+  "user is deactivated",
+  "bot can't initiate conversation",
+)
+
+
+class TradeCardNotifier(BroadcastNotifier):
+  """Sends and edits the live trade card DM-ed to an account's owners.
+
+  Same machinery as :class:`BroadcastNotifier` — one message owned per trade,
+  handed back by id and rewritten in place — with three differences that all
+  follow from the audience:
+
+  * **The bot-service token.** A user can only be messaged by the bot they
+    started, which is the bot service's, not the broker's send-only bot. It is
+    also what makes the card interactive: buttons on a message sent with this
+    token produce callback queries the bot service is already polling for.
+  * **No ``<pre>`` box.** A card carries its own ``<b>`` markup and a keyboard;
+    boxing it would render the whole thing as preformatted text.
+  * **Wider "gone" errors.** See :data:`_DM_GONE_MARKERS`.
+
+  Silently no-ops when Telegram is disabled or the token is unset, so a
+  deployment that doesn't share the bot token simply never posts cards.
+  """
+
+  format_text = staticmethod(lambda text: text)
+  gone_markers = _DM_GONE_MARKERS
+
+  def __init__(self, bot_token: str | None = None) -> None:
+    super().__init__(
+      bot_token=bot_token
+      if bot_token is not None
+      else settings.telegram.SERVICE_BOT_TOKEN
+    )
+
+  def _ready(self, target: ChatTarget) -> bool:
+    if not self.enabled:
+      logger.debug("Telegram notifications are disabled in settings.")
+      return False
+    if not self.bot_token or not target.chat_id:
+      logger.warning("BOT_TELEGRAM_TOKEN and a chat id must be set for trade cards.")
+      return False
+    return True
 
 
 def _safe_json(response) -> dict:

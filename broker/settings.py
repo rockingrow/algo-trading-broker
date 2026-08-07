@@ -146,7 +146,7 @@ class TelegramSettings(BaseSettings):
   # Token of the *bot-service* BotFather bot (the one end-users actually DM to
   # link and drive their account — BOT_TELEGRAM_TOKEN in the bot's config).
   # Read from the shared .env so the broker can DM an account's owner directly
-  # (completed-trade broadcasts): a user can only be messaged by the bot they
+  # (the live trade cards): a user can only be messaged by the bot they
   # started, and that is this bot, not the broker's own notification bot
   # (BOT_TOKEN). Empty disables owner broadcasts. Its env var breaks the
   # ``TELEGRAM_`` prefix, so it is pinned with an explicit alias.

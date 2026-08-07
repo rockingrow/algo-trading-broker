@@ -88,7 +88,7 @@ class CommandResultResponse(BaseModel):
 
 
 class BroadcastSubscriptionResponse(BaseModel):
-  """Whether the caller is opted in to completed-trade broadcast DMs."""
+  """Whether the caller is opted in to live trade-card DMs."""
 
   subscribed: bool
 

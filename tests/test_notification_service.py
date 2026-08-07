@@ -277,18 +277,6 @@ async def test_log_chat_id_falls_back_to_the_management_list(monkeypatch):
   assert _targets_of(sent) == [("-100111", None), ("-100222", 7)]
 
 
-async def test_owner_broadcast_chat_id_takes_a_list(monkeypatch):
-  """Per-call chat ids (owner DMs) go through the same parsing."""
-  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
-  sent = []
-  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
-
-  notifier = ns.OwnerBroadcastNotifier(bot_token="svc-tok")
-  await notifier.send_message("closed", chat_id="555,777_3")
-
-  assert _targets_of(sent) == [("555", None), ("777", 3)]
-
-
 async def test_non_200_is_handled_gracefully(monkeypatch):
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")

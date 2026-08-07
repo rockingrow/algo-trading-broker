@@ -18,6 +18,22 @@ FLAT: str = emoji.emojize(":white_flag:")  # 🏳️
 DEFAULT_SIGNAL: str = emoji.emojize(":satellite_antenna:")  # 📡
 BAR_CHART: str = emoji.emojize(":bar_chart:")  # 📊
 
+# ── Trade card status dots ────────────────────────────────────────────────────
+# One per TradeStatusEnum value, so the live card's headline reads at a glance.
+TRADE_OPENED: str = emoji.emojize(":blue_circle:")  # 🔵
+TRADE_PARTIALLY_CLOSED: str = emoji.emojize(":bullseye:")  # 🎯
+TRADE_CLOSED: str = emoji.emojize(":chequered_flag:")  # 🏁
+TRADE_FLAT: str = emoji.emojize(":white_flag:")  # 🏳️
+TRADE_REJECTED: str = emoji.emojize(":prohibited:")  # 🚫
+
+# ── Trade card buttons / footers ──────────────────────────────────────────────
+DETAIL: str = emoji.emojize(":magnifying_glass_tilted_left:")  # 🔍
+COLLAPSE: str = emoji.emojize(":up_arrow:")  # ⬆️
+EXIT: str = emoji.emojize(":stop_sign:")  # 🛑
+CONFIRM: str = emoji.emojize(":check_mark_button:")  # ✅
+CANCEL: str = emoji.emojize(":multiply:")  # ✖️
+PENDING: str = emoji.emojize(":hourglass_not_done:")  # ⏳
+
 # ── Broker lifecycle ──────────────────────────────────────────────────────────
 BROKER_STARTED: str = emoji.emojize(":green_circle:")  # 🟢
 BROKER_STOPPED: str = emoji.emojize(":stop_sign:")  # 🛑

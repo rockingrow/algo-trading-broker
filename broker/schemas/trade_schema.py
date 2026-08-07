@@ -26,6 +26,23 @@ class TradeStatusEnum(str, Enum):
   FLAT = "FLAT"
 
 
+class TradeCard(BaseModel):
+  """A live trade card already posted to one subscriber.
+
+  The value-object view of a ``trade_notifications`` row: everything the card
+  service needs to decide whether to edit that message, and nothing else. Kept
+  out of the ORM layer so the service (and its tests) never handle detached
+  SQLAlchemy instances.
+  """
+
+  id: uuid.UUID
+  chat_id: str
+  message_id: int
+  status: TradeStatusEnum
+
+  model_config = {"from_attributes": True}
+
+
 class TradeResponse(BaseModel):
   """API response model for a trade row."""
 
@@ -49,6 +66,9 @@ class TradeResponse(BaseModel):
   is_running: bool
   risk_percent: float
   status: TradeStatusEnum
+  # The event that last moved the trade (TP1/TP2/SL/R_SL/FLAT/...). Several map
+  # onto the same status, so this is what says *how* a trade ended.
+  last_action: Optional[str] = None
   reject_reason: Optional[str]
   createdAt: datetime
   updatedAt: datetime
@@ -77,6 +97,7 @@ class TradeResponse(BaseModel):
         "is_running": True,
         "risk_percent": 1.0,
         "status": "OPENED",
+        "last_action": "OPENED",
         "reject_reason": None,
         "createdAt": "2026-06-01T08:00:00Z",
         "updatedAt": "2026-06-02T09:30:00Z",
