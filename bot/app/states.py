@@ -25,3 +25,9 @@ class AdminLinkAccount(StatesGroup):
   user id to bind to it."""
 
   waiting_for_telegram_id = State()
+
+
+class SetStrategyMagicMap(StatesGroup):
+  """Admin flow: type the strategy → magic-number map as a JSON object."""
+
+  waiting_for_value = State()

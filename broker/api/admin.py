@@ -1,3 +1,4 @@
+import json
 import uuid as uuid_lib
 from datetime import datetime, timezone
 
@@ -10,6 +11,7 @@ from broker.constants import (
   NOTIFICATION_TIMEZONE_KEY,
   SIGNAL_BLOCKED,
   SILENT_SIGNAL,
+  STRATEGY_MAGIC_MAP_KEY,
 )
 from broker.helpers import emoji_constants as em
 from broker.helpers.timezone_helper import (
@@ -45,6 +47,7 @@ from broker.schemas.admin_schema import (
   RotateTokenResponse,
   SettingToggleResponse,
   SettingValueResponse,
+  StrategyMagicMapRequest,
   FlatRequest,
 )
 from broker.schemas.publisher_schema import (
@@ -354,6 +357,59 @@ def get_admin_router() -> APIRouter:
     await _push_crypto_leverage_init(publisher, setting_repo, account_repo)
 
     return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
+
+  @router.get(
+    "/settings/strategy-magic-map",
+    tags=["settings"],
+    summary="Get the strategy → magic-number map",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_strategy_magic_map(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Return the current strategy_magic_map JSON text ('{}' when unset)."""
+    value = await setting_repo.get(STRATEGY_MAGIC_MAP_KEY)
+    return SettingValueResponse(
+      setting=STRATEGY_MAGIC_MAP_KEY, value=value if value is not None else "{}"
+    )
+
+  @router.post(
+    "/settings/strategy-magic-map",
+    tags=["settings"],
+    summary="Set the strategy → magic-number map",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_strategy_magic_map(
+    body: StrategyMagicMapRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingValueResponse:
+    """Set STRATEGY_MAGIC_MAP_KEY (validated as a JSON object of str→int by
+    StrategyMagicMapRequest) and store it as canonical JSON text. Workers pick
+    up the new map on their next WORKER_CONNECTED handshake, each filtered to
+    the strategies it announces — there is no live push, since the broker does
+    not persist which strategies each connected worker holds."""
+    value = json.dumps(body.magic_map)
+
+    ok = await setting_repo.set(STRATEGY_MAGIC_MAP_KEY, value)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broker setting",
+      )
+
+    log.info("%s updated -> %s", STRATEGY_MAGIC_MAP_KEY, value)
+    await notifier.send_message(
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
+      f"Setting: <code>{STRATEGY_MAGIC_MAP_KEY}</code>\n"
+      f"Strategies mapped: <b>{len(body.magic_map)}</b>\n"
+    )
+
+    return SettingValueResponse(setting=STRATEGY_MAGIC_MAP_KEY, value=value)
 
   @router.get(
     "/settings/notification-timezone",

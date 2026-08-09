@@ -1,5 +1,25 @@
 {
   "action": "WORKER_CONNECTED_ACK",
   "account_id": "FOREX-MT5-12345678",
-  "timestamp": "2026-06-30T00:00:00+00:00"
+  "timestamp": "2026-06-30T00:00:00+00:00",
+  "strategy_magic_map": {
+    "MT5_GOLD_M5_V1": 20260409,
+    "MT5_MULTI_M5_V1": 20260708
+  },
+  "retry_signals": [
+    {
+      "signal_id": "sig_123456789_long",
+      "timestamp": "2026-06-29T23:59:30+00:00",
+      "strategy": "MT5_GOLD_M5_V1",
+      "action": "LONG",
+      "symbol": "XAUUSD",
+      "price": 2350.5,
+      "quantity": 0.1,
+      "sl": 2340.0,
+      "tp1": 2370.0,
+      "tp2": 2390.0,
+      "risk_percent": 1.0
+    }
+  ],
+  "crypto_leverage_init": null
 }

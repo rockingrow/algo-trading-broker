@@ -262,6 +262,7 @@ class BrokerClientAdmin(BrokerClient):
     SETTINGS = "settings"
     SETTINGS_TOGGLE = "settings/{slug}"
     NOTIFICATION_TIMEZONE = "settings/notification-timezone"
+    STRATEGY_MAGIC_MAP = "settings/strategy-magic-map"
 
   async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
     """All trading accounts (includes link_token + linked_user_ids)."""
@@ -372,4 +373,25 @@ class BrokerClientAdmin(BrokerClient):
     default the broker itself uses."""
     return self._json_or_none(
       await self._request("GET", self._path(self.ENDPOINTS.NOTIFICATION_TIMEZONE))
+    )
+
+  async def get_strategy_magic_map(self) -> Optional[dict[str, Any]]:
+    """The strategy → magic-number map as stored JSON text
+    (``{"setting": "strategy_magic_map", "value": "{...}"}``). None on failure."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.STRATEGY_MAGIC_MAP))
+    )
+
+  async def set_strategy_magic_map(
+    self, magic_map: dict[str, int]
+  ) -> Optional[dict[str, Any]]:
+    """Replace the strategy → magic-number map. Returns the stored value, or
+    None on failure (an invalid map the broker rejects, or a transport error —
+    the broker's error response is logged in ``_request``)."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.STRATEGY_MAGIC_MAP),
+        json={"magic_map": magic_map},
+      )
     )

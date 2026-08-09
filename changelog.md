@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Strategy magic map sent to every worker on connect** — Every
+  `WORKER_CONNECTED` handshake is now answered with a `strategy_magic_map`
+  block, for **both** forex and crypto workers, carrying the strategy →
+  magic-number map the worker needs. The map is sourced from a new
+  `strategy_magic_map` `BrokerSetting` (stored as JSON text, e.g.
+  `{"MT5_GOLD_M5_V1": 20260409, …}`) and filtered down to just the strategies
+  the worker announced in `strategies`, so it is delivered privately on the
+  request's reply inbox (or broadcast on `SYSTEM` for a fire-and-forget
+  worker). It is mandatory — present even when the resulting map is empty. The
+  setting read is cached for ~30s, mirroring the crypto-settings cache, to
+  absorb reconnect storms. A new migration seeds the `strategy_magic_map` row,
+  and
+  [`examples/nats/system.worker_connected_ack.json`](examples/nats/system.worker_connected_ack.json)
+  documents the payload.
+- **The `WORKER_CONNECTED_ACK` payload is logged when it is published** — The
+  existing per-connect log line gains a `payload=` field carrying the exact
+  JSON sent to the worker, alongside the counts it already reported. Since the
+  whole handshake answer now travels in that one message, this line is the
+  record of precisely what a worker was told when it comes up misconfigured.
+  Logged at `info` (one line per worker connect, so the volume is bounded by
+  reconnects rather than by traffic) and reusing the serialized body, so it can
+  never drift from the bytes actually published.
+- **Edit the strategy magic map from the admin API and Telegram bot** — New
+  `GET` / `POST /admin/settings/strategy-magic-map` endpoints read and replace
+  the `strategy_magic_map` setting (values validated as integers; at least one
+  entry required so an accidental empty submission can't wipe it). The Telegram
+  bot gains an `/admin_magicmap` command that shows the current value and takes
+  the new map as pasted JSON text. There is no live push to already-connected
+  workers — they pick up the new map on their next `WORKER_CONNECTED` (within
+  the settings cache), because the broker doesn't persist which strategies each
+  connected worker holds.
+
 ### Fixed
 
 - **Webhook now returns 422 (not 500) when the body is invalid JSON** — When
@@ -23,6 +57,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: the `WORKER_CONNECTED` handshake now answers with exactly one
+  message** — A NATS reply inbox only ever accepts a single message:
+  `request()` resolves its future (or, in the `old_style` form,
+  auto-unsubscribes at `max_msgs=1`) on the first reply and silently **drops**
+  everything after it. The handshake had grown to three replies on that one
+  inbox, so a worker received only the first and lost the rest. All of it now
+  travels inside the single `WORKER_CONNECTED_ACK`, which gained three blocks:
+  - `strategy_magic_map` (always present, `{}` when nothing matched),
+  - `retry_signals` (always present, `[]` when there is nothing to replay) —
+    replaces the separate `SYSTEM.RETRY_SIGNALS` message,
+  - `crypto_leverage_init` (`{symbols, default_leverage}` for a crypto worker,
+    `null` otherwise) — replaces the connect-time `CRYPTO_LEVERAGE_INIT` reply.
+
+  The `STRATEGY_MAGIC_MAP` and `RETRY_SIGNALS` actions are gone; every market
+  now gets a `WORKER_CONNECTED_ACK` (crypto included). A crypto worker whose
+  settings are missing or invalid still gets `WORKER_CONNECTED_ERROR`, sent
+  *instead of* the ACK rather than after it, so it is never told it is
+  configured when it is not. `CRYPTO_LEVERAGE_INIT` survives only as the live
+  push to **already-connected** workers after an admin edits
+  `crypto_allowed_symbol` / `crypto_max_leverage` — that path is unchanged.
+  **Workers must be updated**: read the config from the ACK's blocks instead of
+  waiting for three separate messages. See
+  [`examples/nats/system.worker_connected_ack.json`](examples/nats/system.worker_connected_ack.json)
+  (forex) and
+  [`examples/nats/system.worker_connected_ack.crypto.json`](examples/nats/system.worker_connected_ack.crypto.json)
+  for the new payload; the `system.strategy_magic_map.json` and
+  `system.retry_signals.json` examples are removed.
 - **`REJECTED` TRADE now covers the "worker already has an open position"
   case** — When the broker fires a `SIGNAL` but the worker is already holding
   an open position for that symbol/strategy, the worker refuses the new signal
