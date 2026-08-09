@@ -6,7 +6,7 @@ from broker.constants import (
   STRATEGY_MAGIC_MAP_KEY,
 )
 from broker.schemas.account_schema import MarketTypeEnum
-from broker.schemas.publisher_schema import PublishTopicEnum, SystemActionEnum
+from broker.schemas.publisher_schema import PublishTopicEnum
 from broker.services.nats_service import SystemEventConsumer
 
 
@@ -47,13 +47,13 @@ class FakeSettingRepo:
 
 class FakePublisher:
   def __init__(self):
+    # publish_system_signal is the standalone CRYPTO_LEVERAGE_INIT the admin
+    # push uses; the handshake must never reach for it any more.
     self.calls: list[dict] = []
-    self.magic_maps: list[dict] = []
-    self.retries: list[dict] = []
     self.acks: list[dict] = []
     self.errors: list[dict] = []
     # Records the action of every SYSTEM publish in call order, so tests can
-    # assert STRATEGY_MAGIC_MAP is sent first in the handshake.
+    # assert the handshake answers with exactly one message.
     self.order: list[str] = []
 
   async def publish(self, signal) -> None:
@@ -68,14 +68,6 @@ class FakePublisher:
   async def publish_system_signal(self, **kwargs) -> None:
     self.calls.append(kwargs)
     self.order.append("CRYPTO_LEVERAGE_INIT")
-
-  async def publish_system_strategy_magic_map(self, **kwargs) -> None:
-    self.magic_maps.append(kwargs)
-    self.order.append("STRATEGY_MAGIC_MAP")
-
-  async def publish_system_retry_signal(self, **kwargs) -> None:
-    self.retries.append(kwargs)
-    self.order.append("RETRY_SIGNALS")
 
   async def publish_system_ack(self, **kwargs) -> None:
     self.acks.append(kwargs)
@@ -151,16 +143,55 @@ def _make_consumer(
   return consumer, repo, publisher
 
 
-async def test_worker_connected_publishes_crypto_leverage_init():
+# ── One reply per handshake ────────────────────────────────────────────────
+#
+# A NATS reply inbox only accepts one message, so the whole answer has to be a
+# single ACK. These tests pin that invariant down.
+
+
+async def test_handshake_answers_with_exactly_one_message():
+  signals = FakeSignalRepo(envelopes=[_webhook_envelope("MT5_GOLD_M5_V1")])
+  consumer, _repo, publisher = _make_consumer(
+    settings=_magic_map_settings(), signals=signals
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]),
+      reply="_INBOX.crypto",
+    )
+  )
+
+  # A crypto worker with strategies has all three blocks to deliver, and they
+  # still travel in one message — anything after the first would be dropped by
+  # the inbox.
+  assert publisher.order == ["WORKER_CONNECTED_ACK"]
+  ack = publisher.acks[0]
+  assert ack["subject"] == "_INBOX.crypto"
+  assert ack["strategy_magic_map"] == {"MT5_GOLD_M5_V1": 20260409}
+  assert len(ack["retry_signals"]) == 1
+  assert ack["crypto_leverage_init"].symbols == ["BTC", "ETH"]
+  assert ack["crypto_leverage_init"].default_leverage == 10
+
+
+async def test_handshake_never_uses_the_standalone_leverage_publish():
+  # CRYPTO_LEVERAGE_INIT survives only as the admin push to already-connected
+  # workers; the connect-time copy rides inside the ACK.
+  consumer, _repo, publisher = _make_consumer()
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.abc")
+  )
+  assert publisher.calls == []
+
+
+async def test_worker_connected_carries_crypto_leverage_config():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
 
-  assert len(publisher.calls) == 1
-  call = publisher.calls[0]
-  assert call["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
-  assert call["account_id"] == "CRYPTO-BINANCE-7654321"
-  assert call["symbols"] == ["BTC", "ETH"]
-  assert call["default_leverage"] == 10
+  assert len(publisher.acks) == 1
+  ack = publisher.acks[0]
+  assert ack["account_id"] == "CRYPTO-BINANCE-7654321"
+  assert ack["crypto_leverage_init"].symbols == ["BTC", "ETH"]
+  assert ack["crypto_leverage_init"].default_leverage == 10
 
 
 async def test_crypto_leverage_init_is_ignored():
@@ -175,13 +206,30 @@ async def test_crypto_leverage_init_is_ignored():
     }
   ).encode()
   await consumer.handle_subject_system(FakeMsg(payload))
-  assert publisher.calls == []
+  assert publisher.order == []
+
+
+async def test_worker_connected_ack_echo_is_ignored():
+  # The broker sees its own broadcast ACK on the shared SYSTEM subject and must
+  # not treat it as a handshake.
+  consumer, _repo, publisher = _make_consumer()
+  payload = json.dumps(
+    {
+      "action": "WORKER_CONNECTED_ACK",
+      "account_id": "CRYPTO-BINANCE-7654321",
+      "timestamp": "2026-06-30T00:00:00+00:00",
+      "strategy_magic_map": {},
+      "retry_signals": [],
+    }
+  ).encode()
+  await consumer.handle_subject_system(FakeMsg(payload))
+  assert publisher.order == []
 
 
 async def test_malformed_json_is_swallowed():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(FakeMsg(b"{not-json"))
-  assert publisher.calls == []
+  assert publisher.order == []
 
 
 async def test_invalid_schema_is_swallowed():
@@ -189,7 +237,7 @@ async def test_invalid_schema_is_swallowed():
   await consumer.handle_subject_system(
     FakeMsg(json.dumps({"action": "WORKER_CONNECTED"}).encode())
   )
-  assert publisher.calls == []
+  assert publisher.order == []
 
 
 async def test_worker_connected_missing_account_id_is_rejected():
@@ -205,7 +253,7 @@ async def test_worker_connected_missing_account_id_is_rejected():
       ).encode()
     )
   )
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
 async def test_worker_connected_missing_market_is_rejected():
@@ -221,7 +269,7 @@ async def test_worker_connected_missing_market_is_rejected():
       ).encode()
     )
   )
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
 async def test_worker_connected_missing_gateway_is_rejected():
@@ -237,10 +285,10 @@ async def test_worker_connected_missing_gateway_is_rejected():
       ).encode()
     )
   )
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
-async def test_non_crypto_market_does_not_publish():
+async def test_non_crypto_market_gets_ack_without_leverage_block():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(
     FakeMsg(
@@ -249,39 +297,42 @@ async def test_non_crypto_market_does_not_publish():
       )
     )
   )
-  assert publisher.calls == []
+  assert len(publisher.acks) == 1
+  assert publisher.acks[0]["crypto_leverage_init"] is None
 
 
-async def test_missing_settings_skips_publish():
+async def test_missing_settings_send_no_ack():
+  # A crypto worker whose settings are missing must not be told it is
+  # configured; the handshake is rejected instead.
   consumer, _repo, publisher = _make_consumer(
     settings={CRYPTO_ALLOWED_SYMBOL_KEY: None, CRYPTO_MAX_LEVERAGE_KEY: None}
   )
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
-async def test_non_integer_leverage_skips_publish():
+async def test_non_integer_leverage_sends_no_ack():
   consumer, _repo, publisher = _make_consumer(
     settings={CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH", CRYPTO_MAX_LEVERAGE_KEY: "ten"}
   )
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
-async def test_zero_leverage_skips_publish():
+async def test_zero_leverage_sends_no_ack():
   consumer, _repo, publisher = _make_consumer(
     settings={CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH", CRYPTO_MAX_LEVERAGE_KEY: "0"}
   )
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
-async def test_negative_leverage_skips_publish():
+async def test_negative_leverage_sends_no_ack():
   consumer, _repo, publisher = _make_consumer(
     settings={CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH", CRYPTO_MAX_LEVERAGE_KEY: "-5"}
   )
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
 async def test_negative_leverage_with_reply_inbox_gets_error():
@@ -291,9 +342,22 @@ async def test_negative_leverage_with_reply_inbox_gets_error():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(), reply="_INBOX.err")
   )
-  assert publisher.calls == []
-  assert len(publisher.errors) == 1
+  # The error is the whole answer: no ACK may follow it on the same inbox.
+  assert publisher.order == ["WORKER_CONNECTED_ERROR"]
   assert "positive" in publisher.errors[0]["reason"]
+
+
+async def test_rejected_crypto_handshake_skips_the_signals_query():
+  # Nothing to replay to a worker we are about to reject, so the DB is spared.
+  signals = FakeSignalRepo()
+  consumer, _repo, _pub = _make_consumer(
+    settings={CRYPTO_ALLOWED_SYMBOL_KEY: None, CRYPTO_MAX_LEVERAGE_KEY: None},
+    signals=signals,
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]), reply="_INBOX.err")
+  )
+  assert signals.calls == []
 
 
 async def test_symbols_are_trimmed_and_filtered():
@@ -301,8 +365,9 @@ async def test_symbols_are_trimmed_and_filtered():
     settings={CRYPTO_ALLOWED_SYMBOL_KEY: " BTC ,, ETH ", CRYPTO_MAX_LEVERAGE_KEY: "5"}
   )
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
-  assert publisher.calls[0]["symbols"] == ["BTC", "ETH"]
-  assert publisher.calls[0]["default_leverage"] == 5
+  leverage = publisher.acks[0]["crypto_leverage_init"]
+  assert leverage.symbols == ["BTC", "ETH"]
+  assert leverage.default_leverage == 5
 
 
 # ── Recording the announced gateway on the accounts row ───────────────────────
@@ -330,7 +395,7 @@ async def test_non_crypto_worker_also_records_gateway():
   )
 
   assert accounts.upserts == [("12345678", MarketTypeEnum.FOREX, "MT5")]
-  assert publisher.calls == []
+  assert publisher.acks[0]["crypto_leverage_init"] is None
 
 
 async def test_bare_account_id_is_recorded_unchanged():
@@ -362,7 +427,7 @@ async def test_invalid_payloads_record_nothing():
   assert accounts.upserts == []
 
 
-async def test_account_repo_failure_does_not_block_leverage_init():
+async def test_account_repo_failure_does_not_block_the_ack():
   class ExplodingAccountRepo(FakeAccountRepo):
     async def upsert_gateway(self, account_id, market, gateway) -> None:
       raise RuntimeError("db down")
@@ -373,8 +438,8 @@ async def test_account_repo_failure_does_not_block_leverage_init():
   )
 
   # Bookkeeping is best-effort; the worker still gets its configuration.
-  assert len(publisher.calls) == 1
-  assert publisher.calls[0]["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
+  assert len(publisher.acks) == 1
+  assert publisher.acks[0]["crypto_leverage_init"].default_leverage == 10
 
 
 # ── Request/reply (worker used nats.request, msg carries a reply inbox) ────────
@@ -384,21 +449,18 @@ async def test_no_reply_inbox_broadcasts_on_system_subject():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
   # subject=None → NatsPublisher falls back to the shared SYSTEM subject.
-  assert publisher.calls[0]["subject"] is None
-  assert publisher.acks == []
+  assert publisher.acks[0]["subject"] is None
   assert publisher.errors == []
 
 
-async def test_reply_inbox_gets_crypto_leverage_init_directly():
+async def test_reply_inbox_gets_the_ack_directly():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(), reply="_INBOX.abc")
   )
-  assert len(publisher.calls) == 1
-  assert publisher.calls[0]["subject"] == "_INBOX.abc"
-  assert publisher.calls[0]["symbols"] == ["BTC", "ETH"]
-  # A direct reply must not also broadcast on the shared subject.
-  assert publisher.acks == []
+  assert len(publisher.acks) == 1
+  assert publisher.acks[0]["subject"] == "_INBOX.abc"
+  assert publisher.acks[0]["crypto_leverage_init"].symbols == ["BTC", "ETH"]
   assert publisher.errors == []
 
 
@@ -412,13 +474,12 @@ async def test_non_crypto_with_reply_inbox_gets_ack():
       reply="_INBOX.forex",
     )
   )
-  assert publisher.calls == []
   assert len(publisher.acks) == 1
   assert publisher.acks[0]["subject"] == "_INBOX.forex"
   assert publisher.acks[0]["account_id"] == "FOREX-MT5-12345678"
 
 
-async def test_non_crypto_without_reply_inbox_stays_silent():
+async def test_non_crypto_without_reply_inbox_is_broadcast():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(
     FakeMsg(
@@ -427,7 +488,9 @@ async def test_non_crypto_without_reply_inbox_stays_silent():
       )
     )
   )
-  assert publisher.acks == []
+  # The fire-and-forget worker still gets its config, filtered by account_id.
+  assert len(publisher.acks) == 1
+  assert publisher.acks[0]["subject"] is None
   assert publisher.errors == []
 
 
@@ -438,7 +501,7 @@ async def test_missing_settings_with_reply_inbox_gets_error():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(), reply="_INBOX.err")
   )
-  assert publisher.calls == []
+  assert publisher.acks == []
   assert len(publisher.errors) == 1
   assert publisher.errors[0]["subject"] == "_INBOX.err"
   assert publisher.errors[0]["account_id"] == "CRYPTO-BINANCE-7654321"
@@ -452,7 +515,7 @@ async def test_non_integer_leverage_with_reply_inbox_gets_error():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(), reply="_INBOX.err")
   )
-  assert publisher.calls == []
+  assert publisher.acks == []
   assert len(publisher.errors) == 1
   assert publisher.errors[0]["subject"] == "_INBOX.err"
 
@@ -467,7 +530,7 @@ async def test_invalid_schema_with_reply_inbox_gets_error():
       reply="_INBOX.err",
     )
   )
-  assert publisher.calls == []
+  assert publisher.acks == []
   assert len(publisher.errors) == 1
   assert publisher.errors[0]["account_id"] == "CRYPTO-BINANCE-1"
 
@@ -484,7 +547,7 @@ async def test_non_object_json_is_handled():
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(FakeMsg(b"[1, 2, 3]"))
   await consumer.handle_subject_system(FakeMsg(b"123", reply="_INBOX.err"))
-  assert publisher.calls == []
+  assert publisher.acks == []
   # Only the request-mode message (with a reply inbox) gets an error reply.
   assert len(publisher.errors) == 1
   assert publisher.errors[0]["account_id"] is None
@@ -497,13 +560,11 @@ async def test_crypto_leverage_init_echo_is_ignored_even_with_reply():
     {"action": "CRYPTO_LEVERAGE_INIT", "account_id": "CRYPTO-BINANCE-7654321"}
   ).encode()
   await consumer.handle_subject_system(FakeMsg(payload, reply="_INBOX.x"))
-  assert publisher.calls == []
-  assert publisher.acks == []
-  assert publisher.errors == []
+  assert publisher.order == []
 
 
 class ExplodingPublisher(FakePublisher):
-  async def publish_system_signal(self, **kwargs) -> None:
+  async def publish_system_ack(self, **kwargs) -> None:
     raise RuntimeError("nats down")
 
 
@@ -525,7 +586,7 @@ async def test_second_handshake_within_ttl_reuses_cached_settings():
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
 
   # Both handshakes got a reply, but the DB was only queried once.
-  assert len(publisher.calls) == 2
+  assert len(publisher.acks) == 2
   assert len(repo.get_many_calls) == 1
   # get() (the non-atomic, per-key path) must not be used at all.
   assert repo.get_calls == []
@@ -561,7 +622,7 @@ async def test_cache_expires_after_ttl(monkeypatch):
   clock["now"] += 30.0
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
   assert len(repo.get_many_calls) == 2
-  assert len(publisher.calls) == 3
+  assert len(publisher.acks) == 3
 
 
 async def test_missing_settings_are_also_cached():
@@ -574,7 +635,7 @@ async def test_missing_settings_are_also_cached():
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
 
   assert len(repo.get_many_calls) == 1
-  assert publisher.calls == []
+  assert publisher.acks == []
 
 
 class FakeSubscription:
@@ -617,7 +678,7 @@ async def test_stop_unsubscribes():
   assert conn.nc._sub.unsubscribed is True
 
 
-# ── RETRY_SIGNALS replay on WORKER_CONNECTED ───────────────────────────────
+# ── retry_signals replay inside the ACK ────────────────────────────────────
 
 
 def _webhook_envelope(strategy: str, signal_id: str = "sig-1") -> dict:
@@ -656,20 +717,20 @@ async def test_retry_signal_queries_and_replays_matching_signals():
   # The strategies list and default (60s) window drive the lookup.
   assert signals.calls == [(["wt_cross_v1"], 60)]
 
-  assert len(publisher.retries) == 1
-  retry = publisher.retries[0]
-  assert retry["account_id"] == "FOREX-MT5-1"
-  assert retry["subject"] == "_INBOX.forex"
-  assert len(retry["signals"]) == 1
+  assert len(publisher.acks) == 1
+  ack = publisher.acks[0]
+  assert ack["account_id"] == "FOREX-MT5-1"
+  assert ack["subject"] == "_INBOX.forex"
+  assert len(ack["retry_signals"]) == 1
   # Payload mirrors SIGNAL exactly (symbol normalised, strategy carried).
-  assert retry["signals"][0].symbol == "XAUUSD"
-  assert retry["signals"][0].strategy == "wt_cross_v1"
+  assert ack["retry_signals"][0].symbol == "XAUUSD"
+  assert ack["retry_signals"][0].strategy == "wt_cross_v1"
 
 
 async def test_retry_signal_replays_across_many_strategies():
   """A worker connecting with many strategy subjects (e.g. 10) gets every
-  matching signal back in a single RETRY_SIGNALS batch — one DB lookup and
-  one publish, not one round trip per strategy."""
+  matching signal back in the one ACK — one DB lookup and one publish, not one
+  round trip per strategy."""
   strategies = [f"strategy_{i}" for i in range(10)]
   envelopes = [
     _webhook_envelope(strategy, signal_id=f"sig-{i}")
@@ -696,12 +757,12 @@ async def test_retry_signal_replays_across_many_strategies():
   # The full strategy list is passed to a single lookup call, not looped.
   assert signals.calls == [(strategies, 60)]
 
-  # All matching signals come back as exactly one RETRY_SIGNALS batch.
-  assert len(publisher.retries) == 1
-  retry = publisher.retries[0]
-  assert retry["subject"] == "_INBOX.many"
-  assert len(retry["signals"]) == 10
-  assert {s.strategy for s in retry["signals"]} == set(strategies)
+  # All matching signals come back inside exactly one ACK.
+  assert len(publisher.acks) == 1
+  ack = publisher.acks[0]
+  assert ack["subject"] == "_INBOX.many"
+  assert len(ack["retry_signals"]) == 10
+  assert {s.strategy for s in ack["retry_signals"]} == set(strategies)
 
 
 async def test_retry_signal_uses_configured_timeout():
@@ -736,34 +797,43 @@ async def test_retry_signal_defaults_when_timeout_setting_invalid():
   assert signals.calls == [(["wt_cross_v1"], 60)]
 
 
-async def test_retry_signal_skipped_without_strategies():
+async def test_retry_signals_empty_without_announced_strategies():
   signals = FakeSignalRepo()
   consumer, _repo, publisher = _make_consumer(signals=signals)
   # No `strategies` field → default_factory gives []; nothing to replay.
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
   assert signals.calls == []
-  assert publisher.retries == []
+  assert publisher.acks[0]["retry_signals"] == []
 
 
-async def test_retry_signal_skipped_when_no_signal_repository():
+async def test_retry_signals_empty_when_no_signal_repository():
   # Existing deployments that don't wire a SignalRepository must still work.
   consumer, _repo, publisher = _make_consumer()
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
   )
-  assert publisher.retries == []
+  assert publisher.acks[0]["retry_signals"] == []
 
 
-async def test_retry_signal_sent_alongside_crypto_leverage_init():
-  # A crypto worker gets both the RETRY_SIGNALS replay AND CRYPTO_LEVERAGE_INIT.
-  signals = FakeSignalRepo(envelopes=[_webhook_envelope("wt_cross_v1")])
-  consumer, _repo, publisher = _make_consumer(signals=signals)
-  await consumer.handle_subject_system(
-    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]), reply="_INBOX.abc")
+async def test_signals_lookup_failure_still_sends_the_rest_of_the_config():
+  class ExplodingSignalRepo(FakeSignalRepo):
+    async def list_recent_by_strategies(self, strategies, since_seconds):
+      raise RuntimeError("db down")
+
+  consumer, _repo, publisher = _make_consumer(
+    settings=_magic_map_settings(), signals=ExplodingSignalRepo()
   )
-  assert len(publisher.retries) == 1
-  assert len(publisher.calls) == 1
-  assert publisher.calls[0]["action"] == SystemActionEnum.CRYPTO_LEVERAGE_INIT
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]), reply="_INBOX.crypto"
+    )
+  )
+  # A missed replay must not cost the worker its magic map and leverage config.
+  assert len(publisher.acks) == 1
+  ack = publisher.acks[0]
+  assert ack["retry_signals"] == []
+  assert ack["strategy_magic_map"] == {"MT5_GOLD_M5_V1": 20260409}
+  assert ack["crypto_leverage_init"].default_leverage == 10
 
 
 async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
@@ -777,13 +847,13 @@ async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
   )
-  assert len(publisher.retries) == 1
-  retry = publisher.retries[0]
-  assert len(retry["signals"]) == 1
-  assert retry["signals"][0].signal_id == "sig-good"
+  assert len(publisher.acks) == 1
+  retry = publisher.acks[0]["retry_signals"]
+  assert len(retry) == 1
+  assert retry[0].signal_id == "sig-good"
 
 
-# ── STRATEGY_MAGIC_MAP on WORKER_CONNECTED ─────────────────────────────────
+# ── strategy_magic_map inside the ACK ──────────────────────────────────────
 
 _MAGIC_MAP_JSON = (
   '{"MT5_GOLD_M5_V1": 20260409, "SIDEWAY_M15_V1": 20260617, '
@@ -817,13 +887,13 @@ async def test_magic_map_filtered_to_announced_strategies():
       reply="_INBOX.forex",
     )
   )
-  assert len(publisher.magic_maps) == 1
-  mm = publisher.magic_maps[0]
-  assert mm["account_id"] == "FOREX-MT5-1"
-  assert mm["subject"] == "_INBOX.forex"
+  assert len(publisher.acks) == 1
+  ack = publisher.acks[0]
+  assert ack["account_id"] == "FOREX-MT5-1"
+  assert ack["subject"] == "_INBOX.forex"
   # Only announced-and-mapped strategies survive; SIDEWAY_M15_V1 (mapped but not
   # announced) and NOT_MAPPED (announced but not mapped) are both excluded.
-  assert mm["magic_map"] == {
+  assert ack["strategy_magic_map"] == {
     "MT5_GOLD_M5_V1": 20260409,
     "MT5_MULTI_M5_V1": 20260708,
   }
@@ -837,51 +907,15 @@ async def test_magic_map_sent_for_crypto_too():
       reply="_INBOX.crypto",
     )
   )
-  assert len(publisher.magic_maps) == 1
-  assert publisher.magic_maps[0]["magic_map"] == {"SIDEWAY_M15_V1": 20260617}
-  # Crypto still also gets its CRYPTO_LEVERAGE_INIT.
-  assert len(publisher.calls) == 1
+  ack = publisher.acks[0]
+  assert ack["strategy_magic_map"] == {"SIDEWAY_M15_V1": 20260617}
+  # Crypto still also gets its leverage config, in the same message.
+  assert ack["crypto_leverage_init"].default_leverage == 10
 
 
-async def test_magic_map_sent_first_in_handshake():
-  # For a crypto worker with strategies, the order is: STRATEGY_MAGIC_MAP,
-  # then RETRY_SIGNALS, then CRYPTO_LEVERAGE_INIT.
-  signals = FakeSignalRepo(envelopes=[_webhook_envelope("MT5_GOLD_M5_V1")])
-  consumer, _repo, publisher = _make_consumer(
-    settings=_magic_map_settings(), signals=signals
-  )
-  await consumer.handle_subject_system(
-    FakeMsg(
-      _worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]),
-      reply="_INBOX.crypto",
-    )
-  )
-  assert publisher.order[0] == "STRATEGY_MAGIC_MAP"
-  assert publisher.order == [
-    "STRATEGY_MAGIC_MAP",
-    "RETRY_SIGNALS",
-    "CRYPTO_LEVERAGE_INIT",
-  ]
-
-
-async def test_magic_map_sent_first_for_forex_ack():
-  # For a non-crypto worker the ACK still comes last, after the magic map.
-  consumer, _repo, publisher = _make_consumer(settings=_magic_map_settings())
-  await consumer.handle_subject_system(
-    FakeMsg(
-      _worker_connected_payload(
-        account_id="FOREX-MT5-1", market="FOREX", gateway="MT5"
-      ),
-      reply="_INBOX.forex",
-    )
-  )
-  # No strategies announced, so no RETRY_SIGNALS, but the magic map precedes ACK.
-  assert publisher.order == ["STRATEGY_MAGIC_MAP", "WORKER_CONNECTED_ACK"]
-
-
-async def test_magic_map_sent_empty_without_announced_strategies():
-  # No strategies → the mandatory message is still sent, with an empty map, and
-  # the setting is not even read (nothing could match).
+async def test_magic_map_empty_without_announced_strategies():
+  # No strategies → the mandatory block is still sent, empty, and the setting is
+  # not even read (nothing could match).
   repo = FakeSettingRepo(_magic_map_settings())
   publisher = FakePublisher()
   consumer = SystemEventConsumer(
@@ -892,8 +926,7 @@ async def test_magic_map_sent_empty_without_announced_strategies():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(strategies=[]))
   )
-  assert len(publisher.magic_maps) == 1
-  assert publisher.magic_maps[0]["magic_map"] == {}
+  assert publisher.acks[0]["strategy_magic_map"] == {}
   assert STRATEGY_MAGIC_MAP_KEY not in repo.get_calls
 
 
@@ -904,8 +937,7 @@ async def test_magic_map_empty_when_setting_missing():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]))
   )
-  assert len(publisher.magic_maps) == 1
-  assert publisher.magic_maps[0]["magic_map"] == {}
+  assert publisher.acks[0]["strategy_magic_map"] == {}
 
 
 async def test_magic_map_empty_when_setting_invalid_json():
@@ -915,8 +947,7 @@ async def test_magic_map_empty_when_setting_invalid_json():
   await consumer.handle_subject_system(
     FakeMsg(_worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]))
   )
-  assert len(publisher.magic_maps) == 1
-  assert publisher.magic_maps[0]["magic_map"] == {}
+  assert publisher.acks[0]["strategy_magic_map"] == {}
 
 
 async def test_magic_map_broadcast_without_reply_inbox():
@@ -925,7 +956,7 @@ async def test_magic_map_broadcast_without_reply_inbox():
     FakeMsg(_worker_connected_payload(strategies=["MT5_GOLD_M5_V1"]))
   )
   # No reply inbox → subject None so NatsPublisher broadcasts on SYSTEM.
-  assert publisher.magic_maps[0]["subject"] is None
+  assert publisher.acks[0]["subject"] is None
 
 
 async def test_magic_map_read_is_cached_within_ttl():
@@ -940,27 +971,5 @@ async def test_magic_map_read_is_cached_within_ttl():
   )
   await consumer.handle_subject_system(FakeMsg(payload))
   await consumer.handle_subject_system(FakeMsg(payload))
-  assert len(publisher.magic_maps) == 2
+  assert len(publisher.acks) == 2
   assert repo.get_calls == [STRATEGY_MAGIC_MAP_KEY]
-
-
-async def test_magic_map_publish_failure_does_not_break_handshake():
-  class MagicMapExplodingPublisher(FakePublisher):
-    async def publish_system_strategy_magic_map(self, **kwargs) -> None:
-      raise RuntimeError("nats down")
-
-  consumer, _repo, _pub = _make_consumer(settings=_magic_map_settings())
-  consumer._publisher = MagicMapExplodingPublisher()  # type: ignore[attr-defined]
-  # The failing magic-map publish is swallowed; the ACK still goes out.
-  await consumer.handle_subject_system(
-    FakeMsg(
-      _worker_connected_payload(
-        account_id="FOREX-MT5-1",
-        market="FOREX",
-        gateway="MT5",
-        strategies=["MT5_GOLD_M5_V1"],
-      ),
-      reply="_INBOX.forex",
-    )
-  )
-  assert len(consumer._publisher.acks) == 1  # type: ignore[attr-defined]

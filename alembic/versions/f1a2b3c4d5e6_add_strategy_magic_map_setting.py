@@ -1,9 +1,9 @@
 """add strategy_magic_map setting
 
 Seeds the ``strategy_magic_map`` broker setting: a JSON-text object mapping each
-strategy to its magic number. The broker sends it to every worker as a
-STRATEGY_MAGIC_MAP message on connect, filtered down to the strategies that
-worker announced.
+strategy to its magic number. The broker sends it to every worker in the
+``strategy_magic_map`` block of its WORKER_CONNECTED_ACK on connect, filtered
+down to the strategies that worker announced.
 
 Revision ID: f1a2b3c4d5e6
 Revises: a1b2c3d4e5f6
@@ -22,9 +22,7 @@ depends_on = None
 # Stored verbatim as text and parsed as JSON at read time (see
 # broker.services.nats_service._parse_strategy_magic_map). Keys are strategy
 # names, values are the magic numbers workers key their orders by.
-STRATEGY_MAGIC_MAP_VALUE = (
-  '{"HOLD_TO_WIN": 9999}'
-)
+STRATEGY_MAGIC_MAP_VALUE = '{"HOLD_TO_WIN": 9999}'
 
 
 def upgrade() -> None:

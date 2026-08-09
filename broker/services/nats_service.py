@@ -29,14 +29,20 @@ inbound consumption.
   ─────────────────────────────────
   Workers should announce themselves with NATS ``request`` and wait for a
   reply. When a message carries a reply inbox (``msg.reply``), the broker
-  answers *that one worker* directly. Every handshake first receives a
-  ``STRATEGY_MAGIC_MAP`` (the strategy → magic-number map filtered to the
-  strategies the worker announced — mandatory for both markets), then the
-  market-specific outcome:
+  answers *that one worker* directly with **exactly one** message:
 
-  * crypto worker, settings OK   → ``CRYPTO_LEVERAGE_INIT``
-  * non-crypto worker            → ``WORKER_CONNECTED_ACK``
-  * settings missing/invalid     → ``WORKER_CONNECTED_ERROR`` (with a reason)
+  * settings OK               → ``WORKER_CONNECTED_ACK``
+  * settings missing/invalid  → ``WORKER_CONNECTED_ERROR`` (with a reason)
+
+  One and only one, because that is all a reply inbox accepts: ``request()``
+  resolves its future (or, ``old_style``, auto-unsubscribes at ``max_msgs=1``)
+  on the first reply and silently drops anything after it. So the ACK carries
+  the worker's entire initial configuration in a single payload — the
+  ``strategy_magic_map`` filtered to the strategies it announced, the
+  ``retry_signals`` replay, and (crypto only) the ``crypto_leverage_init``
+  block. A crypto worker whose settings are missing or invalid gets the ERROR
+  instead: it is not told the handshake succeeded when the config it needs
+  could not be built.
 
   Because every path replies, a worker's ``request`` always resolves instead
   of silently hanging, and the worker can retry on timeout (e.g. if the
@@ -44,9 +50,9 @@ inbound consumption.
   idempotent, so retries are safe.
 
   For backward compatibility, a plain fire-and-forget ``publish`` (no reply
-  inbox) still triggers a ``CRYPTO_LEVERAGE_INIT`` broadcast on the shared
-  SYSTEM subject; in that mode failures can only be logged, not signalled
-  back to the worker.
+  inbox) gets the same ACK broadcast on the shared SYSTEM subject, which the
+  worker filters by ``account_id``; in that mode failures can only be logged,
+  not signalled back to the worker.
 
   The broker's own outgoing SYSTEM messages are filtered by action so it
   never reacts to them (replies go to private inboxes and are never received
@@ -95,12 +101,11 @@ from broker.schemas.account_schema import MarketTypeEnum, decompose_worker_id
 from broker.schemas.core import MarketEnum, SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminSignal,
+  CryptoLeverageConfig,
   PublishTopicEnum,
   compose_admin_subject,
   SystemActionEnum,
   SystemCryptoLeverageInitSignal,
-  SystemRetrySignal,
-  SystemStrategyMagicMapSignal,
   SystemWorkerConnectedAck,
   SystemWorkerConnectedError,
   SystemWorkerConnectedSignal,
@@ -138,7 +143,7 @@ def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
 
   Returns an empty map for a missing/blank value, invalid JSON, or a non-object
   — anything unparseable is logged rather than raised, because the handshake
-  must still send the mandatory STRATEGY_MAGIC_MAP (an empty map is a valid
+  must still send the mandatory ``strategy_magic_map`` (an empty map is a valid
   answer). Entries whose value isn't a plain integer are dropped individually
   (booleans are rejected even though ``bool`` is an ``int`` subclass — a magic
   number is never True/False).
@@ -244,8 +249,9 @@ class TradeEventConsumer:
 class SystemEventConsumer:
   """Consumes SYSTEM events from NATS and answers the WORKER_CONNECTED handshake.
 
-  Replies with a STRATEGY_MAGIC_MAP first (both markets), then a RETRY_SIGNALS
-  replay and the market-specific CRYPTO_LEVERAGE_INIT / WORKER_CONNECTED_ACK.
+  Answers with a single WORKER_CONNECTED_ACK carrying the worker's whole initial
+  configuration (strategy magic map, retry replay, and the crypto leverage block
+  for crypto workers), because a reply inbox only accepts one message.
   """
 
   SUBJECT = PublishTopicEnum.SYSTEM
@@ -294,7 +300,7 @@ class SystemEventConsumer:
     When the message carries a reply inbox (``msg.reply`` — the worker used NATS
     ``request``) every outcome is answered on that inbox so the worker's request
     resolves and it can retry on timeout. Without a reply inbox the broker falls
-    back to broadcasting ``CRYPTO_LEVERAGE_INIT`` on the SYSTEM subject.
+    back to broadcasting the same answer on the SYSTEM subject.
     """
     raw = msg.data.decode()
     reply_to = getattr(msg, "reply", "") or ""
@@ -343,26 +349,32 @@ class SystemEventConsumer:
 
     await self._remember_worker(event)
 
-    # STRATEGY_MAGIC_MAP is mandatory for every market and must be the first
-    # message the worker receives, so it goes out ahead of the RETRY_SIGNALS
-    # replay and the market-specific ACK / CRYPTO_LEVERAGE_INIT below.
-    await self._send_strategy_magic_map(event.account_id, event.strategies, reply_to)
+    # A reply inbox accepts exactly one message, so the whole answer is
+    # assembled here and sent as a single ACK: the crypto leverage config
+    # (crypto workers only), the magic map (mandatory for every market), and
+    # the replay of recent signals so a reconnecting worker catches up on what
+    # it missed while offline.
+    crypto_leverage: Optional[CryptoLeverageConfig] = None
+    if event.market == MarketEnum.CRYPTO.value:
+      # Resolved first so a misconfigured crypto worker is rejected before we
+      # spend a signals query on a handshake that cannot be answered.
+      crypto_leverage = await self._build_crypto_leverage(event.account_id, reply_to)
+      if crypto_leverage is None:
+        # Settings are missing or invalid; _build_crypto_leverage already
+        # replied with the reason. Never follow that with an ACK — a crypto
+        # worker must not be told it is configured when it is not.
+        return
 
-    # Every WORKER_CONNECTED gets a RETRY_SIGNALS replay of the recent signals
-    # matching the strategies the worker announced, so a reconnecting worker
-    # can catch up on broadcasts it missed while offline. The replay is sent
-    # in addition to (never instead of) the ACK / CRYPTO_LEVERAGE_INIT so
-    # non-crypto workers get their catch-up too.
-    await self._send_retry_signal(event.account_id, event.strategies, reply_to)
+    magic_map = await self._build_strategy_magic_map(event.strategies)
+    retry_signals = await self._build_retry_signals(event.account_id, event.strategies)
 
-    # Only crypto workers need leverage configuration pushed back on connect.
-    if event.market != MarketEnum.CRYPTO.value:
-      # Acknowledge so a requesting worker's handshake resolves instead of
-      # timing out; nothing to configure for non-crypto markets.
-      await self._reply_ack(reply_to, event.account_id)
-      return
-
-    await self._send_crypto_leverage_init(event.account_id, reply_to)
+    await self._reply_ack(
+      reply_to,
+      event.account_id,
+      strategy_magic_map=magic_map,
+      retry_signals=retry_signals,
+      crypto_leverage_init=crypto_leverage,
+    )
 
   async def _remember_worker(self, event: SystemWorkerConnectedSignal) -> None:
     """Store the market/gateway this worker announced on its ``accounts`` row.
@@ -391,55 +403,35 @@ class SystemEventConsumer:
         exc,
       )
 
-  async def _send_strategy_magic_map(
-    self, account_id: str, strategies: list[str], reply_to: str = ""
-  ) -> None:
-    """Deliver the STRATEGY_MAGIC_MAP for *account_id*, filtered to *strategies*.
+  async def _build_strategy_magic_map(self, strategies: list[str]) -> dict[str, int]:
+    """Return the strategy → magic-number map filtered to *strategies*.
 
-    Mandatory for every market and sent first in the handshake, so it is
-    published even when the resulting map is empty — the worker announced no
-    known strategy, or the setting is unset/invalid. Replies on *reply_to* when
-    set (request/reply), otherwise broadcasts on the SYSTEM subject. Best-effort:
-    a publish failure is logged, never raised, so it cannot break the rest of
-    the handshake.
+    Mandatory for every market, so an empty map is a valid result rather than a
+    reason to omit the block — the worker announced no known strategy, or the
+    setting is unset/invalid.
     """
     announced = set(strategies)
-    # No announced strategies → nothing could match anyway, so skip the DB read
-    # and still send the (empty) mandatory message.
-    if announced:
-      magic_map = await self._get_strategy_magic_map()
-      filtered = {k: v for k, v in magic_map.items() if k in announced}
-    else:
-      filtered = {}
+    # No announced strategies → nothing could match anyway, so skip the DB read.
+    if not announced:
+      return {}
+    magic_map = await self._get_strategy_magic_map()
+    return {k: v for k, v in magic_map.items() if k in announced}
 
-    try:
-      await self._publisher.publish_system_strategy_magic_map(
-        account_id=account_id,
-        magic_map=filtered,
-        subject=reply_to or None,
-      )
-    except Exception as exc:
-      log.exception(
-        "Failed to publish STRATEGY_MAGIC_MAP for account_id=%s: %s",
-        account_id,
-        exc,
-      )
-
-  async def _send_crypto_leverage_init(
+  async def _build_crypto_leverage(
     self, account_id: str, reply_to: str = ""
-  ) -> None:
-    """Load crypto settings and deliver CRYPTO_LEVERAGE_INIT for *account_id*.
+  ) -> Optional[CryptoLeverageConfig]:
+    """Load the crypto settings into a :class:`CryptoLeverageConfig`.
 
-    Replies on *reply_to* when set (request/reply), otherwise broadcasts on the
-    SYSTEM subject. Missing or invalid settings produce an error reply so a
-    requesting worker is not left waiting.
+    Returns ``None`` when the settings are missing or invalid, having already
+    sent the worker a ``WORKER_CONNECTED_ERROR`` carrying the reason (a no-op
+    without a reply inbox) so a requesting worker is not left waiting.
     """
     symbols_raw, leverage_raw = await self._get_crypto_settings()
 
     if symbols_raw is None or leverage_raw is None:
       log.warning(
-        "SYSTEM CRYPTO_LEVERAGE_INIT skipped account_id=%s: "
-        "missing settings (%s=%r, %s=%r)",
+        "SYSTEM handshake rejected account_id=%s: "
+        "missing crypto settings (%s=%r, %s=%r)",
         account_id,
         CRYPTO_ALLOWED_SYMBOL_KEY,
         symbols_raw,
@@ -447,14 +439,14 @@ class SystemEventConsumer:
         leverage_raw,
       )
       await self._reply_error(reply_to, account_id, "crypto settings not configured")
-      return
+      return None
 
     symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
     try:
       default_leverage = int(leverage_raw)
     except ValueError:
       log.error(
-        "SYSTEM CRYPTO_LEVERAGE_INIT skipped account_id=%s: %s is not an int: %r",
+        "SYSTEM handshake rejected account_id=%s: %s is not an int: %r",
         account_id,
         CRYPTO_MAX_LEVERAGE_KEY,
         leverage_raw,
@@ -462,11 +454,11 @@ class SystemEventConsumer:
       await self._reply_error(
         reply_to, account_id, f"{CRYPTO_MAX_LEVERAGE_KEY} is not an integer"
       )
-      return
+      return None
 
     if default_leverage <= 0:
       log.error(
-        "SYSTEM CRYPTO_LEVERAGE_INIT skipped account_id=%s: %s must be positive, got %r",
+        "SYSTEM handshake rejected account_id=%s: %s must be positive, got %r",
         account_id,
         CRYPTO_MAX_LEVERAGE_KEY,
         leverage_raw,
@@ -474,39 +466,24 @@ class SystemEventConsumer:
       await self._reply_error(
         reply_to, account_id, f"{CRYPTO_MAX_LEVERAGE_KEY} must be a positive integer"
       )
-      return
+      return None
 
-    try:
-      await self._publisher.publish_system_signal(
-        action=SystemActionEnum.CRYPTO_LEVERAGE_INIT,
-        account_id=account_id,
-        symbols=symbols,
-        default_leverage=default_leverage,
-        subject=reply_to or None,
-      )
-    except Exception as exc:
-      # NATS itself is unhappy, so we cannot reach the worker on the reply inbox
-      # either. Let the worker's request time out and retry rather than masking
-      # the failure behind a best-effort error reply that would also fail.
-      log.exception(
-        "Failed to publish CRYPTO_LEVERAGE_INIT for account_id=%s: %s",
-        account_id,
-        exc,
-      )
+    return CryptoLeverageConfig(symbols=symbols, default_leverage=default_leverage)
 
-  async def _send_retry_signal(
-    self, account_id: str, strategies: list[str], reply_to: str = ""
-  ) -> None:
-    """Push a RETRY_SIGNALS replay of the last ``max_retry_timeout`` seconds.
+  async def _build_retry_signals(
+    self, account_id: str, strategies: list[str]
+  ) -> list[TradingSignal]:
+    """Return the replay of the last ``max_retry_timeout`` seconds of signals.
 
-    Nothing to do when the worker announced no strategies, or when we have no
+    Empty when the worker announced no strategies, or when we have no
     ``SignalRepository`` wired in (the deployment opted out of the replay).
     Query hits are shaped through ``parse_signal`` so the payload matches the
-    live SIGNAL messages exactly. Best-effort: a broken lookup, an invalid
-    persisted row, or a failed publish is logged and the handshake continues.
+    live SIGNAL messages exactly. Best-effort: a broken lookup or an invalid
+    persisted row is logged and the handshake continues with what could be
+    read — a missed replay must not cost the worker its whole configuration.
     """
     if self._signals is None or not strategies:
-      return
+      return []
 
     window_seconds = await self._get_max_retry_timeout_seconds()
     try:
@@ -515,11 +492,11 @@ class SystemEventConsumer:
       )
     except Exception as exc:
       log.exception(
-        "SYSTEM RETRY_SIGNALS skipped account_id=%s: signals lookup failed: %s",
+        "SYSTEM signal replay skipped account_id=%s: signals lookup failed: %s",
         account_id,
         exc,
       )
-      return
+      return []
 
     signals: list[TradingSignal] = []
     for envelope in envelopes:
@@ -533,19 +510,10 @@ class SystemEventConsumer:
       except Exception as exc:
         # A single bad row must not derail the replay for the rest.
         log.warning(
-          "SYSTEM RETRY_SIGNALS skipping bad row signal_id=%s: %s", signal_id, exc
+          "SYSTEM signal replay skipping bad row signal_id=%s: %s", signal_id, exc
         )
 
-    try:
-      await self._publisher.publish_system_retry_signal(
-        account_id=account_id,
-        signals=signals,
-        subject=reply_to or None,
-      )
-    except Exception as exc:
-      log.exception(
-        "Failed to publish RETRY_SIGNALS for account_id=%s: %s", account_id, exc
-      )
+    return signals
 
   async def _get_max_retry_timeout_seconds(self) -> int:
     """Read the ``max_retry_timeout`` broker setting, falling back to the
@@ -623,13 +591,29 @@ class SystemEventConsumer:
     self._magic_map_cached_at = now
     return self._magic_map_cache
 
-  async def _reply_ack(self, reply_to: str, account_id: str) -> None:
-    """Acknowledge a handshake that needs no configuration. No-op when there is
-    no reply inbox (fire-and-forget publish)."""
-    if not reply_to:
-      return
+  async def _reply_ack(
+    self,
+    reply_to: str,
+    account_id: str,
+    *,
+    strategy_magic_map: dict[str, int],
+    retry_signals: list[TradingSignal],
+    crypto_leverage_init: Optional[CryptoLeverageConfig] = None,
+  ) -> None:
+    """Answer the handshake with the worker's complete initial configuration.
+
+    Delivered on *reply_to* (the request's inbox) so only the worker that asked
+    receives it; without a reply inbox it falls back to a broadcast on the
+    shared SYSTEM subject that workers filter by ``account_id``.
+    """
     try:
-      await self._publisher.publish_system_ack(subject=reply_to, account_id=account_id)
+      await self._publisher.publish_system_ack(
+        subject=reply_to or None,
+        account_id=account_id,
+        strategy_magic_map=strategy_magic_map,
+        retry_signals=retry_signals,
+        crypto_leverage_init=crypto_leverage_init,
+      )
     except Exception as exc:
       log.warning(
         "Failed to reply WORKER_CONNECTED_ACK account_id=%s: %s", account_id, exc
@@ -710,7 +694,7 @@ class NatsPublisher:
 
     Carries ``signal_id`` — same field the LONG/SHORT/TP payloads (a full
     ``TradingSignal``) already do — so a worker seeing this signal live and
-    then again inside a ``SYSTEM.RETRY_SIGNALS`` replay can de-duplicate by
+    then again inside a WORKER_CONNECTED_ACK's ``retry_signals`` can de-duplicate by
     id instead of by guessing on content.
     """
     payload = json.dumps(
@@ -760,12 +744,13 @@ class NatsPublisher:
   async def publish_system_signal(
     self, *, subject: str | None = None, **kwargs
   ) -> None:
-    """Publish a CRYPTO_LEVERAGE_INIT system signal.
+    """Publish a standalone CRYPTO_LEVERAGE_INIT system signal.
 
-    When *subject* is given (a worker's reply inbox from NATS ``request``) the
-    signal is delivered directly to that one worker; otherwise it is broadcast
-    on the shared SYSTEM subject for backward compatibility with fire-and-forget
-    workers.
+    Used by the ``POST /admin/settings/crypto-*`` push to reach workers that are
+    already connected; a worker's connect-time copy travels inside its
+    WORKER_CONNECTED_ACK instead. When *subject* is given the signal is
+    delivered to that one worker; otherwise it is broadcast on the shared SYSTEM
+    subject.
     """
     signal = SystemCryptoLeverageInitSignal(**kwargs)
     target = subject or PublishTopicEnum.SYSTEM.value
@@ -780,63 +765,34 @@ class NatsPublisher:
       signal.default_leverage,
     )
 
-  async def publish_system_strategy_magic_map(
-    self, *, subject: str | None = None, **kwargs
-  ) -> None:
-    """Publish a STRATEGY_MAGIC_MAP system signal to a single worker.
+  async def publish_system_ack(self, *, subject: str | None = None, **kwargs) -> None:
+    """Answer a WORKER_CONNECTED handshake with the worker's whole initial
+    configuration — magic map, signal replay and (crypto only) leverage config —
+    in the one message a NATS reply inbox accepts.
 
-    Sent first in the WORKER_CONNECTED handshake (before RETRY_SIGNALS and the
-    market-specific ACK / CRYPTO_LEVERAGE_INIT). When *subject* is given (the
-    worker's reply inbox from NATS ``request``) the map reaches only that one
-    worker; otherwise it falls back to the shared SYSTEM subject, still carrying
-    ``account_id`` so a fire-and-forget worker can filter for itself.
+    Delivered on *subject* (the request's reply inbox) when set, so only the
+    worker that asked sees its own configuration; otherwise broadcast on the
+    shared SYSTEM subject for a fire-and-forget worker to filter by
+    ``account_id``.
     """
-    signal = SystemStrategyMagicMapSignal(**kwargs)
-    target = subject or PublishTopicEnum.SYSTEM.value
-    payload = signal.model_dump_json().encode()
-    await self._conn.nc.publish(target, payload)
-    log.info(
-      "Published [SYSTEM→%s] action=%s account_id=%s strategies=%d",
-      target,
-      signal.action,
-      signal.account_id,
-      len(signal.magic_map),
-    )
-
-  async def publish_system_retry_signal(
-    self, *, subject: str | None = None, **kwargs
-  ) -> None:
-    """Publish a RETRY_SIGNALS replay of recent signals to a reconnecting worker.
-
-    Sent as the second half of the WORKER_CONNECTED handshake — after the
-    market-specific ACK / CRYPTO_LEVERAGE_INIT — so a worker that missed
-    broadcasts while it was offline can catch up. Delivered directly on
-    *subject* (the request's reply inbox) when set; otherwise broadcast on the
-    shared SYSTEM subject.
-    """
-    signal = SystemRetrySignal(**kwargs)
-    target = subject or PublishTopicEnum.SYSTEM.value
-    payload = signal.model_dump_json().encode()
-    await self._conn.nc.publish(target, payload)
-    log.info(
-      "Published [SYSTEM→%s] action=%s account_id=%s count=%d",
-      target,
-      signal.action,
-      signal.account_id,
-      len(signal.signals),
-    )
-
-  async def publish_system_ack(self, *, subject: str, **kwargs) -> None:
-    """Reply on a worker's request inbox acknowledging that no initial
-    configuration is required (e.g. non-crypto markets)."""
     signal = SystemWorkerConnectedAck(**kwargs)
-    payload = signal.model_dump_json().encode()
-    await self._conn.nc.publish(subject, payload)
+    target = subject or PublishTopicEnum.SYSTEM.value
+    body = signal.model_dump_json()
+    await self._conn.nc.publish(target, body.encode())
+    # The whole handshake answer now lives in this one message, so the payload
+    # goes into the log with it: when a worker starts up wrong, this line is
+    # the record of exactly what it was told. One per connect, so the volume is
+    # bounded by reconnects rather than by traffic.
     log.info(
-      "Published [SYSTEM→%s] action=%s account_id=%s",
-      subject,
+      "Published [SYSTEM→%s] action=%s account_id=%s strategies=%d retry_signals=%d "
+      "crypto_leverage=%s | payload=%s",
+      target,
       signal.action,
       signal.account_id,
+      len(signal.strategy_magic_map),
+      len(signal.retry_signals),
+      signal.crypto_leverage_init is not None,
+      body,
     )
 
   async def publish_system_error(self, *, subject: str, **kwargs) -> None:

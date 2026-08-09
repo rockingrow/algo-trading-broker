@@ -118,9 +118,6 @@ class FakePublisher:
   async def publish_system_signal(self, **kwargs):
     return None
 
-  async def publish_system_retry_signal(self, **kwargs):
-    return None
-
   async def publish_system_ack(self, **kwargs):
     return None
 
@@ -255,7 +252,7 @@ async def test_handle_enqueued_flat_uses_publish_flat():
 
   assert result["status"] == "accepted"
   # signal_id is threaded through so workers can dedup live FLAT against a
-  # RETRY_SIGNALS replay of the same signal.
+  # retry_signals replay of the same signal.
   assert publisher.flats == [
     (result["signal_id"], "XAUUSD", datetime(2026, 1, 1, tzinfo=timezone.utc), "strat")
   ]
