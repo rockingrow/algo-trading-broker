@@ -208,9 +208,7 @@ class Account(Base):
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   account_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
-  market: Mapped[MarketTypeEnum] = mapped_column(
-    Enum(MarketTypeEnum), nullable=False
-  )
+  market: Mapped[MarketTypeEnum] = mapped_column(Enum(MarketTypeEnum), nullable=False)
   # Exchange/gateway the account trades through, e.g. MT5 (forex) or BINANCE
   # (crypto). Combined with market + account_id it forms the worker
   # addressing id <market>-<gateway>-<account_id> used on the SYSTEM subject.

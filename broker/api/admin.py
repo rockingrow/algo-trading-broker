@@ -127,9 +127,7 @@ async def _push_crypto_leverage_init(
       )
       continue
 
-    worker_id = compose_worker_id(
-      account.market, account.gateway, account.account_id
-    )
+    worker_id = compose_worker_id(account.market, account.gateway, account.account_id)
     try:
       await publisher.publish_system_signal(
         action=SystemActionEnum.CRYPTO_LEVERAGE_INIT,

@@ -140,7 +140,9 @@ class BrokerClientUser(BrokerClient):
       )
     )
 
-  async def list_accounts(self, telegram_user_id: int) -> Optional[list[dict[str, Any]]]:
+  async def list_accounts(
+    self, telegram_user_id: int
+  ) -> Optional[list[dict[str, Any]]]:
     """Return every account linked to a Telegram user (empty list if none)."""
     return self._json_or_none(
       await self._request(

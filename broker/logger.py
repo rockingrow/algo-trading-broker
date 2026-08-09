@@ -50,7 +50,9 @@ def uvicorn_log_config() -> dict:
   access_fmt = f"%(asctime)s {tz} | %(levelprefix)s %(message)s"
   cfg["formatters"]["access"]["fmt"] = access_fmt
   cfg["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
-  cfg["formatters"]["default"]["fmt"] = f"%(asctime)s {tz} | %(levelprefix)s %(message)s"
+  cfg["formatters"]["default"]["fmt"] = (
+    f"%(asctime)s {tz} | %(levelprefix)s %(message)s"
+  )
   cfg["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
   return cfg
 

@@ -23,7 +23,9 @@ router = Router(name="trades")
 async def cmd_trades(
   message: Message, broker: BrokerClientUser, broker_admin: BrokerClientAdmin
 ) -> None:
-  payload = await broker.list_trades(message.from_user.id, limit=TRADES_PER_PAGE, offset=0)
+  payload = await broker.list_trades(
+    message.from_user.id, limit=TRADES_PER_PAGE, offset=0
+  )
   if payload is None:
     await message.answer(
       f"{emojis.WARNING} Failed to fetch trade data. Try again later."
@@ -46,7 +48,9 @@ async def cb_trades_page(
     await call.answer()
     return
 
-  payload = await broker.list_trades(call.from_user.id, limit=TRADES_PER_PAGE, offset=offset)
+  payload = await broker.list_trades(
+    call.from_user.id, limit=TRADES_PER_PAGE, offset=offset
+  )
   if payload is None:
     await call.answer("Failed to load data", show_alert=True)
     return

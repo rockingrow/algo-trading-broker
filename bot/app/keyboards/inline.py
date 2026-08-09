@@ -137,9 +137,7 @@ def admin_trades_pagination(
   account_id: str, page: dict
 ) -> Optional[InlineKeyboardMarkup]:
   """Prev/Next for admin trade browsing → callback ``atr:{account_id}:{offset}``."""
-  return build_pagination_keyboard(
-    page, lambda offset: f"atr:{account_id}:{offset}"
-  )
+  return build_pagination_keyboard(page, lambda offset: f"atr:{account_id}:{offset}")
 
 
 def settings_keyboard(states: list[dict[str, Any]]) -> InlineKeyboardMarkup:
@@ -178,11 +176,7 @@ def gateway_picker(market: str) -> InlineKeyboardMarkup:
   gateways = GATEWAYS_BY_MARKET.get(market, [])
   return InlineKeyboardMarkup(
     inline_keyboard=[
-      [
-        InlineKeyboardButton(
-          text=gateway, callback_data=f"nacc:g:{market}:{gateway}"
-        )
-      ]
+      [InlineKeyboardButton(text=gateway, callback_data=f"nacc:g:{market}:{gateway}")]
       for gateway in gateways
     ]
   )

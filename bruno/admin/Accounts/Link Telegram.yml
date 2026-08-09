@@ -1,16 +1,16 @@
 info:
-  name: Crypto Max Leverage
+  name: Link Telegram
   type: http
   seq: 5
 
 http:
   method: POST
-  url: "{{url}}/admin/settings/crypto-max-leverage"
+  url: "{{url}}/admin/accounts/{{process.env.account_uuid}}/link-telegram"
   body:
     type: json
     data: |-
       {
-        "default_leverage": 5
+        "telegram_user_id": {{process.env.telegram_user_id}}
       }
   auth: inherit
 

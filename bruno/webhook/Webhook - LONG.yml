@@ -18,7 +18,7 @@ http:
         "position": {
           "action": "LONG",
           "price": 65400.5,
-          "quantity": 6.0000,
+          "quantity": 0.1,
           "sl": 65000,
           "tp1": 66000.00,
           "tp2": 67000.00,

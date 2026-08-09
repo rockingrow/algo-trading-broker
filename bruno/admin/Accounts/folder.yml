@@ -1,7 +1,7 @@
 info:
-  name: Settings
+  name: Accounts
   type: folder
-  seq: 2
+  seq: 4
 
 request:
   auth: inherit

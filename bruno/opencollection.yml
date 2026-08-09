@@ -7,7 +7,7 @@ docs:
   content: |-
     # Algo Trading Broker — Bruno Collection
 
-    Bruno API collection at [bruno/](bruno/) for testing the Algo Trading Broker service. Three folders: **webhook** (signals from TradingView / strategy), **ADMIN** (broker admin operations), and **API** (read endpoints).
+    Bruno API collection at [bruno/](bruno/) for testing the Algo Trading Broker service. Three top-level folders: **webhook** (signals from TradingView / strategy), **telegram** (`/v1/telegram/*` — everything the Telegram bot service calls, split into `user/` and `admin/` by what the request does), and **admin** (broker admin operations, `/admin/*`, plus the read-only ops endpoints under `/v1/*`).
 
     ## Collection root
 
@@ -22,6 +22,8 @@ docs:
     Variables: `port`, `url` (`{{process.env.url}}:{{process.env.port}}/{{process.env.url_prefix}}`), `webhook_token`, `broker_token`, `api_key`.
 
     `url_prefix` maps to `BROKER_API_PREFIX` in the broker's `.env`. All request URLs are expressed as `{{url}}/v1/...` etc. — the prefix is baked into `{{url}}` so no individual request needs to be changed. Leave `url_prefix` empty (or omit it from `.env`) to use the default paths without a prefix.
+
+    A handful of additional values are read straight from `process.env.*` without being promoted to the environment file (matching `strategy`, `symbol`, `account_id`): `account_uuid` (an account's row UUID, used by `telegram/user/Set Active Account` and `admin/Accounts/Link Telegram`), `telegram_user_id`, and `link_token` (an `account_link_tokens.token` value, used by `telegram/user/Link`).
 
     ---
 
@@ -60,37 +62,76 @@ docs:
 
     ---
 
-    ## `ADMIN/` folder — Broker admin operations
+    ## `telegram/` folder — everything the Telegram bot service calls (`/v1/telegram/*`)
 
-    Folder config: [ADMIN/folder.yml](bruno/ADMIN/folder.yml) — injects header `X-API-KEY: {{api_key}}` for every request.
+    Folder config: [telegram/folder.yml](bruno/telegram/folder.yml) — injects header `X-API-KEY: {{api_key}}` for every request under `telegram/`. Every endpoint here is called by the trusted Telegram bot service only (see `broker/api/telegram.py`'s module docstring); the end-user's own identity is the `telegram_user_id` path/body value the bot forwards from a verified Telegram update, never user-typed text. Split into two subfolders by what the request *does*, not by who's allowed to call it — both still require `X-API-KEY` and both are triggered by any linked Telegram user:
 
-    ### [FLAT](bruno/ADMIN/FLAT.yml) — `POST {{url}}/admin/flat` (prefix embedded in `{{url}}`)
+    ### `telegram/user/` subfolder — account & info self-service
 
-    Force-flattens the broker state for a given strategy/symbol/account. Body: `strategy`, `symbol`, `account_id` (all from `process.env`).
-
-    ### `ADMIN/Settings/` subfolder — broker setting toggles
-
-    | Seq | Request | Endpoint |
-    | --- | --- | --- |
-    | 1 | [Toggle Include Signal Raw](bruno/ADMIN/Settings/Toggle%20Include%20Signal%20Raw.yml) | `POST {{url}}/admin/settings/include-signal-raw` |
-    | 2 | [Toggle BlockSignal](bruno/ADMIN/Settings/Toggle%20BlockSignal.yml) | `POST {{url}}/admin/settings/block-signal` |
-    | 2 | [Toggle SilentSignal](bruno/ADMIN/Settings/Toggle%20SilentSignal.yml) | `POST {{url}}/admin/settings/silent-signal` |
-
-    All toggles: no body, auth inherited from `ADMIN/` folder (`X-API-KEY`).
-
-    ---
-
-    ## `API/` folder — Read endpoints
-
-    Folder config: [API/folder.yml](bruno/API/folder.yml) — injects header `X-API-KEY: {{api_key}}` for every request.
+    Folder config: [telegram/user/folder.yml](bruno/telegram/user/folder.yml) (auth inherited from `telegram/`). Reads and account-linkage actions — nothing here changes trading state.
 
     | Seq | Request | Method & Endpoint | Notes |
     | --- | --- | --- | --- |
-    | 1 | [Health Check](bruno/API/Health%20Check.yml) | `GET {{url}}/v1/health` | Liveness probe, no body |
-    | 3 | [accounts](bruno/API/accounts.yml) | `GET {{url}}/v1/accounts` | Returns list of registered accounts |
-    | 3 | [trades](bruno/API/trades.yml) | `GET {{url}}/v1/{{account_id}}/trades` | Paginated trade list; query params: `offset` (default `0`), `limit` (optional, default `20`) |
+    | 1 | [Link](bruno/telegram/user/Link.yml) | `POST {{url}}/v1/telegram/link` | Claim an account with its link token. Body: `token` (UUID), `telegram_user_id` |
+    | 2 | [Get Active Account](bruno/telegram/user/Get%20Active%20Account.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}` | The account currently active for this user |
+    | 3 | [List Accounts](bruno/telegram/user/List%20Accounts.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}/accounts` | Every account linked to this user |
+    | 4 | [Set Active Account](bruno/telegram/user/Set%20Active%20Account.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/active-account` | Body: `account_id` (row UUID of the account to activate) |
+    | 5 | [Unlink](bruno/telegram/user/Unlink.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/unlink` | No body |
+    | 6 | [Trades](bruno/telegram/user/Trades.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}/trades` | Paginated trades for the caller's active account; query params: `offset` (default `0`), `limit` (optional, default `20`) |
+    | 7 | [Broadcast - Get](bruno/telegram/user/Broadcast%20-%20Get.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}/broadcast` | Whether the caller is opted in to completed-trade DMs |
+    | 8 | [Broadcast - Subscribe](bruno/telegram/user/Broadcast%20-%20Subscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/subscribe` | No body |
+    | 9 | [Broadcast - Unsubscribe](bruno/telegram/user/Broadcast%20-%20Unsubscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/unsubscribe` | No body |
 
-    `trades` response shape: `{ data: Trade[], page: { total, limit, offset, order, order_by } }`.
+    ### `telegram/admin/` subfolder — trading control commands
+
+    Folder config: [telegram/admin/folder.yml](bruno/telegram/admin/folder.yml) (auth inherited from `telegram/`). The two requests here both call `publisher.publish_admin_signal(action=AdminActionEnum.*, ...)` — the same publish path `broker/api/admin.py`'s admin endpoints use — scoped to the caller's own account instead of broker-wide.
+
+    | Seq | Request | Method & Endpoint | Notes |
+    | --- | --- | --- | --- |
+    | 1 | [Commands - Flat](bruno/telegram/admin/Commands%20-%20Flat.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/commands/flat` | Publishes `AdminActionEnum.FLAT` scoped to the caller's account. Body (both optional): `strategy`, `symbol` |
+    | 2 | [Commands - Prevent](bruno/telegram/admin/Commands%20-%20Prevent.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/commands/prevent` | Publishes `BLOCK_SIGNAL`/`ALLOW_SIGNAL`. Body: `enabled` (`true` → block new entries, `false` → allow) |
+
+    ---
+
+    ## `admin/` folder — Broker admin operations
+
+    Folder config: [admin/folder.yml](bruno/admin/folder.yml) — injects header `X-API-KEY: {{api_key}}` for every request under `admin/`.
+
+    | Seq | Request | Method & Endpoint | Notes |
+    | --- | --- | --- | --- |
+    | 1 | [Health Check](bruno/admin/Health%20Check.yml) | `GET {{url}}/v1/health` | Liveness probe, no body, no auth actually required server-side |
+    | 2 | [FLAT](bruno/admin/FLAT.yml) | `POST {{url}}/admin/flat` | Force-flattens broker state for a given strategy/symbol/account. Body: `strategy`, `symbol`, `account_id`, `market`, `gateway` (all from `process.env`) |
+
+    ### `admin/Settings/` subfolder — broker setting toggles
+
+    Folder config: [admin/Settings/folder.yml](bruno/admin/Settings/folder.yml) (auth inherited).
+
+    | Seq | Request | Method & Endpoint |
+    | --- | --- | --- |
+    | 1 | [Get Settings](bruno/admin/Settings/Get%20Settings.yml) | `GET {{url}}/admin/settings` |
+    | 2 | [Toggle Include Signal Raw](bruno/admin/Settings/Toggle%20Include%20Signal%20Raw.yml) | `POST {{url}}/admin/settings/include-signal-raw` |
+    | 3 | [Toggle BlockSignal](bruno/admin/Settings/Toggle%20BlockSignal.yml) | `POST {{url}}/admin/settings/block-signal` |
+    | 4 | [Toggle SilentSignal](bruno/admin/Settings/Toggle%20SilentSignal.yml) | `POST {{url}}/admin/settings/silent-signal` |
+    | 5 | [Crypto Allowed Symbols](bruno/admin/Settings/Crypto%20Allowed%20Symbols.yml) | `POST {{url}}/admin/settings/crypto-allowed-symbol` |
+    | 6 | [Crypto Max Leverage](bruno/admin/Settings/Crypto%20Max%20Leverage.yml) | `POST {{url}}/admin/settings/crypto-max-leverage` |
+    | 7 | [Get Notification Timezone](bruno/admin/Settings/Get%20Notification%20Timezone.yml) | `GET {{url}}/admin/settings/notification-timezone` |
+    | 8 | [Set Notification Timezone](bruno/admin/Settings/Set%20Notification%20Timezone.yml) | `POST {{url}}/admin/settings/notification-timezone` |
+
+    The three toggles: no body, auth inherited. `Get Settings` returns the current state of the toggle keys (unset = `0`).
+
+    ### `admin/Accounts/` subfolder — account management + ops reads
+
+    Folder config: [admin/Accounts/folder.yml](bruno/admin/Accounts/folder.yml) (auth inherited).
+
+    | Seq | Request | Method & Endpoint | Notes |
+    | --- | --- | --- | --- |
+    | 1 | [List Accounts](bruno/admin/Accounts/List%20Accounts.yml) | `GET {{url}}/v1/accounts` | Every registered account, each with its current link token and linked bot users |
+    | 2 | [Trades](bruno/admin/Accounts/Trades.yml) | `GET {{url}}/v1/{account_id}/trades` | Paginated trade list for any account_id; query params: `offset` (default `0`), `limit` (optional, default `20`) |
+    | 3 | [Create Account](bruno/admin/Accounts/Create%20Account.yml) | `POST {{url}}/admin/accounts` | Pre-register an account before it has traded. Body: `market`, `gateway`, `account_id`, `account_name` |
+    | 4 | [Rotate Link Token](bruno/admin/Accounts/Rotate%20Link%20Token.yml) | `POST {{url}}/admin/accounts/{account_id}/link-token/rotate` | Issues a fresh link token, revoking every still-valid one. No body |
+    | 5 | [Link Telegram](bruno/admin/Accounts/Link%20Telegram.yml) | `POST {{url}}/admin/accounts/{account_uuid}/link-telegram` | Admin-bind a Telegram user to an account directly, skipping the token flow. Body: `telegram_user_id` |
+
+    `Trades` response shape: `{ data: Trade[], page: { total, limit, offset, order, order_by } }`.
 
     ---
 
@@ -99,8 +140,9 @@ docs:
     | Surface | Auth mechanism |
     | --- | --- |
     | `POST /secret/webhook` | `token` field in JSON body (= `{{webhook_token}}`) |
-    | `POST /admin/*` | `X-API-KEY` header (= `{{api_key}}`) injected by [ADMIN/folder.yml](bruno/ADMIN/folder.yml) |
-    | `GET /v1/*` | `X-API-KEY` header (= `{{api_key}}`) injected by [API/folder.yml](bruno/API/folder.yml) |
+    | `/v1/telegram/*` (`telegram/user/`, `telegram/admin/`) | `X-API-KEY` header (= `{{api_key}}`) injected by [telegram/folder.yml](bruno/telegram/folder.yml) — trusted bot service only |
+    | `/admin/*` and `/v1/accounts`, `/v1/{account_id}/trades` (`admin/`) | `X-API-KEY` header (= `{{api_key}}`) injected by [admin/folder.yml](bruno/admin/folder.yml) |
+    | `GET /v1/health` | None required server-side (folder auth still sent) |
 
     ## Typical test sequences
 
@@ -108,8 +150,11 @@ docs:
     - **Stopped out:** `webhook/LONG` → `webhook/SL`.
     - **Trail to BE / raise SL:** insert `webhook/R_SL` after `TP1`.
     - **Rejected entry:** `webhook/SHORT`.
-    - **Reset state:** `webhook/FLAT` or `ADMIN/FLAT`.
-    - **Check trades:** `API/trades` (paginate with `offset`).
+    - **Reset state:** `webhook/FLAT` or `admin/FLAT`.
+    - **Ops check on trades:** `admin/Accounts/Trades` (paginate with `offset`).
+    - **Onboard a Telegram user:** `admin/Accounts/Create Account` → `admin/Accounts/Rotate Link Token` (hand the token to the user) → `telegram/user/Link` — or skip the token entirely with `admin/Accounts/Link Telegram`.
+    - **Telegram self-service:** `telegram/user/Link` → `telegram/user/List Accounts` → `telegram/user/Trades`.
+    - **Telegram trading control:** `telegram/admin/Commands - Flat` or `telegram/admin/Commands - Prevent`, scoped to the caller's own active account.
   type: text/markdown
 bundled: false
 extensions:

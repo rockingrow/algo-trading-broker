@@ -41,9 +41,7 @@ def test_command_list_sizes():
   # All admin command names are valid Telegram commands ([a-z0-9_], 1-32).
   import re
 
-  assert all(
-    re.fullmatch(r"[a-z0-9_]{1,32}", c.command) for c in ADMIN_COMMANDS
-  )
+  assert all(re.fullmatch(r"[a-z0-9_]{1,32}", c.command) for c in ADMIN_COMMANDS)
 
 
 class FakeBot:

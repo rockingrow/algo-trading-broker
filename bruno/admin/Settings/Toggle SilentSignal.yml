@@ -1,0 +1,15 @@
+info:
+  name: Toggle SilentSignal
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{url}}/admin/settings/silent-signal"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

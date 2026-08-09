@@ -1,11 +1,11 @@
 info:
-  name: Toggle SilentSignal
+  name: Get Settings
   type: http
-  seq: 2
+  seq: 1
 
 http:
-  method: POST
-  url: "{{url}}/admin/settings/silent-signal"
+  method: GET
+  url: "{{url}}/admin/settings"
   auth: inherit
 
 settings:

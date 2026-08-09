@@ -91,7 +91,9 @@ async def lifespan(app: FastAPI):
   await signal_retry_job.start()
   app.state.publisher = publisher
 
-  api_prefix = f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
+  api_prefix = (
+    f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
+  )
 
   # Notification: Startup
   await notifier.send_message(
@@ -166,7 +168,9 @@ def create_app() -> FastAPI:
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
   # Include Core Router — mount under secret prefix if configured
-  api_prefix = f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
+  api_prefix = (
+    f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
+  )
   app.include_router(get_core_router(), prefix=api_prefix)
 
   return app

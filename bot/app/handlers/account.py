@@ -61,7 +61,9 @@ async def _myaccounts_view(
 async def cmd_myaccounts(message: Message, broker: BrokerClientUser) -> None:
   text, kb = await _myaccounts_view(broker, message.from_user.id, 0)
   if text is None:
-    await message.answer(f"{emojis.WARNING} Failed to fetch your accounts. Try again later.")
+    await message.answer(
+      f"{emojis.WARNING} Failed to fetch your accounts. Try again later."
+    )
     return
   await message.answer(text, reply_markup=kb)
 
@@ -104,7 +106,9 @@ async def _switch_view(
 async def cmd_switch(message: Message, broker: BrokerClientUser) -> None:
   accounts = await broker.list_accounts(message.from_user.id)
   if accounts is None:
-    await message.answer(f"{emojis.WARNING} Failed to fetch your accounts. Try again later.")
+    await message.answer(
+      f"{emojis.WARNING} Failed to fetch your accounts. Try again later."
+    )
     return
   if len(accounts) <= 1:
     await message.answer(
@@ -113,7 +117,9 @@ async def cmd_switch(message: Message, broker: BrokerClientUser) -> None:
     return
   text, kb = await _switch_view(broker, message.from_user.id, 0)
   if text is None:
-    await message.answer(f"{emojis.WARNING} Failed to fetch your accounts. Try again later.")
+    await message.answer(
+      f"{emojis.WARNING} Failed to fetch your accounts. Try again later."
+    )
     return
   await message.answer(text, reply_markup=kb)
 
@@ -137,12 +143,15 @@ async def cb_switch_account(call: CallbackQuery, broker: BrokerClientUser) -> No
   account_id = call.data.split(":", 1)[1]
   result = await broker.switch_account(call.from_user.id, account_id)
   if result is None:
-    await safe_edit_text(call.message, f"{emojis.CROSS} Switch failed. Try again later.")
+    await safe_edit_text(
+      call.message, f"{emojis.CROSS} Switch failed. Try again later."
+    )
     await call.answer()
     return
   await safe_edit_text(
     call.message,
-    f"{emojis.CHECK} Active account switched.\n\n" + messages.UserMessages.format_account(result),
+    f"{emojis.CHECK} Active account switched.\n\n"
+    + messages.UserMessages.format_account(result),
   )
   await call.answer()
 
