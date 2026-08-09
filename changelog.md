@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/admin_flat` scope pickers (strategy · market · gateway)** — Running
+  `/admin_flat` bare no longer jumps straight to the "confirm FLAT ALL" prompt.
+  It now walks the admin through three sequential inline-keyboard pickers —
+  strategy → market → gateway — each carrying an explicit "All" row so scope
+  can stay broad at every step. The selected filters are forwarded verbatim to
+  `POST /admin/flat`, so an admin can e.g. FLAT one strategy across every
+  account, or FLAT every strategy on a single market/gateway pair, without
+  having to type raw command args. `/admin_flat <account_id>` (single-account
+  flow, resolves market/gateway from the account list) is unchanged.
+- **`GET /admin/strategies`** — Returns the distinct `trades.strategy` values
+  the broker has ever recorded, alphabetically. Backs the bot's strategy picker
+  above; an empty list simply means no trades have been observed yet.
+  (`TradeRepository.list_distinct_strategies`.)
 - **Telegram notifications reach several chats, and land in the right group
   topic** — Every chat-id setting takes a comma-separated list — the signals
   channel `TELEGRAM_CHAT_CHANNEL_ID`, the management chat `TELEGRAM_CHAT_ID`

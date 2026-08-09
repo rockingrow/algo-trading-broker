@@ -303,6 +303,20 @@ async def test_admin_flat_default_body():
   await client.aclose()
 
 
+async def test_admin_list_strategies_returns_json_list():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    return httpx.Response(200, json=["strat_a", "strat_b"])
+
+  client = _admin_client(handler)
+  result = await client.admin_list_strategies()
+  assert result == ["strat_a", "strat_b"]
+  assert captured["path"] == "/admin/strategies"
+  await client.aclose()
+
+
 async def test_admin_flat_scoped_body_includes_market_and_gateway():
   captured = {}
 

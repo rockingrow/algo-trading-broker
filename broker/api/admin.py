@@ -24,12 +24,14 @@ from broker.providers import (
   get_admin_notifier,
   get_publisher,
   get_setting_repository,
+  get_trade_repository,
 )
 from broker.interfaces import (
   AccountRepository,
   Notifier,
   SettingRepository,
   SignalPublisher,
+  TradeRepository,
 )
 from broker.schemas.account_schema import (
   AccountResponse,
@@ -489,6 +491,23 @@ def get_admin_router() -> APIRouter:
     )
 
     return SettingValueResponse(setting=NOTIFICATION_TIMEZONE_KEY, value=value)
+
+  @router.get(
+    "/strategies",
+    tags=["trading"],
+    summary="List known strategy names",
+    description=(
+      "Return the distinct ``strategy`` values the broker has ever recorded on "
+      "a trade, alphabetically. Backs the Telegram admin FLAT strategy picker — "
+      "an empty list simply means no trades have been observed yet."
+    ),
+    response_model=list[str],
+    responses=AUTH_RESPONSES,
+  )
+  async def list_strategies(
+    trade_repo: TradeRepository = Depends(get_trade_repository),
+  ) -> list[str]:
+    return await trade_repo.list_distinct_strategies()
 
   @router.post(
     "/flat",

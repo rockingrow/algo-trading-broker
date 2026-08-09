@@ -139,9 +139,10 @@ class FakeAccountRepo:
 
 
 class FakeTradeRepo:
-  def __init__(self, trades, total):
+  def __init__(self, trades, total, strategies=None):
     self._trades = trades
     self._total = total
+    self._strategies = list(strategies) if strategies is not None else []
     self.list_kwargs = None
 
   async def list_by_account(self, account_id, *, limit, offset, order, order_by):
@@ -152,6 +153,9 @@ class FakeTradeRepo:
 
   async def count_by_account(self, account_id):
     return self._total
+
+  async def list_distinct_strategies(self):
+    return list(self._strategies)
 
 
 def _make_account(
@@ -217,7 +221,9 @@ def ctx():
   notifier = FakeNotifier()
   publisher = FakePublisher()
   account_repo = FakeAccountRepo([_make_account()])
-  trade_repo = FakeTradeRepo([_make_trade()], total=1)
+  trade_repo = FakeTradeRepo(
+    [_make_trade()], total=1, strategies=["strat_a", "strat_b"]
+  )
 
   app.dependency_overrides[get_signal_service] = lambda: signal_service
   app.dependency_overrides[get_setting_repository] = lambda: setting_repo
@@ -841,6 +847,15 @@ def test_get_settings_reflects_enabled(ctx):
   blocked = next(i for i in resp.json() if i["setting"] == SIGNAL_BLOCKED)
   assert blocked["value"] == "1"
   assert blocked["state"] == "ENABLED"
+
+
+# ── Admin strategies ────────────────────────────────────────────────
+
+
+def test_list_strategies_returns_repo_values(ctx):
+  resp = ctx["client"].get("/admin/strategies", headers={"X-API-KEY": API_KEY})
+  assert resp.status_code == 200
+  assert resp.json() == ["strat_a", "strat_b"]
 
 
 # ── Admin flat ──────────────────────────────────────────────────────

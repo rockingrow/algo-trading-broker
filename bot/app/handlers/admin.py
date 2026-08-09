@@ -14,6 +14,10 @@ String(50) and never contains ':'):
                                 the broker now requires market + gateway
                                 alongside it, see admin_flat's docstring)
 - aflatc:{index}               disambiguation picker → picks aflat_candidates[index]
+- afls:{index|a}               /aflat scope picker → strategy (index into FSM
+                                aflat_strategies, or "a" for All)
+- aflm:{market|a}              /aflat scope picker → market ("a" for All)
+- aflg:{gateway|a}             /aflat scope picker → gateway ("a" for All)
 - arotp:{account_id}           picker → rotate confirm
 - arot:{account_id}:ok|no      rotate confirm
 - aset:{slug}                  toggle a broker setting
@@ -176,20 +180,72 @@ async def cb_atrades_page(call: CallbackQuery, broker_admin: BrokerClientAdmin) 
 
 
 # ── /aflat ──────────────────────────────────────────────────────────
-# account_id alone no longer identifies a single account (the broker now
-# requires market + gateway alongside it — see FlatRequest's docstring),
-# so scoping to one account resolves those from the live account list first.
-# Because that resolved target can't safely fit in callback_data (well under
-# 64 bytes for a worst-case 50-char account_id + market/gateway), it's kept
-# in FSM data instead; only the confirm/cancel decision travels on the wire.
+# Two entry shapes:
+#   /aflat                → sequential scope pickers (strategy → market →
+#                            gateway → confirm), each carrying an "All" row so
+#                            the admin can stay broad or narrow at will.
+#   /aflat <account_id>   → resolve one account and confirm. account_id alone
+#                            no longer identifies a single account (the broker
+#                            now requires market + gateway alongside it — see
+#                            FlatRequest's docstring), so the live account list
+#                            is fetched first to bind market/gateway to the
+#                            resolved target, and — because that target can't
+#                            safely fit in callback_data — it lives in FSM
+#                            data; only confirm/cancel travels on the wire.
 
 
-def _aflat_confirm_text(account: dict) -> str:
+def _aflat_scope_text(scope: dict) -> str:
+  parts = []
+  strat = scope.get("strategy")
+  parts.append(
+    f"strategy=<code>{html.escape(str(strat))}</code>" if strat else "strategy=<b>ALL</b>"
+  )
+  market = scope.get("market")
+  parts.append(
+    f"market=<b>{html.escape(str(market))}</b>" if market else "market=<b>ALL</b>"
+  )
+  gateway = scope.get("gateway")
+  parts.append(
+    f"gateway=<b>{html.escape(str(gateway))}</b>" if gateway else "gateway=<b>ALL</b>"
+  )
+  return " · ".join(parts)
+
+
+def _aflat_target_confirm_text(account: dict) -> str:
   return (
     f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for account "
     f"<code>{html.escape(str(account.get('account_id')))}</code> "
     f"({html.escape(str(account.get('market')))}/"
     f"{html.escape(str(account.get('gateway')))})?"
+  )
+
+
+def _aflat_scope_confirm_text(scope: dict) -> str:
+  return (
+    f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) with scope:\n"
+    f"{_aflat_scope_text(scope)}"
+  )
+
+
+async def _aflat_start_scope_flow(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  """Kick off the strategy → market → gateway → confirm picker sequence.
+
+  The strategy list is fetched from the broker and stashed in FSM data so the
+  strategy callback can safely reference it by index (raw names would risk
+  Telegram's 64-byte callback_data cap and echo user text back on the wire).
+  A failed fetch degrades to an empty list; the admin can still pick "All"."""
+  strategies = await broker_admin.admin_list_strategies() or []
+  await state.update_data(
+    aflat_target="*",
+    aflat_candidates=None,
+    aflat_strategies=strategies,
+    aflat_scope={"strategy": None, "market": None, "gateway": None},
+  )
+  await message.answer(
+    f"{emojis.WARNING} <b>FLAT</b> scope — pick a strategy (or All):",
+    reply_markup=inline.aflat_strategy_picker(strategies),
   )
 
 
@@ -202,11 +258,7 @@ async def cmd_aflat(
 ) -> None:
   arg = (command.args or "").strip()
   if not arg:
-    await state.update_data(aflat_target="*", aflat_candidates=None)
-    await message.answer(
-      f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for <b>ALL</b> accounts?",
-      reply_markup=inline.confirm_keyboard("aflat"),
-    )
+    await _aflat_start_scope_flow(message, state, broker_admin)
     return
 
   accounts = await broker_admin.admin_list_accounts() or []
@@ -230,7 +282,7 @@ async def cmd_aflat(
   account = matches[0]
   await state.update_data(aflat_target=account, aflat_candidates=None)
   await message.answer(
-    _aflat_confirm_text(account), reply_markup=inline.confirm_keyboard("aflat")
+    _aflat_target_confirm_text(account), reply_markup=inline.confirm_keyboard("aflat")
   )
 
 
@@ -250,7 +302,90 @@ async def cb_aflat_pick(call: CallbackQuery, state: FSMContext) -> None:
   account = candidates[idx]
   await state.update_data(aflat_target=account, aflat_candidates=None)
   await safe_edit_text(
-    call.message, _aflat_confirm_text(account), inline.confirm_keyboard("aflat")
+    call.message, _aflat_target_confirm_text(account), inline.confirm_keyboard("aflat")
+  )
+  await call.answer()
+
+
+@router.callback_query(F.data.startswith("afls:"))
+async def cb_aflat_pick_strategy(call: CallbackQuery, state: FSMContext) -> None:
+  raw = call.data.split(":", 1)[1]
+  data = await state.get_data()
+  strategies = data.get("aflat_strategies") or []
+  scope = dict(data.get("aflat_scope") or {})
+
+  if raw == inline.AFLAT_ALL:
+    scope["strategy"] = None
+  else:
+    try:
+      idx = int(raw)
+    except ValueError:
+      await call.answer()
+      return
+    if idx < 0 or idx >= len(strategies):
+      await call.answer(f"{emojis.WARNING} Expired — run /aflat again.", show_alert=True)
+      return
+    scope["strategy"] = strategies[idx]
+
+  await state.update_data(aflat_scope=scope)
+  await safe_edit_text(
+    call.message,
+    f"{emojis.WARNING} <b>FLAT</b> scope — pick a market (or All):\n"
+    f"{_aflat_scope_text(scope)}",
+    inline.aflat_market_picker(),
+  )
+  await call.answer()
+
+
+@router.callback_query(F.data.startswith("aflm:"))
+async def cb_aflat_pick_market(call: CallbackQuery, state: FSMContext) -> None:
+  raw = call.data.split(":", 1)[1]
+  data = await state.get_data()
+  scope = dict(data.get("aflat_scope") or {})
+
+  if raw == inline.AFLAT_ALL:
+    scope["market"] = None
+  elif raw in MARKETS:
+    scope["market"] = raw
+  else:
+    await call.answer()
+    return
+
+  await state.update_data(aflat_scope=scope)
+  await safe_edit_text(
+    call.message,
+    f"{emojis.WARNING} <b>FLAT</b> scope — pick a gateway (or All):\n"
+    f"{_aflat_scope_text(scope)}",
+    inline.aflat_gateway_picker(scope.get("market")),
+  )
+  await call.answer()
+
+
+@router.callback_query(F.data.startswith("aflg:"))
+async def cb_aflat_pick_gateway(call: CallbackQuery, state: FSMContext) -> None:
+  raw = call.data.split(":", 1)[1]
+  data = await state.get_data()
+  scope = dict(data.get("aflat_scope") or {})
+
+  if raw == inline.AFLAT_ALL:
+    scope["gateway"] = None
+  else:
+    market = scope.get("market")
+    valid_gateways = (
+      GATEWAYS_BY_MARKET.get(market, [])
+      if market
+      else [gw for lst in GATEWAYS_BY_MARKET.values() for gw in lst]
+    )
+    if raw not in valid_gateways:
+      await call.answer()
+      return
+    scope["gateway"] = raw
+
+  await state.update_data(aflat_scope=scope)
+  await safe_edit_text(
+    call.message,
+    _aflat_scope_confirm_text(scope),
+    inline.confirm_keyboard("aflat"),
   )
   await call.answer()
 
@@ -262,7 +397,13 @@ async def cb_aflat(
   decision = call.data.split(":", 1)[1]
   data = await state.get_data()
   target = data.get("aflat_target")
-  await state.update_data(aflat_target=None, aflat_candidates=None)
+  scope = data.get("aflat_scope") or {}
+  await state.update_data(
+    aflat_target=None,
+    aflat_candidates=None,
+    aflat_strategies=None,
+    aflat_scope=None,
+  )
 
   if decision != "confirm" or target is None:
     await safe_edit_text(call.message, "Cancelled.")
@@ -270,7 +411,11 @@ async def cb_aflat(
     return
 
   if target == "*":
-    result = await broker_admin.admin_flat()
+    result = await broker_admin.admin_flat(
+      strategy=scope.get("strategy"),
+      market=scope.get("market"),
+      gateway=scope.get("gateway"),
+    )
   else:
     result = await broker_admin.admin_flat(
       account_id=target.get("account_id"),

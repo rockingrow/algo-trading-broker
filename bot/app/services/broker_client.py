@@ -274,6 +274,7 @@ class BrokerClientAdmin(BrokerClient):
   class ENDPOINTS(Endpoint):
     ACCOUNTS = "accounts"
     FLAT = "flat"
+    STRATEGIES = "strategies"
     ROTATE_TOKEN = "accounts/{account_id}/link-token/rotate"
     LINK_TELEGRAM = "accounts/{account_uuid}/link-telegram"
     SETTINGS = "settings"
@@ -347,6 +348,13 @@ class BrokerClientAdmin(BrokerClient):
           "gateway": gateway,
         },
       )
+    )
+
+  async def admin_list_strategies(self) -> Optional[list[str]]:
+    """Distinct strategy names the broker has ever seen on a trade,
+    alphabetically. Powers the admin FLAT strategy picker."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.STRATEGIES))
     )
 
   async def admin_rotate_token(self, account_id: str) -> Optional[dict[str, Any]]:
