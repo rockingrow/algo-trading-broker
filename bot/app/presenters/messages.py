@@ -206,7 +206,10 @@ class AdminMessages:
   SETTING_META: dict[str, tuple[str, str]] = {
     "signal_blocked": ("Block signal", "block-signal"),
     "silent_signal": ("Mute notifications", "silent-signal"),
-    "notification_include_signal_raw": ("Include raw in notification", "include-signal-raw"),
+    "notification_include_signal_raw": (
+      "Include raw in notification",
+      "include-signal-raw",
+    ),
   }
 
   @staticmethod
@@ -246,8 +249,9 @@ class AdminMessages:
   def format_admin_trades(
     account_id: str, payload: dict[str, Any], tz_offset_hours: float
   ) -> str:
-    return f"<b>Account</b> <code>{_esc(account_id)}</code>\n\n" + UserMessages.format_trades(
-      payload, tz_offset_hours
+    return (
+      f"<b>Account</b> <code>{_esc(account_id)}</code>\n\n"
+      + UserMessages.format_trades(payload, tz_offset_hours)
     )
 
   @staticmethod
@@ -259,7 +263,9 @@ class AdminMessages:
       rows=[
         (
           s.get("state"),
-          AdminMessages.SETTING_META.get(str(s.get("setting")), (str(s.get("setting")), ""))[0],
+          AdminMessages.SETTING_META.get(
+            str(s.get("setting")), (str(s.get("setting")), "")
+          )[0],
         )
         for s in states
       ],
@@ -279,8 +285,7 @@ class AdminMessages:
     *invite_url* is None when the bot username wasn't reachable; the raw token
     above still works, so the line is simply omitted rather than erroring."""
     invite = (
-      f"{emojis.LINK} Invite link:\n"
-      f"<tg-spoiler>{_esc(invite_url)}</tg-spoiler>\n\n"
+      f"{emojis.LINK} Invite link:\n<tg-spoiler>{_esc(invite_url)}</tg-spoiler>\n\n"
       if invite_url
       else ""
     )

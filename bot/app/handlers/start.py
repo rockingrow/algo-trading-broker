@@ -38,7 +38,9 @@ async def cmd_start_deeplink(
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, broker: BrokerClientUser) -> None:
+async def cmd_start(
+  message: Message, state: FSMContext, broker: BrokerClientUser
+) -> None:
   account = await broker.get_account(message.from_user.id)
   if account is not None:
     await state.clear()

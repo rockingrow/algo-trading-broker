@@ -1,20 +1,19 @@
 info:
-  name: FLAT
+  name: Create Account
   type: http
-  seq: 1
+  seq: 3
 
 http:
   method: POST
-  url: "{{url}}/admin/flat"
+  url: "{{url}}/admin/accounts"
   body:
     type: json
     data: |-
       {
-        "strategy": "{{process.env.strategy}}",
-        "symbol": "{{process.env.symbol}}",
         "market": "CRYPTO",
         "gateway": "BINANCE",
-        "account_id": "{{process.env.account_id}}"
+        "account_id": "{{process.env.account_id}}",
+        "account_name": "Demo Account"
       }
   auth: inherit
 

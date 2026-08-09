@@ -115,9 +115,7 @@ class Notification(abc.ABC):
         return False
       return True
     except Exception as exc:
-      logger.exception(
-        "Exception sending Telegram message chat_id=%s: %s", target, exc
-      )
+      logger.exception("Exception sending Telegram message chat_id=%s: %s", target, exc)
       return False
 
 
@@ -167,7 +165,9 @@ class OwnerBroadcastNotifier(Notification):
 
   def __init__(self, bot_token: str | None = None) -> None:
     super().__init__(
-      bot_token=bot_token if bot_token is not None else settings.telegram.SERVICE_BOT_TOKEN
+      bot_token=bot_token
+      if bot_token is not None
+      else settings.telegram.SERVICE_BOT_TOKEN
     )
 
 

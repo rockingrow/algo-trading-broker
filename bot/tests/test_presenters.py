@@ -35,7 +35,9 @@ def test_format_account_escapes_html():
 
 
 def test_format_trades_empty():
-  assert "No trades yet" in messages.UserMessages.format_trades({"data": [], "page": {}}, 7.0)
+  assert "No trades yet" in messages.UserMessages.format_trades(
+    {"data": [], "page": {}}, 7.0
+  )
 
 
 def test_format_trades_lists_rows_with_header():
@@ -128,8 +130,20 @@ def test_format_trades_numeric_columns_are_right_aligned():
 def test_format_accounts_list_renders_table_marking_active():
   out = messages.UserMessages.format_accounts_list(
     [
-      {"id": "a1", "account_id": "acc-1", "market": "FOREX", "gateway": "MT5", "is_active": True},
-      {"id": "a2", "account_id": "acc-2", "market": "CRYPTO", "gateway": "BINANCE", "is_active": False},
+      {
+        "id": "a1",
+        "account_id": "acc-1",
+        "market": "FOREX",
+        "gateway": "MT5",
+        "is_active": True,
+      },
+      {
+        "id": "a2",
+        "account_id": "acc-2",
+        "market": "CRYPTO",
+        "gateway": "BINANCE",
+        "is_active": False,
+      },
     ],
     _page(2),
   )
@@ -142,7 +156,9 @@ def test_format_accounts_list_renders_table_marking_active():
 
 
 def test_format_accounts_list_empty():
-  assert "No linked accounts" in messages.UserMessages.format_accounts_list([], _page(0))
+  assert "No linked accounts" in messages.UserMessages.format_accounts_list(
+    [], _page(0)
+  )
 
 
 def test_format_accounts_list_truncates_long_account_id():
@@ -164,7 +180,15 @@ def test_format_accounts_list_truncates_long_account_id():
 
 def test_format_accounts_list_without_switch_hint():
   out = messages.UserMessages.format_accounts_list(
-    [{"id": "a1", "account_id": "acc-1", "market": "FOREX", "gateway": "MT5", "is_active": True}],
+    [
+      {
+        "id": "a1",
+        "account_id": "acc-1",
+        "market": "FOREX",
+        "gateway": "MT5",
+        "is_active": True,
+      }
+    ],
     _page(1),
     with_switch_hint=False,
   )
@@ -190,11 +214,15 @@ def test_format_command_result():
 
 def test_format_command_result_names_the_command_not_the_wire_enum():
   # The user typed /prevent; BLOCK_SIGNAL is broker vocabulary.
-  prevent = messages.format_command_result({"action": "BLOCK_SIGNAL", "scope": "account=a"})
+  prevent = messages.format_command_result(
+    {"action": "BLOCK_SIGNAL", "scope": "account=a"}
+  )
   assert "Prevent" in prevent
   assert "BLOCK_SIGNAL" not in prevent
 
-  allow = messages.format_command_result({"action": "ALLOW_SIGNAL", "scope": "account=a"})
+  allow = messages.format_command_result(
+    {"action": "ALLOW_SIGNAL", "scope": "account=a"}
+  )
   assert "Allow" in allow
   assert "ALLOW_SIGNAL" not in allow
 

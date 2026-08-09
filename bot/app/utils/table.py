@@ -59,7 +59,9 @@ def render_table(
   def _row_cells(row: Sequence[Any]) -> list[str]:
     # Pad short rows so a caller may omit trailing cells.
     values = list(row[:n]) + [None] * (n - len(row[:n]))
-    return [_truncate("" if v is None else str(v), caps[i]) for i, v in enumerate(values)]
+    return [
+      _truncate("" if v is None else str(v), caps[i]) for i, v in enumerate(values)
+    ]
 
   head = _row_cells(headers)
   cells = [_row_cells(row) for row in rows]

@@ -144,7 +144,10 @@ def get_telegram_router() -> APIRouter:
     "/{telegram_user_id}/active-account",
     summary="Switch which of a Telegram user's linked accounts is active",
     response_model=LinkedAccountResponse,
-    responses={**AUTH_RESPONSES, 404: {"description": "Account not found or not linked to this Telegram user."}},
+    responses={
+      **AUTH_RESPONSES,
+      404: {"description": "Account not found or not linked to this Telegram user."},
+    },
   )
   async def set_active_account(
     telegram_user_id: int,

@@ -228,9 +228,7 @@ async def test_record_attempt_failure_missing_row_returns_none(monkeypatch):
 
 
 async def test_record_attempt_failure_rejects_bad_id():
-  assert (
-    await SqlAlchemySignalRepository().record_attempt_failure("not-a-uuid") is None
-  )
+  assert await SqlAlchemySignalRepository().record_attempt_failure("not-a-uuid") is None
 
 
 async def test_list_retryable_returns_rows(monkeypatch):
@@ -554,9 +552,7 @@ async def test_get_many_returns_empty_dict_on_error(monkeypatch):
 async def test_upsert_gateway_backfills_existing_account(monkeypatch):
   # The row predates the gateway column (or has only ever seen gateway-less
   # TRADE events), so the handshake is what fills it in.
-  existing = Account(
-    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway=None
-  )
+  existing = Account(account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway=None)
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
 
@@ -1024,7 +1020,9 @@ async def test_admin_link_telegram_creates_link_and_session(monkeypatch):
 async def test_admin_link_telegram_unknown_account(monkeypatch):
   session = FakeSession(results=[[]])
   _patch_session(monkeypatch, session)
-  assert await SqlAlchemyAccountRepository().admin_link_telegram(uuid.uuid4(), 42) is None
+  assert (
+    await SqlAlchemyAccountRepository().admin_link_telegram(uuid.uuid4(), 42) is None
+  )
 
 
 async def test_admin_link_telegram_idempotent(monkeypatch):
@@ -1066,9 +1064,7 @@ async def test_broadcast_subscribe_idempotent(monkeypatch):
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
   assert await SqlAlchemyTradeBroadcastRepository().subscribe(42) is True
-  assert not any(
-    isinstance(o, TradeBroadcastSubscription) for o in session.added
-  )
+  assert not any(isinstance(o, TradeBroadcastSubscription) for o in session.added)
 
 
 async def test_broadcast_is_subscribed(monkeypatch):

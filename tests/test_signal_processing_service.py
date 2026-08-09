@@ -251,9 +251,7 @@ async def test_handle_enqueued_persists_publishes_notifies_and_marks_published()
 
 async def test_handle_enqueued_flat_uses_publish_flat():
   service, publisher, notifier, signal_repo = _make_service()
-  result = await service.handle_enqueued(
-    payload=_payload(action=SignalActionEnum.FLAT)
-  )
+  result = await service.handle_enqueued(payload=_payload(action=SignalActionEnum.FLAT))
 
   assert result["status"] == "accepted"
   # signal_id is threaded through so workers can dedup live FLAT against a

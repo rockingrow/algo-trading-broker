@@ -106,6 +106,7 @@ from broker.schemas.webhook_schema import WebhookPayload
 
 log = get_logger(__name__)
 
+
 def _jetstream_subject(strategy: str) -> str:
   """Return the JetStream subject a webhook envelope should be published on.
 
@@ -113,6 +114,7 @@ def _jetstream_subject(strategy: str) -> str:
   hard-coding string concatenation in two places.
   """
   return f"{JETSTREAM_SIGNAL_SUBJECT_PREFIX}.{strategy}"
+
 
 # nats-py runs one asyncio task per subscription, pulling messages off an
 # internal queue and awaiting the callback to completion before pulling the
@@ -625,9 +627,7 @@ class NatsPublisher:
     """
     signal = AdminSignal(**kwargs)
     if signal.account_id is not None:
-      subject = compose_admin_subject(
-        signal.market, signal.gateway, signal.account_id
-      )
+      subject = compose_admin_subject(signal.market, signal.gateway, signal.account_id)
     else:
       subject = PublishTopicEnum.ADMIN.value
     payload = signal.model_dump_json().encode()

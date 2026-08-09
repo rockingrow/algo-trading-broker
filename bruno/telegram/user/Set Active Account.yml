@@ -1,16 +1,16 @@
 info:
-  name: Notification Timezone
+  name: Set Active Account
   type: http
-  seq: 6
+  seq: 4
 
 http:
   method: POST
-  url: "{{url}}/admin/settings/notification-timezone"
+  url: "{{url}}/v1/telegram/{{process.env.telegram_user_id}}/active-account"
   body:
     type: json
     data: |-
       {
-        "utc_offset_hours": 7
+        "account_id": "{{process.env.account_uuid}}"
       }
   auth: inherit
 

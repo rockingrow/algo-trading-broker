@@ -44,9 +44,7 @@ log = get_logger(__name__)
 
 def _new_link_token(account_id: uuid.UUID) -> AccountLinkToken:
   """A fresh, never-expiring, unrevoked link token for *account_id*."""
-  return AccountLinkToken(
-    id=uuid.uuid4(), account_id=account_id, token=uuid.uuid4()
-  )
+  return AccountLinkToken(id=uuid.uuid4(), account_id=account_id, token=uuid.uuid4())
 
 
 class SqlAlchemyAccountRepository:
@@ -211,9 +209,9 @@ class SqlAlchemyAccountRepository:
         )
         for row in result.scalars().all():
           # asc order + overwrite => the newest token wins.
-          summaries.setdefault(row.account_id, AccountLinkSummary()).link_token = (
-            row.token
-          )
+          summaries.setdefault(
+            row.account_id, AccountLinkSummary()
+          ).link_token = row.token
 
         result = await session.execute(
           select(AccountBotLink)
@@ -1092,9 +1090,7 @@ class SqlAlchemySignalRepository:
       )
       return row
     except Exception as exc:
-      log.exception(
-        "Failed to record attempt failure id=%s: %s", signal_id, exc
-      )
+      log.exception("Failed to record attempt failure id=%s: %s", signal_id, exc)
       return None
 
   async def list_retryable(self, retry_interval_seconds: int) -> list[Signal]:
@@ -1120,9 +1116,7 @@ class SqlAlchemySignalRepository:
     ``NULL < ts`` is already false) but kept explicit so the intent survives
     future edits.
     """
-    threshold = datetime.now(timezone.utc) - timedelta(
-      seconds=retry_interval_seconds
-    )
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=retry_interval_seconds)
     try:
       async with get_session() as session:
         result = await session.execute(

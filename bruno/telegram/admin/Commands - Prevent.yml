@@ -1,0 +1,21 @@
+info:
+  name: Commands - Prevent
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{url}}/v1/telegram/{{process.env.telegram_user_id}}/commands/prevent"
+  body:
+    type: json
+    data: |-
+      {
+        "enabled": true
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

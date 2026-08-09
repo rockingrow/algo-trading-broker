@@ -116,9 +116,7 @@ class FakeAccountRepo:
     return self.accounts
 
   async def get_link_summaries(self, account_ids, platform=None):
-    return {
-      aid: self.summaries[aid] for aid in account_ids if aid in self.summaries
-    }
+    return {aid: self.summaries[aid] for aid in account_ids if aid in self.summaries}
 
   async def get_by_market(self, market):
     return [a for a in self.accounts if a.market == market]
@@ -486,9 +484,7 @@ def test_set_crypto_allowed_symbol_pushes_per_crypto_account(ctx):
   ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "10"
   # Two crypto accounts (targeted) plus the default forex one (ignored).
   ctx["account_repo"].accounts.append(
-    _make_account(
-      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
-    )
+    _make_account(account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE")
   )
   ctx["account_repo"].accounts.append(
     _make_account(account_id="111", market=MarketTypeEnum.CRYPTO, gateway="BYBIT")
@@ -533,9 +529,7 @@ def test_set_crypto_allowed_symbol_skips_crypto_account_without_gateway(ctx):
 def test_set_crypto_allowed_symbol_skips_push_on_invalid_leverage(ctx):
   ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "not-an-int"
   ctx["account_repo"].accounts.append(
-    _make_account(
-      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
-    )
+    _make_account(account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE")
   )
 
   resp = ctx["client"].post(
@@ -595,9 +589,7 @@ def test_set_crypto_max_leverage(ctx):
 def test_set_crypto_max_leverage_pushes_per_crypto_account(ctx):
   ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] = "BTC,ETH"
   ctx["account_repo"].accounts.append(
-    _make_account(
-      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
-    )
+    _make_account(account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE")
   )
 
   resp = ctx["client"].post(

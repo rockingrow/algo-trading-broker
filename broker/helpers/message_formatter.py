@@ -175,9 +175,7 @@ def format_completed_trade_message(trade, *, timezone_offset: str | None = None)
     pnl = float(trade.account_balance) - float(trade.account_balance_init)
     sign = "+" if pnl >= 0 else ""
     lines.append(f"PnL: <b>{sign}{pnl:.2f}</b>")
-  lines.append(
-    f"Time: {format_notification_time(trade.updatedAt, timezone_offset)}"
-  )
+  lines.append(f"Time: {format_notification_time(trade.updatedAt, timezone_offset)}")
   return "\n".join(lines)
 
 

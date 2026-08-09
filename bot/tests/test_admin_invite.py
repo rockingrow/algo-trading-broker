@@ -82,7 +82,9 @@ async def test_invite_url_rejects_a_non_uuid_code():
 async def test_invite_url_without_an_arg_offers_the_account_picker():
   message = FakeMessage()
   await cmd_invite_url(
-    message, CommandObject(command="admin_invite_url", args=None), FakeAdminBroker([ACCOUNT])
+    message,
+    CommandObject(command="admin_invite_url", args=None),
+    FakeAdminBroker([ACCOUNT]),
   )
   assert "Choose an account" in message.last
   buttons = message.keyboards[-1].inline_keyboard

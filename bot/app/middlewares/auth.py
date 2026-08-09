@@ -16,7 +16,9 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.services.broker_client import BrokerClientUser
 
-_NOT_LINKED = "You haven't linked an account yet. Type /start to link using your UUID code."
+_NOT_LINKED = (
+  "You haven't linked an account yet. Type /start to link using your UUID code."
+)
 
 
 class AuthMiddleware(BaseMiddleware):

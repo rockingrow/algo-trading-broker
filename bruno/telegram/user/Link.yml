@@ -1,0 +1,22 @@
+info:
+  name: Link
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{url}}/v1/telegram/link"
+  body:
+    type: json
+    data: |-
+      {
+        "token": "{{process.env.link_token}}",
+        "telegram_user_id": {{process.env.telegram_user_id}}
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

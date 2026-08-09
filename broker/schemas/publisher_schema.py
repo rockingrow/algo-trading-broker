@@ -155,9 +155,7 @@ class AdminSignal(BaseModel):
   @model_validator(mode="after")
   def _require_market_gateway_with_account_id(self) -> "AdminSignal":
     if self.account_id is not None and (self.market is None or self.gateway is None):
-      raise ValueError(
-        "market and gateway are required when account_id is set"
-      )
+      raise ValueError("market and gateway are required when account_id is set")
     return self
 
 

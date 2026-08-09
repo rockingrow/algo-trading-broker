@@ -305,9 +305,7 @@ class SignalProcessingService:
           attempt_number=attempt_number,
         )
       else:
-        include_raw = (
-          await self._settings.get(NOTIFICATION_INCLUDE_SIGNAL_RAW) == "1"
-        )
+        include_raw = await self._settings.get(NOTIFICATION_INCLUDE_SIGNAL_RAW) == "1"
         timezone_offset = await self._settings.get(NOTIFICATION_TIMEZONE_KEY)
         message = format_signal_message(
           payload,
@@ -430,9 +428,7 @@ class SignalWorker:
       # even recorded), so JetStream can retry the persist itself.
       await self._service.handle_enqueued(payload=payload)
     except Exception as exc:
-      log.exception(
-        "SIGNAL handler failed: %s — leaving for JetStream redelivery", exc
-      )
+      log.exception("SIGNAL handler failed: %s — leaving for JetStream redelivery", exc)
       await self._nak(msg)
       return
 

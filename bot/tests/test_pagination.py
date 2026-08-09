@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from app.constants import ACCOUNTS_PER_PAGE
 from app.keyboards import inline
-from app.utils.pagination import build_pagination_keyboard, build_pagination_row, paginate
+from app.utils.pagination import (
+  build_pagination_keyboard,
+  build_pagination_row,
+  paginate,
+)
 
 
 def _callbacks(markup) -> list[str]:
@@ -44,8 +48,14 @@ def test_paginate_empty_list():
 
 
 def test_no_nav_row_when_one_page_covers_everything():
-  assert build_pagination_row({"total": 3, "limit": 8, "offset": 0}, lambda o: f"x:{o}") == []
-  assert build_pagination_keyboard({"total": 3, "limit": 8, "offset": 0}, lambda o: f"x:{o}") is None
+  assert (
+    build_pagination_row({"total": 3, "limit": 8, "offset": 0}, lambda o: f"x:{o}")
+    == []
+  )
+  assert (
+    build_pagination_keyboard({"total": 3, "limit": 8, "offset": 0}, lambda o: f"x:{o}")
+    is None
+  )
 
 
 def test_first_page_offers_next_only():
@@ -59,7 +69,9 @@ def test_middle_page_offers_both_directions():
 
 
 def test_last_page_offers_prev_only():
-  row = build_pagination_row({"total": 23, "limit": 8, "offset": 16}, lambda o: f"x:{o}")
+  row = build_pagination_row(
+    {"total": 23, "limit": 8, "offset": 16}, lambda o: f"x:{o}"
+  )
   assert [b.callback_data for b in row] == ["x:8"]
 
 
@@ -91,7 +103,11 @@ def test_switch_picker_carries_its_nav_below_the_account_buttons():
 
 
 def test_switch_picker_omits_the_nav_row_on_a_single_page():
-  accounts = [{"id": "uuid-1", "account_id": "acc-1", "market": "FOREX", "gateway": "MT5"}]
-  markup = inline.linked_accounts_picker(accounts, {"total": 1, "limit": 8, "offset": 0})
+  accounts = [
+    {"id": "uuid-1", "account_id": "acc-1", "market": "FOREX", "gateway": "MT5"}
+  ]
+  markup = inline.linked_accounts_picker(
+    accounts, {"total": 1, "limit": 8, "offset": 0}
+  )
   assert len(markup.inline_keyboard) == 1
   assert _callbacks(markup) == ["swacc:uuid-1"]

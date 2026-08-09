@@ -55,9 +55,7 @@ class SignalRetryJob:
       return
     self._stop.clear()
     self._task = asyncio.create_task(self._run(), name="signal-retry-job")
-    log.info(
-      "Signal retry job started (interval=%ds)", self._interval
-    )
+    log.info("Signal retry job started (interval=%ds)", self._interval)
 
   async def stop(self) -> None:
     """Signal the loop to exit and wait for the in-flight tick to finish."""

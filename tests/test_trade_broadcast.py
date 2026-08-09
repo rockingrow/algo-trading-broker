@@ -38,7 +38,9 @@ API_KEY = "test-api-key"
 
 
 class FakeBroadcastRepo:
-  def __init__(self, subscribed: set[int] | None = None, targets: list[str] | None = None):
+  def __init__(
+    self, subscribed: set[int] | None = None, targets: list[str] | None = None
+  ):
     self._subscribed = {str(u) for u in (subscribed or set())}
     self._targets = targets or []
     self.target_calls: list[tuple] = []
@@ -196,7 +198,9 @@ async def test_broadcast_service_skips_non_completion():
 
   # OPENED / TP1 (partial) are not completions.
   await svc.maybe_broadcast(_event("OPENED"), _make_trade(TradeStatusEnum.OPENED))
-  await svc.maybe_broadcast(_event("TP1"), _make_trade(TradeStatusEnum.PARTIALLY_CLOSED))
+  await svc.maybe_broadcast(
+    _event("TP1"), _make_trade(TradeStatusEnum.PARTIALLY_CLOSED)
+  )
 
   assert notifier.sent == []
 

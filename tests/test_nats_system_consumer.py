@@ -743,9 +743,7 @@ async def test_retry_signal_sent_alongside_crypto_leverage_init():
   signals = FakeSignalRepo(envelopes=[_webhook_envelope("wt_cross_v1")])
   consumer, _repo, publisher = _make_consumer(signals=signals)
   await consumer.handle_subject_system(
-    FakeMsg(
-      _worker_connected_payload(strategies=["wt_cross_v1"]), reply="_INBOX.abc"
-    )
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]), reply="_INBOX.abc")
   )
   assert len(publisher.retries) == 1
   assert len(publisher.calls) == 1
