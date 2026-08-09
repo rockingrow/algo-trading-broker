@@ -263,6 +263,8 @@ class BrokerClientAdmin(BrokerClient):
     SETTINGS_TOGGLE = "settings/{slug}"
     NOTIFICATION_TIMEZONE = "settings/notification-timezone"
     STRATEGY_MAGIC_MAP = "settings/strategy-magic-map"
+    CRYPTO_ALLOWED_SYMBOL = "settings/crypto-allowed-symbol"
+    CRYPTO_MAX_LEVERAGE = "settings/crypto-max-leverage"
 
   async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
     """All trading accounts (includes link_token + linked_user_ids)."""
@@ -393,5 +395,42 @@ class BrokerClientAdmin(BrokerClient):
         "POST",
         self._path(self.ENDPOINTS.STRATEGY_MAGIC_MAP),
         json={"magic_map": magic_map},
+      )
+    )
+
+  async def get_crypto_allowed_symbol(self) -> Optional[dict[str, Any]]:
+    """Current ``crypto_allowed_symbol`` value (comma-separated symbol list,
+    empty string when unset)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.CRYPTO_ALLOWED_SYMBOL))
+    )
+
+  async def set_crypto_allowed_symbol(
+    self, symbols: list[str]
+  ) -> Optional[dict[str, Any]]:
+    """Set ``crypto_allowed_symbol``; broker normalises + pushes to workers."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.CRYPTO_ALLOWED_SYMBOL),
+        json={"symbols": symbols},
+      )
+    )
+
+  async def get_crypto_max_leverage(self) -> Optional[dict[str, Any]]:
+    """Current ``crypto_max_leverage`` value (numeric string, empty when unset)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.CRYPTO_MAX_LEVERAGE))
+    )
+
+  async def set_crypto_max_leverage(
+    self, default_leverage: int
+  ) -> Optional[dict[str, Any]]:
+    """Set ``crypto_max_leverage`` (positive integer) and push to workers."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.CRYPTO_MAX_LEVERAGE),
+        json={"default_leverage": default_leverage},
       )
     )

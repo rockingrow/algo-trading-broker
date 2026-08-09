@@ -399,6 +399,83 @@ async def test_set_strategy_magic_map_rejected_returns_none():
   await client.aclose()
 
 
+async def test_get_crypto_allowed_symbol_path():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    return httpx.Response(200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"})
+
+  client = _admin_client(handler)
+  result = await client.get_crypto_allowed_symbol()
+  assert result == {"setting": "crypto_allowed_symbol", "value": "BTC,ETH"}
+  assert captured["path"] == "/admin/settings/crypto-allowed-symbol"
+  assert captured["method"] == "GET"
+  await client.aclose()
+
+
+async def test_set_crypto_allowed_symbol_posts_symbols_list():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    captured["body"] = request.content.decode()
+    return httpx.Response(200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"})
+
+  client = _admin_client(handler)
+  result = await client.set_crypto_allowed_symbol(["btc", "eth"])
+  assert result["value"] == "BTC,ETH"
+  assert captured["path"] == "/admin/settings/crypto-allowed-symbol"
+  assert captured["method"] == "POST"
+  assert '"symbols":["btc","eth"]' in captured["body"].replace(" ", "")
+  await client.aclose()
+
+
+async def test_get_crypto_max_leverage_path():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    return httpx.Response(200, json={"setting": "crypto_max_leverage", "value": "10"})
+
+  client = _admin_client(handler)
+  result = await client.get_crypto_max_leverage()
+  assert result == {"setting": "crypto_max_leverage", "value": "10"}
+  assert captured["path"] == "/admin/settings/crypto-max-leverage"
+  assert captured["method"] == "GET"
+  await client.aclose()
+
+
+async def test_set_crypto_max_leverage_posts_default_leverage():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    captured["body"] = request.content.decode()
+    return httpx.Response(200, json={"setting": "crypto_max_leverage", "value": "20"})
+
+  client = _admin_client(handler)
+  result = await client.set_crypto_max_leverage(20)
+  assert result["value"] == "20"
+  assert captured["path"] == "/admin/settings/crypto-max-leverage"
+  assert captured["method"] == "POST"
+  assert '"default_leverage":20' in captured["body"].replace(" ", "")
+  await client.aclose()
+
+
+async def test_set_crypto_max_leverage_broker_422_returns_none():
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(422, json={"detail": "bad"})
+
+  client = _admin_client(handler)
+  assert await client.set_crypto_max_leverage(-1) is None
+  await client.aclose()
+
+
 async def test_admin_prefix_applied():
   captured = {}
 
