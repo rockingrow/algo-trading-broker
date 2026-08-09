@@ -97,6 +97,22 @@ class CryptoMaxLeverageRequest(BaseModel):
   )
 
 
+class StrategyMagicMapRequest(BaseModel):
+  """Request body for POST /settings/strategy-magic-map.
+
+  The strategy → magic-number map, stored as JSON text and pushed to each
+  worker (filtered to the strategies it announced) on connect. Values must be
+  integers; at least one entry is required so an accidental empty submission
+  can't wipe the configured map.
+  """
+
+  magic_map: dict[str, int] = Field(
+    ...,
+    min_length=1,
+    description="Strategy name → magic number, e.g. {'MT5_GOLD_M5_V1': 20260409}.",
+  )
+
+
 class NotificationTimezoneRequest(BaseModel):
   """Request body for POST /settings/notification-timezone."""
 

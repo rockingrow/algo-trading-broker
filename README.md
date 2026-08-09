@@ -60,7 +60,8 @@ and uv project. It reads the same root `.env`. See
 - **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification). Every alert is persisted (`status=QUEUED`) and pushed onto a **NATS JetStream** stream so the HTTP request returns as soon as the message is durably queued — the fan-out to workers runs in a background consumer, which closes the `Webhook delivery failed — server closed the connection unexpectedly` failure mode from holding the request open across the pipeline.
 - **Persistence**: Logs every signal (with a `QUEUED` → `PUBLISHED` status), trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
-- **Signal replay on reconnect**: On every `WORKER_CONNECTED` handshake, the broker sends a `SYSTEM.RETRY_SIGNALS` back to the worker with every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
+- **Signal replay on reconnect**: Every `WORKER_CONNECTED` handshake is answered with a `retry_signals` list holding every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
+- **Strategy magic map**: The same handshake reply carries a `strategy_magic_map` (both markets) — the strategy → magic-number map from the `strategy_magic_map` setting, filtered to the strategies the worker announced. Editable via `POST /admin/settings/strategy-magic-map` or the Telegram bot's `/admin_magicmap`.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
@@ -158,14 +159,14 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | Publish (broker → workers) | `{strategy}` | Signal routed to subscribers of that strategy (e.g. `wt_cross_v1`) |
 | Publish (broker → workers) | `ADMIN` | Broadcast administrative messages (no `account_id`) — every worker receives and filters for itself |
 | Publish (broker → one worker) | `ADMIN.<market>.<gateway>.<account_id>` | Account-scoped administrative message on a private per-account subject; only that account's worker is subscribed, so no other worker learns the `account_id` |
-| Publish (broker → workers) | `SYSTEM` | System messages such as `CRYPTO_LEVERAGE_INIT` and `RETRY_SIGNALS` sent back after a worker announces itself |
+| Publish (broker → workers) | `SYSTEM` | The `WORKER_CONNECTED_ACK` answering a worker's announcement (magic map, signal replay, crypto leverage), plus the `CRYPTO_LEVERAGE_INIT` pushed to already-connected workers on an admin change |
 | Publish (broker → broker) | `SIGNALS.<strategy>` (JetStream stream `SIGNALS`) | Durable webhook envelope buffer — the webhook endpoint enqueues here, the broker's own `SignalWorker` consumes and fans out to `{strategy}` |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
 | Subscribe (workers → broker) | `SYSTEM` | `WORKER_CONNECTED` announcements published by a worker right after it connects (payload carries `account_id` in `<market>-<gateway>-<account_id>` format, plus `market`, `gateway`, and `strategies`) |
 
 Each signal is published to the subject that matches its `strategy` field. Workers subscribe only to the strategies they handle, eliminating cross-strategy noise.
 
-Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside a `SYSTEM.RETRY_SIGNALS` replay bundle, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
+Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside the handshake's `retry_signals` replay, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
 
 ### `TRADE` events
 
@@ -197,7 +198,7 @@ Enable JetStream on your NATS server (`nats-server -js -sd <path>`) — the bund
 
 ### `SYSTEM` handshake
 
-When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation. `strategies` is optional; when set, it lists the strategy subjects the worker subscribes to and drives the `RETRY_SIGNALS` replay described below.
+When a worker successfully connects to NATS, it announces itself on the `SYSTEM` subject. `account_id`, `market`, and `gateway` are all required — messages missing any of them are rejected by validation. `strategies` is optional; when set, it lists the strategy subjects the worker subscribes to and selects both the magic-map entries and the signal replay it gets back.
 
 ```json
 {
@@ -215,33 +216,40 @@ When a worker successfully connects to NATS, it announces itself on the `SYSTEM`
 Workers should announce themselves with **NATS request/reply** (`nc.request(...)`) rather than a fire-and-forget publish. The broker replies **directly on the request's inbox** with the outcome of the handshake, so:
 
 - the reply reaches only the worker that asked (no fan-out to every `SYSTEM` subscriber), and
-- the worker's `request` **always resolves** — on success, on a no-op, or on an error — instead of hanging.
+- the worker's `request` **always resolves** — on success or on an error — instead of hanging.
 
 Because the reply is worker-driven, a worker that connects while the broker is **down or restarting** simply **times out and retries**; the handshake is idempotent, so retries are safe. This closes the delivery gap of plain fire-and-forget pub/sub, where a `WORKER_CONNECTED` published before the broker's subscription was active would be lost silently.
 
-The broker answers with one of three actions:
+**One handshake, one reply.** A NATS reply inbox accepts a *single* message: `request()` resolves its future (or, in the `old_style` form, auto-unsubscribes at `max_msgs=1`) on the first reply and silently drops everything after it. So the broker answers with exactly one of two actions, and the successful one carries the worker's **whole** initial configuration:
 
 | Situation | Reply action | Payload |
 | --------- | ------------ | ------- |
-| Crypto worker, settings loaded | `CRYPTO_LEVERAGE_INIT` | `symbols`, `default_leverage` |
-| Non-crypto worker | `WORKER_CONNECTED_ACK` | — (nothing to configure) |
+| Settings loaded | `WORKER_CONNECTED_ACK` | `strategy_magic_map`, `retry_signals`, and `crypto_leverage_init` (crypto only) |
 | Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
-
-In addition, every valid `WORKER_CONNECTED` also gets a `RETRY_SIGNALS` (see [Signal replay on reconnect](#signal-replay-on-reconnect) below) so a worker that just reconnected can catch up on broadcasts it missed while offline.
-
-For a crypto worker, the broker loads the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows and replies with `CRYPTO_LEVERAGE_INIT`:
 
 ```json
 {
-  "action": "CRYPTO_LEVERAGE_INIT",
+  "action": "WORKER_CONNECTED_ACK",
   "account_id": "CRYPTO-BINANCE-7654321",
   "timestamp": "2026-06-30T00:00:00+00:00",
-  "symbols": ["BTC", "ETH"],
-  "default_leverage": 10
+  "strategy_magic_map": { "wt_cross_v1": 20260617 },
+  "retry_signals": [],
+  "crypto_leverage_init": {
+    "symbols": ["BTC", "ETH"],
+    "default_leverage": 10
+  }
 }
 ```
 
-If the crypto settings are missing or invalid, the worker gets an explicit error it can log or retry on, instead of silently receiving nothing:
+The three blocks are always present, so a worker can parse them unconditionally:
+
+- **`strategy_magic_map`** — the strategy → magic-number map, see [Strategy magic map](#strategy-magic-map) below. `{}` when nothing matched.
+- **`retry_signals`** — the catch-up replay, see [Signal replay on reconnect](#signal-replay-on-reconnect) below. `[]` when there is nothing to replay.
+- **`crypto_leverage_init`** — `symbols` + `default_leverage` from the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows, for a crypto worker. `null` for every other market.
+
+Examples: `examples/nats/system.worker_connected_ack.json` (forex) and `examples/nats/system.worker_connected_ack.crypto.json`.
+
+If a crypto worker's settings are missing or invalid, it gets an explicit error it can log or retry on — **instead of** the ACK, never after it — rather than being told it is configured when it is not:
 
 ```json
 {
@@ -252,24 +260,36 @@ If the crypto settings are missing or invalid, the worker gets an explicit error
 }
 ```
 
+#### Strategy magic map
+
+The `strategy_magic_map` block of the ACK carries the strategy → magic-number map the worker needs, for **both** markets. It is sourced from the `strategy_magic_map` `BrokerSetting` (stored as JSON text) and filtered down to just the strategies the worker announced in `strategies`, so each worker only receives its own entries. Because it is filtered per worker, it rides on the request's reply inbox (or, for a fire-and-forget `publish`, on the shared `SYSTEM` subject with the `account_id` for the worker to filter). It is mandatory — present even when the resulting map is empty (the worker announced no mapped strategy, or the setting is unset).
+
+```json
+{
+  "strategy_magic_map": {
+    "MT5_GOLD_M5_V1": 20260409,
+    "MT5_MULTI_M5_V1": 20260708
+  }
+}
+```
+
+Edit the map with `POST /admin/settings/strategy-magic-map` (or the Telegram bot's `/admin_magicmap`); workers pick up the new map on their next connect (within the ~30s settings cache).
+
 #### Fire-and-forget (backward compatible)
 
-A worker may still `publish` `WORKER_CONNECTED` without a reply inbox. In that case the broker broadcasts `CRYPTO_LEVERAGE_INIT` on the shared `SYSTEM` subject for crypto workers (workers filter by `account_id`); non-crypto and error outcomes can only be logged, not signalled back. Request/reply is preferred precisely because it removes those blind spots.
+A worker may still `publish` `WORKER_CONNECTED` without a reply inbox. In that case the broker broadcasts the same `WORKER_CONNECTED_ACK` on the shared `SYSTEM` subject and every worker filters by `account_id`; error outcomes can only be logged, not signalled back. Request/reply is preferred precisely because it removes that blind spot and keeps one worker's configuration out of every other worker's inbox.
 
 The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `WORKER_CONNECTED_ACK`, `WORKER_CONNECTED_ERROR`) by `action`, so it never reacts to its own messages.
 
 #### Signal replay on reconnect
 
-Every valid `WORKER_CONNECTED` triggers a `RETRY_SIGNALS` reply carrying every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list. The payload is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler.
+The `retry_signals` block of the ACK carries every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list. It is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler and de-duplicate against live signals by `signal_id`.
 
-Sent on the request's reply inbox when the worker used NATS request/reply, otherwise broadcast on the shared `SYSTEM` subject. Nothing is sent when the worker did not announce any strategies. Example: `examples/nats/system.retry_signals.json`.
+Empty when the worker announced no strategies, or when there is nothing recent to replay.
 
 ```json
 {
-  "action": "RETRY_SIGNALS",
-  "account_id": "CRYPTO-BINANCE-7654321",
-  "timestamp": "2026-07-16T00:00:00+00:00",
-  "signals": [
+  "retry_signals": [
     {
       "signal_id": "sig_123456789_long",
       "timestamp": "2026-07-15T23:59:30+00:00",
@@ -498,6 +518,8 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /admin/settings/include-signal-raw` | `X-API-KEY` |
 | `POST /admin/settings/crypto-allowed-symbol` | `X-API-KEY` |
 | `POST /admin/settings/crypto-max-leverage` | `X-API-KEY` |
+| `GET /admin/settings/strategy-magic-map` | `X-API-KEY` |
+| `POST /admin/settings/strategy-magic-map` | `X-API-KEY` |
 | `POST /admin/settings/notification-timezone` | `X-API-KEY` |
 | `GET /admin/settings/notification-timezone` | `X-API-KEY` |
 | `GET /admin/settings` | `X-API-KEY` |
@@ -749,6 +771,40 @@ Sets the `crypto_max_leverage` broker setting pushed to crypto workers via `SYST
 `default_leverage` must be a positive integer (`422` otherwise).
 
 On success the broker also **pushes** a targeted `SYSTEM.CRYPTO_LEVERAGE_INIT` to each crypto account by its `<market>-<gateway>-<account_id>` worker id (see [Live config push on admin update](#live-config-push-on-admin-update)), so already-running workers apply the new leverage immediately. That message also carries `crypto_allowed_symbol` read from the DB, so it is skipped (and logged) until that setting is configured. A worker that *connects* right after this call is still subject to the same up-to-30s cache as `crypto-allowed-symbol`.
+
+---
+
+### GET `/admin/settings/strategy-magic-map`
+
+Returns the current `strategy_magic_map` broker setting as JSON text (`{}` when unset). Requires the `X-API-KEY` header.
+
+**Response Body:**
+
+```json
+{
+  "setting": "strategy_magic_map",
+  "value": "{\"MT5_GOLD_M5_V1\": 20260409, \"SIDEWAY_M15_V1\": 20260617}"
+}
+```
+
+---
+
+### POST `/admin/settings/strategy-magic-map`
+
+Sets the `strategy_magic_map` broker setting: the strategy → magic-number map sent to every worker in its `WORKER_CONNECTED_ACK` on connect (filtered to the strategies each worker announces). Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "magic_map": {
+    "MT5_GOLD_M5_V1": 20260409,
+    "SIDEWAY_M15_V1": 20260617
+  }
+}
+```
+
+Values must be integers and at least one entry is required (`422` otherwise), so an accidental empty submission can't wipe the map. The map is stored as canonical JSON text. Unlike the crypto settings, there is **no live push** — the broker does not persist which strategies each connected worker holds, so workers pick up the new map on their next `WORKER_CONNECTED` (within the up-to-30s settings cache). The Telegram bot's `/admin_magicmap` command wraps this endpoint.
 
 ---
 
@@ -1082,8 +1138,9 @@ open price rather than persisting — and DM-ing — a bogus `0`.
 | `notification_include_signal_raw` | `"0"` | `POST /admin/settings/include-signal-raw` | Append indicators/inputs to notifications |
 | `crypto_allowed_symbol` | `"BTC,ETH"` | `POST /admin/settings/crypto-allowed-symbol` | Comma-separated list of crypto symbols pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
+| `strategy_magic_map` | `'{"MT5_GOLD_M5_V1": 20260409, …}'` | `POST` / `GET /admin/settings/strategy-magic-map` | JSON-text strategy → magic-number map sent to every worker in its `WORKER_CONNECTED_ACK` on connect, filtered to the strategies it announces |
 | `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
-| `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `SYSTEM.RETRY_SIGNALS` replay sent to a freshly-connected worker |
+| `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
 
 ---
 

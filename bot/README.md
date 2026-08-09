@@ -68,6 +68,7 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_linkaccount` | Bind a Telegram user to an account directly (pick account → type user id) | `POST /admin/accounts/{uuid}/link-telegram` |
 | `/admin_invite_url [code]` | One-tap invite link for an account (picker if no arg) | `GET /v1/accounts` (picker only) |
 | `/admin_settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
+| `/admin_magicmap [json]` | View + replace the strategy → magic-number map (paste JSON, or pass it inline) | `GET` + `POST /admin/settings/strategy-magic-map` |
 
 ### Link-token semantics
 
