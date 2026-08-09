@@ -639,6 +639,43 @@ def test_set_crypto_max_leverage_persist_failure_returns_500(ctx):
   assert resp.status_code == 500
 
 
+def test_get_crypto_allowed_symbol_defaults_empty(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/crypto-allowed-symbol", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == CRYPTO_ALLOWED_SYMBOL_KEY
+  assert body["value"] == ""
+
+
+def test_get_crypto_allowed_symbol_reflects_stored_value(ctx):
+  ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] = "BTC,ETH"
+  resp = ctx["client"].get(
+    "/admin/settings/crypto-allowed-symbol", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "BTC,ETH"
+
+
+def test_get_crypto_max_leverage_defaults_empty(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/crypto-max-leverage", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == CRYPTO_MAX_LEVERAGE_KEY
+  assert body["value"] == ""
+
+
+def test_get_crypto_max_leverage_reflects_stored_value(ctx):
+  ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "20"
+  resp = ctx["client"].get(
+    "/admin/settings/crypto-max-leverage", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "20"
+
 # ── Admin settings — strategy magic map ─────────────────────────────
 
 

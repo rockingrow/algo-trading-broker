@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.2] - 2026-08-10
 
 ### Added
 
@@ -40,6 +40,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workers — they pick up the new map on their next `WORKER_CONNECTED` (within
   the settings cache), because the broker doesn't persist which strategies each
   connected worker holds.
+
+### Added
+
+- **Bot: admin can edit `crypto_allowed_symbol` and `crypto_max_leverage` from
+  Telegram** — New admin commands `/admin_crypto_symbols` and
+  `/admin_crypto_leverage` read the current setting, then prompt the admin for
+  a new value (comma-separated symbol list for the first, a positive integer
+  for the second) via a small FSM flow. Submitting POSTs the existing
+  `/admin/settings/crypto-allowed-symbol` / `/admin/settings/crypto-max-leverage`
+  endpoints, so the broker still normalises the input and pushes
+  `SYSTEM.CRYPTO_LEVERAGE_INIT` to each crypto worker right away. To let the
+  bot show the current value before editing, matching `GET` endpoints were
+  added to the broker's admin router.
 
 ### Fixed
 
@@ -737,6 +750,8 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
+[1.1.2]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.1...v1.1.2
+[1.1.1]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.7...v1.1.0
 [1.0.7]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.5...v1.0.6
