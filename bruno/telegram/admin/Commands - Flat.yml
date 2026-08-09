@@ -1,0 +1,22 @@
+info:
+  name: Commands - Flat
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{url}}/v1/telegram/{{process.env.telegram_user_id}}/commands/flat"
+  body:
+    type: json
+    data: |-
+      {
+        "strategy": "{{process.env.strategy}}",
+        "symbol": "{{process.env.symbol}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

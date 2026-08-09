@@ -60,6 +60,10 @@ def format_local_time(
       # Unparseable: show what the broker sent rather than dropping the value.
       return f"{value}{suffix}"
 
-  dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+  dt = (
+    dt.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None
+    else dt.astimezone(timezone.utc)
+  )
   local = dt.astimezone(timezone(timedelta(hours=offset_hours)))
   return f"{local.strftime(fmt)}{suffix}"

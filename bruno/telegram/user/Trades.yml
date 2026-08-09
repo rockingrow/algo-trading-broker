@@ -1,0 +1,23 @@
+info:
+  name: Trades
+  type: http
+  seq: 6
+
+http:
+  method: GET
+  url: "{{url}}/v1/telegram/{{process.env.telegram_user_id}}/trades?offset=0"
+  params:
+    - name: limit
+      value: "20"
+      type: query
+      disabled: true
+    - name: offset
+      value: "0"
+      type: query
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

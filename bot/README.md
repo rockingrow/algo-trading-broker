@@ -44,7 +44,7 @@ admin `/admin_flat`, since the position is over either way and you did not close
 it yourself. Each DM carries the account, gateway, symbol, action, status, close
 price, quantity, balance and PnL.
 
-> ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_ENTRIES`/`ALLOW_ENTRIES` admin command
+> ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_SIGNAL`/`ALLOW_SIGNAL` admin command
 > over NATS (via the broker). The **worker** must be updated to honor it —
 > worker code lives outside this repo.
 
@@ -68,6 +68,7 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_linkaccount` | Bind a Telegram user to an account directly (pick account → type user id) | `POST /admin/accounts/{uuid}/link-telegram` |
 | `/admin_invite_url [code]` | One-tap invite link for an account (picker if no arg) | `GET /v1/accounts` (picker only) |
 | `/admin_settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
+| `/admin_magicmap [json]` | View + replace the strategy → magic-number map (paste JSON, or pass it inline) | `GET` + `POST /admin/settings/strategy-magic-map` |
 
 ### Link-token semantics
 

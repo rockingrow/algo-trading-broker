@@ -172,7 +172,7 @@ async def test_log_signal_seeds_status_queued_and_max_attempts(monkeypatch):
   await SqlAlchemySignalRepository().log_signal(_payload())
   row = session.added[0]
   assert row.status == SignalStatusEnum.QUEUED
-  assert row.attempts == settings.SIGNAL_MAX_ATTEMPTS
+  assert row.attempts == settings.signal.MAX_ATTEMPTS
   assert row.last_attempt is None
 
 
@@ -228,9 +228,7 @@ async def test_record_attempt_failure_missing_row_returns_none(monkeypatch):
 
 
 async def test_record_attempt_failure_rejects_bad_id():
-  assert (
-    await SqlAlchemySignalRepository().record_attempt_failure("not-a-uuid") is None
-  )
+  assert await SqlAlchemySignalRepository().record_attempt_failure("not-a-uuid") is None
 
 
 async def test_list_retryable_returns_rows(monkeypatch):
@@ -242,6 +240,36 @@ async def test_list_retryable_returns_rows(monkeypatch):
 
   rows = await SqlAlchemySignalRepository().list_retryable(15)
   assert rows == [row]
+
+
+async def test_list_retryable_excludes_never_attempted_rows(monkeypatch):
+  """Regression: a QUEUED row whose first fan-out is still in flight has
+  ``last_attempt IS NULL``. It must NOT be selected for retry — otherwise the
+  retry job races the in-flight first attempt and re-sends the signal's
+  Telegram notification (one TradingView alert, two Telegram messages).
+
+  The FakeSession ignores the WHERE clause, so we assert on the compiled SQL:
+  eligibility must key off a recorded ``last_attempt`` (``IS NOT NULL`` and a
+  freshness comparison), never treat NULL as retryable.
+  """
+  captured: dict = {}
+
+  class CapturingSession(FakeSession):
+    async def execute(self, _stmt):
+      captured["stmt"] = _stmt
+      return await super().execute(_stmt)
+
+  session = CapturingSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemySignalRepository().list_retryable(15)
+
+  sql = str(captured["stmt"]).lower()
+  # NULL rows are excluded (the bug was a `last_attempt IS NULL` disjunction
+  # that made in-flight first attempts immediately retryable)...
+  assert "is not null" in sql
+  # ...and eligibility is gated on the last recorded attempt being old enough.
+  assert "last_attempt <" in sql
 
 
 async def test_list_retryable_swallows_db_error(monkeypatch):
@@ -385,6 +413,26 @@ async def test_upsert_inserts_rejected_trade_with_reason(monkeypatch):
   assert result.reject_reason == "MAX ORDER limit reached"
 
 
+async def test_upsert_inserts_rejected_trade_for_open_position(monkeypatch):
+  # When the broker fires a SIGNAL but the worker already holds an open
+  # position, the worker rejects it and fires a TRADE with status REJECTED.
+  # The broker records it as a terminal, non-running trade carrying the reason.
+  session = FakeSession(results=[[], []])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyTradeRepository().upsert_by_position_event(
+    _event(
+      status="REJECTED",
+      reject_reason="Open position already exists for XAUUSD",
+    )
+  )
+
+  assert isinstance(result, Trade)
+  assert result.status == TradeStatusEnum.REJECTED
+  assert result.is_running is False
+  assert result.reject_reason == "Open position already exists for XAUUSD"
+
+
 async def test_upsert_updates_existing_trade(monkeypatch):
   existing_account = Account(account_id="acc-1", market=MarketTypeEnum.FOREX)
   existing_trade = Trade(
@@ -504,9 +552,7 @@ async def test_get_many_returns_empty_dict_on_error(monkeypatch):
 async def test_upsert_gateway_backfills_existing_account(monkeypatch):
   # The row predates the gateway column (or has only ever seen gateway-less
   # TRADE events), so the handshake is what fills it in.
-  existing = Account(
-    account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway=None
-  )
+  existing = Account(account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway=None)
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
 
@@ -974,7 +1020,9 @@ async def test_admin_link_telegram_creates_link_and_session(monkeypatch):
 async def test_admin_link_telegram_unknown_account(monkeypatch):
   session = FakeSession(results=[[]])
   _patch_session(monkeypatch, session)
-  assert await SqlAlchemyAccountRepository().admin_link_telegram(uuid.uuid4(), 42) is None
+  assert (
+    await SqlAlchemyAccountRepository().admin_link_telegram(uuid.uuid4(), 42) is None
+  )
 
 
 async def test_admin_link_telegram_idempotent(monkeypatch):
@@ -1016,9 +1064,7 @@ async def test_broadcast_subscribe_idempotent(monkeypatch):
   session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
   assert await SqlAlchemyTradeBroadcastRepository().subscribe(42) is True
-  assert not any(
-    isinstance(o, TradeBroadcastSubscription) for o in session.added
-  )
+  assert not any(isinstance(o, TradeBroadcastSubscription) for o in session.added)
 
 
 async def test_broadcast_is_subscribed(monkeypatch):

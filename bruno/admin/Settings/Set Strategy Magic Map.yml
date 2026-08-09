@@ -1,0 +1,28 @@
+info:
+  name: Set Strategy Magic Map
+  type: http
+  seq: 10
+
+http:
+  method: POST
+  url: "{{url}}/admin/settings/strategy-magic-map"
+  body:
+    type: json
+    data: |-
+      {
+        "magic_map": {
+          "MT5_GOLD_M5_V1": 20260409,
+          "SIDEWAY_M15_V1": 20260617,
+          "MT5_MULTI_M5_V1": 20260708,
+          "MT5_MULTI_M15_V1": 20260709,
+          "MT5_MULTI_M30_V1": 20260710,
+          "MT5_MULTI_H1_V1": 20260711
+        }
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

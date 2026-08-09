@@ -68,8 +68,8 @@ AUTH_RESPONSES: Dict[int, Dict[str, Any]] = {
 def _servers() -> List[Dict[str, str]]:
   """Advertise the reachable base URLs so 'Try it out' targets the right host."""
   servers: List[Dict[str, str]] = []
-  if settings.BROKER_PUBLIC_URL.startswith(("http://", "https://")):
-    servers.append({"url": settings.BROKER_PUBLIC_URL, "description": "Public"})
+  if settings.broker_api.PUBLIC_URL.startswith(("http://", "https://")):
+    servers.append({"url": settings.broker_api.PUBLIC_URL, "description": "Public"})
   servers.append({"url": "/", "description": "This host"})
   return servers
 
@@ -94,7 +94,7 @@ def fastapi_kwargs() -> Dict[str, Any]:
     "servers": _servers(),
   }
 
-  if not settings.DOCS_ENABLED:
+  if not settings.docs.ENABLED:
     kwargs.update(docs_url=None, redoc_url=None, openapi_url=None)
 
   return kwargs

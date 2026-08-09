@@ -20,6 +20,7 @@ from broker.constants import (
   CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_TIMEZONE_KEY,
   SIGNAL_BLOCKED,
+  STRATEGY_MAGIC_MAP_KEY,
 )
 from broker.db.models import Account, Trade
 from broker.providers import (
@@ -116,9 +117,7 @@ class FakeAccountRepo:
     return self.accounts
 
   async def get_link_summaries(self, account_ids, platform=None):
-    return {
-      aid: self.summaries[aid] for aid in account_ids if aid in self.summaries
-    }
+    return {aid: self.summaries[aid] for aid in account_ids if aid in self.summaries}
 
   async def get_by_market(self, market):
     return [a for a in self.accounts if a.market == market]
@@ -486,9 +485,7 @@ def test_set_crypto_allowed_symbol_pushes_per_crypto_account(ctx):
   ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "10"
   # Two crypto accounts (targeted) plus the default forex one (ignored).
   ctx["account_repo"].accounts.append(
-    _make_account(
-      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
-    )
+    _make_account(account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE")
   )
   ctx["account_repo"].accounts.append(
     _make_account(account_id="111", market=MarketTypeEnum.CRYPTO, gateway="BYBIT")
@@ -533,9 +530,7 @@ def test_set_crypto_allowed_symbol_skips_crypto_account_without_gateway(ctx):
 def test_set_crypto_allowed_symbol_skips_push_on_invalid_leverage(ctx):
   ctx["setting_repo"].values[CRYPTO_MAX_LEVERAGE_KEY] = "not-an-int"
   ctx["account_repo"].accounts.append(
-    _make_account(
-      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
-    )
+    _make_account(account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE")
   )
 
   resp = ctx["client"].post(
@@ -595,9 +590,7 @@ def test_set_crypto_max_leverage(ctx):
 def test_set_crypto_max_leverage_pushes_per_crypto_account(ctx):
   ctx["setting_repo"].values[CRYPTO_ALLOWED_SYMBOL_KEY] = "BTC,ETH"
   ctx["account_repo"].accounts.append(
-    _make_account(
-      account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE"
-    )
+    _make_account(account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE")
   )
 
   resp = ctx["client"].post(
@@ -641,6 +634,80 @@ def test_set_crypto_max_leverage_persist_failure_returns_500(ctx):
   resp = ctx["client"].post(
     "/admin/settings/crypto-max-leverage",
     json={"default_leverage": 10},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 500
+
+
+# ── Admin settings — strategy magic map ─────────────────────────────
+
+
+def test_get_strategy_magic_map_defaults_to_empty_object(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/strategy-magic-map", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == STRATEGY_MAGIC_MAP_KEY
+  assert body["value"] == "{}"
+
+
+def test_get_strategy_magic_map_returns_stored_value(ctx):
+  ctx["setting_repo"].values[STRATEGY_MAGIC_MAP_KEY] = '{"MT5_GOLD_M5_V1": 20260409}'
+  resp = ctx["client"].get(
+    "/admin/settings/strategy-magic-map", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == '{"MT5_GOLD_M5_V1": 20260409}'
+
+
+def test_set_strategy_magic_map(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {"MT5_GOLD_M5_V1": 20260409, "SIDEWAY_M15_V1": 20260617}},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["setting"] == STRATEGY_MAGIC_MAP_KEY
+  # Stored as canonical JSON text.
+  import json
+
+  assert json.loads(body["value"]) == {
+    "MT5_GOLD_M5_V1": 20260409,
+    "SIDEWAY_M15_V1": 20260617,
+  }
+  assert json.loads(ctx["setting_repo"].values[STRATEGY_MAGIC_MAP_KEY]) == {
+    "MT5_GOLD_M5_V1": 20260409,
+    "SIDEWAY_M15_V1": 20260617,
+  }
+  # The admin channel is notified.
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_strategy_magic_map_rejects_empty(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {}},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_strategy_magic_map_rejects_non_integer_value(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {"MT5_GOLD_M5_V1": "not-an-int"}},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_strategy_magic_map_persist_failure_returns_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/strategy-magic-map",
+    json={"magic_map": {"MT5_GOLD_M5_V1": 20260409}},
     headers={"X-API-KEY": API_KEY},
   )
   assert resp.status_code == 500
@@ -803,7 +870,7 @@ def test_flat_rejects_account_id_with_only_gateway(ctx):
 
 @pytest.fixture
 def auth_client():
-  """App where ensure_api_key is enforced (settings.BROKER_API_KEY is
+  """App where ensure_api_key is enforced (settings.broker_api.API_KEY is
   'test-api-key' from conftest)."""
   app = FastAPI()
   app.include_router(get_core_router())

@@ -48,7 +48,9 @@ class AdminLinkTelegramRequest(BaseModel):
   """Request body for POST /admin/accounts/{account_uuid}/link-telegram —
   admin-bind a Telegram user to an account directly, skipping the token flow."""
 
-  telegram_user_id: int = Field(..., description="Telegram user id to bind to the account.")
+  telegram_user_id: int = Field(
+    ..., description="Telegram user id to bind to the account."
+  )
 
 
 class FlatRequest(BaseModel):
@@ -92,6 +94,22 @@ class CryptoMaxLeverageRequest(BaseModel):
 
   default_leverage: int = Field(
     ..., gt=0, description="Default leverage pushed to crypto workers on connect."
+  )
+
+
+class StrategyMagicMapRequest(BaseModel):
+  """Request body for POST /settings/strategy-magic-map.
+
+  The strategy → magic-number map, stored as JSON text and pushed to each
+  worker (filtered to the strategies it announced) on connect. Values must be
+  integers; at least one entry is required so an accidental empty submission
+  can't wipe the configured map.
+  """
+
+  magic_map: dict[str, int] = Field(
+    ...,
+    min_length=1,
+    description="Strategy name → magic number, e.g. {'MT5_GOLD_M5_V1': 20260409}.",
   )
 
 

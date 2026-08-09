@@ -12,7 +12,9 @@ from app.utils.timezone import (
 
 
 def test_offset_hours_from_payload_reads_value():
-  assert offset_hours_from_payload({"setting": "notification_timezone", "value": "9"}) == 9.0
+  assert (
+    offset_hours_from_payload({"setting": "notification_timezone", "value": "9"}) == 9.0
+  )
 
 
 def test_offset_hours_from_payload_falls_back_when_none():
@@ -50,7 +52,9 @@ def test_format_local_time_without_label_omits_the_zone_suffix():
 
 
 def test_format_local_time_short_format_for_table_rows():
-  out = format_local_time("2026-01-01T00:00:00Z", 7.0, fmt=SHORT_TIME_FMT, with_label=False)
+  out = format_local_time(
+    "2026-01-01T00:00:00Z", 7.0, fmt=SHORT_TIME_FMT, with_label=False
+  )
   assert out == "01-01 07:00"
 
 

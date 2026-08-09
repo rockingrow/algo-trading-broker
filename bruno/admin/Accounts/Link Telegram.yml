@@ -1,0 +1,21 @@
+info:
+  name: Link Telegram
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{url}}/admin/accounts/{{process.env.account_uuid}}/link-telegram"
+  body:
+    type: json
+    data: |-
+      {
+        "telegram_user_id": {{process.env.telegram_user_id}}
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

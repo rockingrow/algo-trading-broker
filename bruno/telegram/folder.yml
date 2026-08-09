@@ -1,0 +1,11 @@
+info:
+  name: telegram
+  type: folder
+  seq: 2
+
+request:
+  auth:
+    type: apikey
+    key: X-API-KEY
+    value: "{{api_key}}"
+    placement: header

@@ -1,0 +1,21 @@
+info:
+  name: Set Active Account
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{url}}/v1/telegram/{{process.env.telegram_user_id}}/active-account"
+  body:
+    type: json
+    data: |-
+      {
+        "account_id": "{{process.env.account_uuid}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

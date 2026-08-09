@@ -44,9 +44,7 @@ log = get_logger(__name__)
 
 def _new_link_token(account_id: uuid.UUID) -> AccountLinkToken:
   """A fresh, never-expiring, unrevoked link token for *account_id*."""
-  return AccountLinkToken(
-    id=uuid.uuid4(), account_id=account_id, token=uuid.uuid4()
-  )
+  return AccountLinkToken(id=uuid.uuid4(), account_id=account_id, token=uuid.uuid4())
 
 
 class SqlAlchemyAccountRepository:
@@ -211,9 +209,9 @@ class SqlAlchemyAccountRepository:
         )
         for row in result.scalars().all():
           # asc order + overwrite => the newest token wins.
-          summaries.setdefault(row.account_id, AccountLinkSummary()).link_token = (
-            row.token
-          )
+          summaries.setdefault(
+            row.account_id, AccountLinkSummary()
+          ).link_token = row.token
 
         result = await session.execute(
           select(AccountBotLink)
@@ -988,7 +986,7 @@ class SqlAlchemySignalRepository:
       is_scale_position=bool(pos.is_scale_position),
       scale_strategy=pos.scale_strategy,
       status=SignalStatusEnum.QUEUED,
-      attempts=settings.SIGNAL_MAX_ATTEMPTS,
+      attempts=settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       indicators=json.loads(payload.indicators.model_dump_json())
       if payload.indicators is not None
@@ -1092,30 +1090,41 @@ class SqlAlchemySignalRepository:
       )
       return row
     except Exception as exc:
-      log.exception(
-        "Failed to record attempt failure id=%s: %s", signal_id, exc
-      )
+      log.exception("Failed to record attempt failure id=%s: %s", signal_id, exc)
       return None
 
   async def list_retryable(self, retry_interval_seconds: int) -> list[Signal]:
     """Return ``QUEUED`` signals eligible for another attempt, oldest first.
 
     A row is eligible when it is still ``QUEUED``, has attempts remaining, and
-    either has never been attempted (``last_attempt IS NULL``) or its last
-    attempt is older than ``retry_interval_seconds`` — the same interval the
-    retry job polls at, so a row that just failed is not re-picked before the
-    next tick.
+    recorded a failed attempt (``last_attempt``) older than
+    ``retry_interval_seconds`` — the same interval the retry job polls at, so a
+    row that just failed is not re-picked before the next tick.
+
+    Rows with ``last_attempt IS NULL`` are deliberately *excluded*. A NULL
+    ``last_attempt`` never means "ready to retry": it is a signal whose *first*
+    fan-out is still in flight (or was interrupted). Only ``record_attempt_failure``
+    ever stamps ``last_attempt``; the happy path flips the row straight to
+    ``PUBLISHED``. Selecting NULL rows let this job race the in-flight first
+    attempt and fan the signal out a second time — re-sending the Telegram
+    notification, which is the "one TradingView alert, two Telegram messages"
+    duplicate. A first attempt that genuinely crashed before recording anything
+    is replayed by JetStream redelivery (the envelope was never acked), not by
+    this job, so nothing is dropped by excluding NULL here.
+
+    ``is_not(None)`` is redundant with the ``< threshold`` comparison (SQL
+    ``NULL < ts`` is already false) but kept explicit so the intent survives
+    future edits.
     """
-    threshold = datetime.now(timezone.utc) - timedelta(
-      seconds=retry_interval_seconds
-    )
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=retry_interval_seconds)
     try:
       async with get_session() as session:
         result = await session.execute(
           select(Signal)
           .where(Signal.status == SignalStatusEnum.QUEUED)
           .where(Signal.attempts > 0)
-          .where((Signal.last_attempt.is_(None)) | (Signal.last_attempt < threshold))
+          .where(Signal.last_attempt.is_not(None))
+          .where(Signal.last_attempt < threshold)
           .order_by(Signal.createdAt.asc())
         )
         return list(result.scalars().all())
@@ -1128,7 +1137,7 @@ class SqlAlchemySignalRepository:
   ) -> list[dict]:
     """Return raw webhook payloads for recent signals matching *strategies*.
 
-    Backs the SYSTEM ``RETRY_SIGNALS`` replay a worker gets on connect: rows
+    Backs the ``retry_signals`` replay a worker gets on connect: rows
     whose ``strategy`` is in *strategies* and whose ``createdAt`` is within the
     last *since_seconds*, newest first. Only the persisted ``raw`` JSON is
     returned so callers can feed it straight through ``parse_signal`` — the

@@ -1,0 +1,24 @@
+info:
+  name: Create Account
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{url}}/admin/accounts"
+  body:
+    type: json
+    data: |-
+      {
+        "market": "CRYPTO",
+        "gateway": "BINANCE",
+        "account_id": "{{process.env.account_id}}",
+        "account_name": "Demo Account"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

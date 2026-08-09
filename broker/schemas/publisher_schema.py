@@ -17,30 +17,43 @@ class PublishTopicEnum(str, Enum):
   SYSTEM = "SYSTEM"
 
 
+def compose_admin_subject(market, gateway: str, account_id: str) -> str:
+  """Build the per-account private ADMIN subject
+  ``ADMIN.<market>.<gateway>.<account_id>`` (e.g. ``ADMIN.FOREX.MT5.12345678``).
+
+  Account-scoped admin actions are published here instead of on the shared
+  ``ADMIN`` subject so that only the one worker subscribed to this exact
+  subject receives them. No other worker sees the ``account_id``, keeping each
+  worker isolated to its own account.
+
+  ``market`` may be a :class:`MarketTypeEnum` (or any enum with a string
+  ``value``) or its bare string value; both render to the bare market name.
+  """
+  market = market.value if isinstance(market, Enum) else str(market)
+  return f"{PublishTopicEnum.ADMIN.value}.{market}.{gateway}.{account_id}"
+
+
 class AdminActionEnum(str, Enum):
   """Admin actions that can be published to the ADMIN topic."""
 
   FLAT = "FLAT"
-  # Block / allow new entries for a scope (strategy/symbol/account). Workers
+  # Block / allow new signals for a scope (strategy/symbol/account). Workers
   # must honor these to take effect — enforcement lives in the worker code.
-  BLOCK_ENTRIES = "BLOCK_ENTRIES"
-  ALLOW_ENTRIES = "ALLOW_ENTRIES"
+  BLOCK_SIGNAL = "BLOCK_SIGNAL"
+  ALLOW_SIGNAL = "ALLOW_SIGNAL"
 
 
 class SystemActionEnum(str, Enum):
   """System actions exchanged on the SYSTEM topic between broker and workers."""
 
-  # Outgoing (broker → worker)
+  # Outgoing (broker → worker): pushed on its own only when an admin edits the
+  # crypto settings of an already-connected worker. The connect-time copy rides
+  # inside WORKER_CONNECTED_ACK instead.
   CRYPTO_LEVERAGE_INIT = "CRYPTO_LEVERAGE_INIT"
 
-  # Outgoing (broker → worker): replay of every SIGNAL persisted in the last
-  # ``max_retry_timeout`` seconds for the strategies this worker announced.
-  # Delivered as part of the WORKER_CONNECTED handshake so a worker that just
-  # (re)connected can catch up on signals emitted while it was offline.
-  RETRY_SIGNALS = "RETRY_SIGNALS"
-
-  # Outgoing reply (broker → worker): acknowledges a WORKER_CONNECTED handshake
-  # that needs no further configuration (e.g. a non-crypto worker).
+  # Outgoing reply (broker → worker): the one and only answer to a
+  # WORKER_CONNECTED handshake, carrying the worker's entire initial
+  # configuration (see :class:`SystemWorkerConnectedAck`).
   WORKER_CONNECTED_ACK = "WORKER_CONNECTED_ACK"
 
   # Outgoing reply (broker → worker): the handshake was received but the broker
@@ -94,17 +107,22 @@ class TradingSignal(BaseModel):
 
 
 class AdminSignal(BaseModel):
-  """Admin signal broadcast on the shared ADMIN topic — every connected
-  worker receives it and is expected to filter for itself.
+  """Admin signal published to workers.
 
-  ``account_id`` alone no longer identifies a single account (the same bare
-  id can exist under different market/gateway pairs, see
-  ``uq_accounts_market_gateway_account_id`` on the ``accounts`` table), so
-  ``market``/``gateway`` are REQUIRED whenever ``account_id`` is set —
-  every account-scoped signal is fully disambiguated on the wire. Workers
-  MUST match all three (``account_id`` + ``market`` + ``gateway``)
-  against themselves before acting, not ``account_id`` alone, or they can
-  act on a signal meant for a different account that shares its bare id.
+  Routing depends on scope:
+
+  * **Account-scoped** (``account_id`` set) — published to the per-account
+    private subject ``ADMIN.<market>.<gateway>.<account_id>`` (see
+    :func:`compose_admin_subject`). Only the single worker subscribed to that
+    subject receives it, so no other worker ever learns the ``account_id`` and
+    each worker stays isolated to its own account. ``market``/``gateway`` are
+    REQUIRED whenever ``account_id`` is set (see
+    ``uq_accounts_market_gateway_account_id`` on the ``accounts`` table) so the
+    subject is fully disambiguated — the same bare id can exist under different
+    market/gateway pairs.
+  * **Broadcast** (no ``account_id``) — published to the shared ``ADMIN``
+    subject and fanned out to every connected worker, which filters for itself
+    (e.g. a strategy/symbol-scoped or flat-everything directive).
   """
 
   model_config = ConfigDict(
@@ -134,9 +152,7 @@ class AdminSignal(BaseModel):
   @model_validator(mode="after")
   def _require_market_gateway_with_account_id(self) -> "AdminSignal":
     if self.account_id is not None and (self.market is None or self.gateway is None):
-      raise ValueError(
-        "market and gateway are required when account_id is set"
-      )
+      raise ValueError("market and gateway are required when account_id is set")
     return self
 
 
@@ -159,11 +175,38 @@ class SystemSignal(BaseModel):
   timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class CryptoLeverageConfig(BaseModel):
+  """Allowed crypto symbols + default leverage, as loaded from BrokerSetting.
+
+  Nested inside :class:`SystemWorkerConnectedAck` for a crypto worker's connect
+  handshake. The standalone :class:`SystemCryptoLeverageInitSignal` carries the
+  same two values for the admin push to already-connected workers.
+  """
+
+  model_config = ConfigDict(
+    json_schema_extra={
+      "example": {
+        "symbols": ["BTC", "ETH"],
+        "default_leverage": 10,
+      }
+    },
+  )
+
+  symbols: list[str] = Field(
+    default_factory=list, description="Crypto symbols the worker may trade."
+  )
+  default_leverage: int = Field(..., description="Max leverage the worker applies.")
+
+
 class SystemCryptoLeverageInitSignal(SystemSignal):
   """Outbound CRYPTO_LEVERAGE_INIT signal the broker pushes to a crypto worker.
 
   ``symbols`` (allowed crypto symbols) and ``default_leverage`` (max leverage)
   are loaded from BrokerSetting so the worker can apply that configuration.
+
+  Only used for the *live* push from ``POST /admin/settings/crypto-*``, which
+  reaches workers that are already connected. A worker's connect-time copy
+  arrives in the ``crypto_leverage_init`` block of its WORKER_CONNECTED_ACK.
   """
 
   model_config = ConfigDict(
@@ -190,8 +233,9 @@ class SystemWorkerConnectedSignal(SystemSignal):
   ``account_id``, ``market`` and ``gateway`` are all required so the broker knows
   which worker connected and which market/gateway it serves before deciding what
   initial configuration to push back. ``strategies`` lists the strategy subjects
-  the worker subscribes to — the broker uses them to select signals for the
-  ``RETRY_SIGNALS`` replay.
+  the worker subscribes to — the broker uses them to select both the
+  ``strategy_magic_map`` entries and the ``retry_signals`` replay it answers
+  with.
   """
 
   model_config = ConfigDict(
@@ -214,33 +258,56 @@ class SystemWorkerConnectedSignal(SystemSignal):
   strategies: list[str] = Field(
     default_factory=list,
     description=(
-      "Strategy subjects the worker subscribes to. Drives the RETRY_SIGNALS "
-      "replay: only signals whose strategy is in this list are re-sent."
+      "Strategy subjects the worker subscribes to. Drives the reply: only "
+      "these strategies' magic numbers and signals are sent back."
     ),
   )
 
 
-class SystemRetrySignal(SystemSignal):
-  """Outbound RETRY_SIGNALS the broker sends to a freshly-connected worker.
+class SystemWorkerConnectedAck(SystemSignal):
+  """Broker → worker reply confirming a WORKER_CONNECTED handshake, carrying the
+  worker's complete initial configuration.
 
-  Carries every SIGNAL persisted in the last ``max_retry_timeout`` seconds
-  whose strategy the worker announced on WORKER_CONNECTED, formatted exactly
-  like the payloads normally published on the strategy subject so the worker
-  can replay them through the same handler.
+  This is the **single** message the broker sends back, because a NATS reply
+  inbox only ever accepts one: ``request()`` resolves its future (or, in the
+  ``old_style`` form, auto-unsubscribes at ``max_msgs=1``) on the first reply
+  and silently drops the rest. Everything the handshake used to send as separate
+  messages therefore travels inside this one payload:
+
+  * ``strategy_magic_map`` — strategy → magic number, from the
+    ``strategy_magic_map`` BrokerSetting, filtered to the strategies the worker
+    announced. Always present; ``{}`` means nothing matched.
+  * ``retry_signals`` — every SIGNAL persisted in the last ``max_retry_timeout``
+    seconds for those same strategies, shaped exactly like the live payloads on
+    the strategy subject so the worker can replay them through the same handler
+    and de-duplicate by ``signal_id``. Always present; ``[]`` means nothing to
+    replay.
+  * ``crypto_leverage_init`` — allowed symbols + default leverage, **only** for
+    a crypto worker; ``None`` for every other market.
+
+  Sent on the request's reply inbox so a worker that used NATS ``request`` gets a
+  definitive answer instead of timing out, and so no other worker sees this
+  worker's configuration. A fire-and-forget worker (no reply inbox) gets the
+  same payload broadcast on the shared SYSTEM subject and filters by
+  ``account_id``.
   """
 
   model_config = ConfigDict(
     use_enum_values=True,
     json_schema_extra={
       "example": {
-        "action": "RETRY_SIGNALS",
-        "account_id": "CRYPTO-BINANCE-7654321",
+        "action": "WORKER_CONNECTED_ACK",
+        "account_id": "FOREX-MT5-12345678",
         "timestamp": "2026-06-30T00:00:00+00:00",
-        "signals": [
+        "strategy_magic_map": {
+          "MT5_GOLD_M5_V1": 20260409,
+          "MT5_MULTI_M5_V1": 20260708,
+        },
+        "retry_signals": [
           {
             "signal_id": "sig_123",
             "timestamp": "2026-06-29T23:59:30+00:00",
-            "strategy": "wt_cross_v1",
+            "strategy": "MT5_GOLD_M5_V1",
             "action": "LONG",
             "symbol": "XAUUSD",
             "price": 2350.5,
@@ -251,40 +318,33 @@ class SystemRetrySignal(SystemSignal):
             "risk_percent": 1.0,
           }
         ],
+        "crypto_leverage_init": None,
       }
     },
   )
 
-  action: SystemActionEnum = SystemActionEnum.RETRY_SIGNALS
-  signals: list[TradingSignal] = Field(
+  action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED_ACK
+  strategy_magic_map: dict[str, int] = Field(
+    default_factory=dict,
+    description=(
+      "Strategy name → magic number, filtered to the strategies the worker "
+      "announced on WORKER_CONNECTED."
+    ),
+  )
+  retry_signals: list[TradingSignal] = Field(
     default_factory=list,
     description=(
       "Signals persisted in the last ``max_retry_timeout`` seconds whose "
       "strategy the worker announced. Same shape as the SIGNAL payload."
     ),
   )
-
-
-class SystemWorkerConnectedAck(SystemSignal):
-  """Broker → worker reply confirming a WORKER_CONNECTED handshake that needs no
-  further configuration (e.g. a non-crypto worker).
-
-  Sent on the request's reply inbox so a worker that used NATS ``request`` gets a
-  definitive answer instead of timing out.
-  """
-
-  model_config = ConfigDict(
-    use_enum_values=True,
-    json_schema_extra={
-      "example": {
-        "action": "WORKER_CONNECTED_ACK",
-        "account_id": "FOREX-MT5-12345678",
-        "timestamp": "2026-06-30T00:00:00+00:00",
-      }
-    },
+  crypto_leverage_init: Optional[CryptoLeverageConfig] = Field(
+    default=None,
+    description=(
+      "Allowed symbols + default leverage for a crypto worker; None for any "
+      "other market."
+    ),
   )
-
-  action: SystemActionEnum = SystemActionEnum.WORKER_CONNECTED_ACK
 
 
 class SystemWorkerConnectedError(SystemSignal):

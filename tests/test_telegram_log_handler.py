@@ -95,8 +95,8 @@ async def test_worker_uses_dedicated_log_chat_id(monkeypatch):
   """When TELEGRAM_LOG_CHAT_ID is set, the worker must target that chat."""
   from broker.services import notification_service as mod
 
-  monkeypatch.setattr(mod.settings, "TELEGRAM_LOG_CHAT_ID", "999", raising=False)
-  monkeypatch.setattr(mod.settings, "TELEGRAM_CHAT_ID", "111", raising=False)
+  monkeypatch.setattr(mod.settings.telegram, "LOG_CHAT_ID", "999", raising=False)
+  monkeypatch.setattr(mod.settings.telegram, "CHAT_ID", "111", raising=False)
 
   captured: list[str | None] = []
 
@@ -133,9 +133,9 @@ async def test_worker_uses_dedicated_log_bot_token(monkeypatch):
   from broker.services import notification_service as mod
 
   monkeypatch.setattr(
-    mod.settings, "TELEGRAM_LOG_BOT_TOKEN", "log-bot-tok", raising=False
+    mod.settings.telegram, "LOG_BOT_TOKEN", "log-bot-tok", raising=False
   )
-  monkeypatch.setattr(mod.settings, "TELEGRAM_BOT_TOKEN", "main-bot-tok", raising=False)
+  monkeypatch.setattr(mod.settings.telegram, "BOT_TOKEN", "main-bot-tok", raising=False)
 
   captured: list[str | None] = []
 
@@ -171,8 +171,8 @@ async def test_worker_falls_back_to_shared_bot_token(monkeypatch):
   """When TELEGRAM_LOG_BOT_TOKEN is empty, the worker must reuse the shared bot."""
   from broker.services import notification_service as mod
 
-  monkeypatch.setattr(mod.settings, "TELEGRAM_LOG_BOT_TOKEN", "", raising=False)
-  monkeypatch.setattr(mod.settings, "TELEGRAM_BOT_TOKEN", "main-bot-tok", raising=False)
+  monkeypatch.setattr(mod.settings.telegram, "LOG_BOT_TOKEN", "", raising=False)
+  monkeypatch.setattr(mod.settings.telegram, "BOT_TOKEN", "main-bot-tok", raising=False)
 
   captured: list[str | None] = []
 

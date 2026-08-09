@@ -60,7 +60,7 @@ def make_signals_notifier(setting_repository: SettingRepository) -> Notifier:
   ``Depends``.
   """
   return TelegramNotification(
-    chat_id=settings.TELEGRAM_CHAT_CHANNEL_ID or settings.TELEGRAM_CHAT_ID,
+    chat_id=settings.telegram.CHAT_CHANNEL_ID or settings.telegram.CHAT_ID,
     setting_repository=setting_repository,
   )
 
@@ -74,7 +74,7 @@ def get_signals_notifier(
 
 def get_admin_notifier() -> Notifier:
   """Channel for management/admin notifications."""
-  return TelegramNotification(chat_id=settings.TELEGRAM_CHAT_ID)
+  return TelegramNotification(chat_id=settings.telegram.CHAT_ID)
 
 
 def get_publisher(request: Request) -> SignalPublisher:
@@ -93,5 +93,5 @@ def get_signal_service(
     setting_repository=setting_repository,
     publisher=publisher,
     notifier=notifier,
-    webhook_secret=settings.WEBHOOK_SECRET,
+    webhook_secret=settings.webhook.SECRET,
   )

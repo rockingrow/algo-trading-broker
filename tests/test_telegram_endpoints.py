@@ -287,7 +287,7 @@ def test_flat_publishes_scoped_to_account(ctx):
   assert published["gateway"] is None
 
 
-def test_prevent_block_publishes_block_entries(ctx):
+def test_prevent_block_publishes_block_signal(ctx):
   _link(ctx)
   resp = ctx["client"].post(
     f"/v1/telegram/{TG_ID}/commands/prevent",
@@ -295,11 +295,11 @@ def test_prevent_block_publishes_block_entries(ctx):
     headers=_headers(),
   )
   assert resp.status_code == 200
-  assert resp.json()["action"] == "BLOCK_ENTRIES"
-  assert ctx["publisher"].admin_signals[-1]["action"].value == "BLOCK_ENTRIES"
+  assert resp.json()["action"] == "BLOCK_SIGNAL"
+  assert ctx["publisher"].admin_signals[-1]["action"].value == "BLOCK_SIGNAL"
 
 
-def test_prevent_allow_publishes_allow_entries(ctx):
+def test_prevent_allow_publishes_allow_signal(ctx):
   _link(ctx)
   resp = ctx["client"].post(
     f"/v1/telegram/{TG_ID}/commands/prevent",
@@ -307,7 +307,7 @@ def test_prevent_allow_publishes_allow_entries(ctx):
     headers=_headers(),
   )
   assert resp.status_code == 200
-  assert resp.json()["action"] == "ALLOW_ENTRIES"
+  assert resp.json()["action"] == "ALLOW_SIGNAL"
 
 
 def test_command_requires_link(ctx):
@@ -394,9 +394,9 @@ def test_second_link_does_not_disturb_active_account(multi_ctx):
 
 def test_switch_active_account(multi_ctx):
   _link_both(multi_ctx)
-  accounts = multi_ctx["client"].get(
-    f"/v1/telegram/{TG_ID}/accounts", headers=_headers()
-  ).json()
+  accounts = (
+    multi_ctx["client"].get(f"/v1/telegram/{TG_ID}/accounts", headers=_headers()).json()
+  )
   second_id = next(a["id"] for a in accounts if a["account_id"] == "acc-2")
 
   resp = multi_ctx["client"].post(
@@ -462,7 +462,9 @@ def test_unlink_leaves_other_users_link_intact(ctx):
   assert resp.status_code == 200
 
   # The unlinking user is gone...
-  assert ctx["client"].get(f"/v1/telegram/{TG_ID}", headers=_headers()).status_code == 404
+  assert (
+    ctx["client"].get(f"/v1/telegram/{TG_ID}", headers=_headers()).status_code == 404
+  )
   # ...the other one still has the account.
   resp = ctx["client"].get(f"/v1/telegram/{OTHER_TG_ID}", headers=_headers())
   assert resp.status_code == 200

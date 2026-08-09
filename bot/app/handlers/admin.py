@@ -28,6 +28,7 @@ String(50) and never contains ':'):
 from __future__ import annotations
 
 import html
+import json
 from typing import Optional
 
 from aiogram import F, Router
@@ -45,7 +46,7 @@ from app.constants import (
 )
 from app.filters.is_admin import IsAdmin
 from app.presenters import messages
-from app.states import AdminLinkAccount, CreateAccount
+from app.states import AdminLinkAccount, CreateAccount, SetStrategyMagicMap
 from app.utils.invite import to_payload
 from app.utils.pagination import paginate
 from app.utils.telegram import safe_edit_text
@@ -86,7 +87,9 @@ async def cmd_accounts(message: Message, broker_admin: BrokerClientAdmin) -> Non
 
 
 @router.callback_query(F.data.startswith("aacc:"))
-async def cb_accounts_page(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
+async def cb_accounts_page(
+  call: CallbackQuery, broker_admin: BrokerClientAdmin
+) -> None:
   raw = call.data.split(":", 1)[1]
   if not raw.isdigit():
     await call.answer()
@@ -219,7 +222,9 @@ async def cmd_aflat(
 
   account = matches[0]
   await state.update_data(aflat_target=account, aflat_candidates=None)
-  await message.answer(_aflat_confirm_text(account), reply_markup=inline.confirm_keyboard("aflat"))
+  await message.answer(
+    _aflat_confirm_text(account), reply_markup=inline.confirm_keyboard("aflat")
+  )
 
 
 @router.callback_query(F.data.startswith("aflatc:"))
@@ -237,12 +242,16 @@ async def cb_aflat_pick(call: CallbackQuery, state: FSMContext) -> None:
 
   account = candidates[idx]
   await state.update_data(aflat_target=account, aflat_candidates=None)
-  await safe_edit_text(call.message, _aflat_confirm_text(account), inline.confirm_keyboard("aflat"))
+  await safe_edit_text(
+    call.message, _aflat_confirm_text(account), inline.confirm_keyboard("aflat")
+  )
   await call.answer()
 
 
 @router.callback_query(F.data.in_({"aflat:confirm", "aflat:cancel"}))
-async def cb_aflat(call: CallbackQuery, state: FSMContext, broker_admin: BrokerClientAdmin) -> None:
+async def cb_aflat(
+  call: CallbackQuery, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
   decision = call.data.split(":", 1)[1]
   data = await state.get_data()
   target = data.get("aflat_target")
@@ -323,7 +332,9 @@ async def cb_rotate(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> Non
   if result is None:
     await safe_edit_text(call.message, f"{emojis.CROSS} Token rotation failed.")
   else:
-    await safe_edit_text(call.message, messages.AdminMessages.format_rotate_result(result))
+    await safe_edit_text(
+      call.message, messages.AdminMessages.format_rotate_result(result)
+    )
   await call.answer()
 
 
@@ -371,15 +382,15 @@ async def cb_admin_linkaccount_pick(call: CallbackQuery, state: FSMContext) -> N
   await call.answer()
 
 
-@router.message(AdminLinkAccount.waiting_for_telegram_id, F.text & ~F.text.startswith("/"))
+@router.message(
+  AdminLinkAccount.waiting_for_telegram_id, F.text & ~F.text.startswith("/")
+)
 async def receive_link_telegram_id(
   message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
 ) -> None:
   raw = (message.text or "").strip()
   if not raw.isdigit():
-    await message.answer(
-      f"{emojis.WARNING} Please send a numeric Telegram user id."
-    )
+    await message.answer(f"{emojis.WARNING} Please send a numeric Telegram user id.")
     return
 
   data = await state.get_data()
@@ -399,9 +410,7 @@ async def receive_link_telegram_id(
       "Run /admin_linkaccount to retry."
     )
     return
-  await message.answer(
-    messages.AdminMessages.format_linked_account(account, int(raw))
-  )
+  await message.answer(messages.AdminMessages.format_linked_account(account, int(raw)))
 
 
 @router.message(AdminLinkAccount.waiting_for_telegram_id, ~F.text)
@@ -459,7 +468,9 @@ async def cmd_invite_url(
 
 
 @router.callback_query(F.data.startswith("ainv:"))
-async def cb_invite_url_pick(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
+async def cb_invite_url_pick(
+  call: CallbackQuery, broker_admin: BrokerClientAdmin
+) -> None:
   account_uuid = call.data.split(":", 1)[1]
   # The picker carries the row UUID, so the token is re-fetched here rather than
   # parked in callback_data where it would sit in the client's update history.
@@ -515,9 +526,7 @@ async def cb_newaccount_gateway(
 
   accounts = await broker_admin.admin_list_accounts() or []
   existing = [
-    a
-    for a in accounts
-    if a.get("market") == market and a.get("gateway") == gateway
+    a for a in accounts if a.get("market") == market and a.get("gateway") == gateway
   ]
 
   await state.update_data(market=market, gateway=gateway)
@@ -525,7 +534,9 @@ async def cb_newaccount_gateway(
 
   text = f"Market: <b>{market}</b> · Gateway: <b>{gateway}</b>\n\n"
   if existing:
-    ids = ", ".join(f"<code>{html.escape(str(a.get('account_id')))}</code>" for a in existing)
+    ids = ", ".join(
+      f"<code>{html.escape(str(a.get('account_id')))}</code>" for a in existing
+    )
     text += f"Existing account_id(s) for this pair: {ids}\n\n"
   text += (
     "Send the account_id to register (no market/gateway prefix — just the "
@@ -579,7 +590,9 @@ async def _render_settings(
   states = await broker_admin.admin_get_settings()
   if states is None:
     return None, None
-  return messages.AdminMessages.format_settings(states), inline.settings_keyboard(states)
+  return messages.AdminMessages.format_settings(states), inline.settings_keyboard(
+    states
+  )
 
 
 @router.message(Command("admin_settings", "settings"))
@@ -592,7 +605,9 @@ async def cmd_settings(message: Message, broker_admin: BrokerClientAdmin) -> Non
 
 
 @router.callback_query(F.data.startswith("aset:"))
-async def cb_settings_toggle(call: CallbackQuery, broker_admin: BrokerClientAdmin) -> None:
+async def cb_settings_toggle(
+  call: CallbackQuery, broker_admin: BrokerClientAdmin
+) -> None:
   slug = call.data.split(":", 1)[1]
   await broker_admin.admin_toggle_setting(slug)
   text, kb = await _render_settings(broker_admin)
@@ -601,3 +616,88 @@ async def cb_settings_toggle(call: CallbackQuery, broker_admin: BrokerClientAdmi
     return
   await safe_edit_text(call.message, text, kb)
   await call.answer("Updated")
+
+
+# ── /admin_magicmap ─────────────────────────────────────────────────
+# Edit the strategy → magic-number map (broker setting `strategy_magic_map`)
+# by typing a JSON object. The broker validates + stores it; workers pick up
+# the new map on their next connect. `/admin_magicmap {"X": 1}` sets it in one
+# shot; bare `/admin_magicmap` shows the current value and waits for the text.
+
+
+def _parse_magic_map_input(
+  raw: str,
+) -> tuple[Optional[dict[str, int]], Optional[str]]:
+  """Parse admin-typed text into a {strategy: magic} map, or return an error
+  message (the broker re-validates server-side, but parsing here gives the admin
+  immediate feedback)."""
+  try:
+    data = json.loads(raw)
+  except json.JSONDecodeError as exc:
+    return None, f"Invalid JSON: {html.escape(str(exc))}"
+  if not isinstance(data, dict):
+    return None, 'Expected a JSON object, e.g. {"MT5_GOLD_M5_V1": 20260409}.'
+  if not data:
+    return None, "Provide at least one strategy → magic number entry."
+  cleaned: dict[str, int] = {}
+  for key, value in data.items():
+    # bool is an int subclass, but a magic number is never true/false.
+    if isinstance(value, bool) or not isinstance(value, int):
+      return None, f"Magic number for '{html.escape(str(key))}' must be an integer."
+    cleaned[str(key)] = value
+  return cleaned, None
+
+
+async def _apply_magic_map(
+  message: Message, broker_admin: BrokerClientAdmin, raw: str
+) -> bool:
+  """Validate *raw* and push it to the broker. Returns True once applied, False
+  if the input was rejected (an error was already sent to the admin)."""
+  parsed, error = _parse_magic_map_input(raw)
+  if error is not None:
+    await message.answer(f"{emojis.WARNING} {error}")
+    return False
+  result = await broker_admin.set_strategy_magic_map(parsed)
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update the strategy magic map. Please try again."
+    )
+    return False
+  await message.answer(
+    messages.AdminMessages.format_magic_map_updated(str(result.get("value")))
+  )
+  return True
+
+
+@router.message(Command("admin_magicmap", "magicmap"))
+async def cmd_magicmap(
+  message: Message,
+  command: CommandObject,
+  state: FSMContext,
+  broker_admin: BrokerClientAdmin,
+) -> None:
+  await state.clear()
+  arg = (command.args or "").strip()
+  if arg:
+    await _apply_magic_map(message, broker_admin, arg)
+    return
+  current = await broker_admin.get_strategy_magic_map()
+  value = current.get("value") if current else None
+  await state.set_state(SetStrategyMagicMap.waiting_for_value)
+  await message.answer(messages.AdminMessages.format_magic_map_prompt(value))
+
+
+@router.message(SetStrategyMagicMap.waiting_for_value, F.text & ~F.text.startswith("/"))
+async def receive_magic_map(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  applied = await _apply_magic_map(message, broker_admin, (message.text or "").strip())
+  # On a parse/validation error stay in the state so the admin can correct and
+  # resend; only clear once the update actually lands.
+  if applied:
+    await state.clear()
+
+
+@router.message(SetStrategyMagicMap.waiting_for_value, ~F.text)
+async def prompt_magic_map_text(message: Message) -> None:
+  await message.answer(f"{emojis.WARNING} Please send the magic map as JSON text.")

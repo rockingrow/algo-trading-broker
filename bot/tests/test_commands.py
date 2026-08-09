@@ -16,8 +16,8 @@ from app.commands import (
 
 def test_command_list_sizes():
   assert len(USER_COMMANDS) == 13
-  # 8 admin commands + 1 divider/header row.
-  assert len(ADMIN_EXTRA_COMMANDS) == 9
+  # 9 admin commands + 1 divider/header row.
+  assert len(ADMIN_EXTRA_COMMANDS) == 10
   # Admin sees user commands plus the extras.
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)
   user_names = {c.command for c in USER_COMMANDS}
@@ -33,6 +33,7 @@ def test_command_list_sizes():
     "admin_flat",
     "admin_rotate",
     "admin_settings",
+    "admin_magicmap",
     "admin_linkaccount",
     "admin_invite_url",
   } <= admin_names
@@ -41,9 +42,7 @@ def test_command_list_sizes():
   # All admin command names are valid Telegram commands ([a-z0-9_], 1-32).
   import re
 
-  assert all(
-    re.fullmatch(r"[a-z0-9_]{1,32}", c.command) for c in ADMIN_COMMANDS
-  )
+  assert all(re.fullmatch(r"[a-z0-9_]{1,32}", c.command) for c in ADMIN_COMMANDS)
 
 
 class FakeBot:

@@ -30,7 +30,9 @@ def test_column_width_accounts_for_the_header():
 
 
 def test_right_alignment():
-  lines = _body(render_table(("N", "V"), [("a", "1"), ("b", "1000")], aligns=("l", "r")))
+  lines = _body(
+    render_table(("N", "V"), [("a", "1"), ("b", "1000")], aligns=("l", "r"))
+  )
   assert lines[2] == "a     1"
   assert lines[3] == "b  1000"
 

@@ -96,7 +96,7 @@ class Signal(Base):
     server_default=SignalStatusEnum.QUEUED.value,
     index=True,
   )
-  # Remaining fan-out attempts. Seeded from ``settings.SIGNAL_MAX_ATTEMPTS``
+  # Remaining fan-out attempts. Seeded from ``settings.signal.MAX_ATTEMPTS``
   # on insert and decremented on every failed attempt; when it would drop to
   # ``0`` the row is flipped to ``FAILED`` instead.
   attempts: Mapped[int] = mapped_column(
@@ -208,9 +208,7 @@ class Account(Base):
   account_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   account_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
   account_balance: Mapped[float] = mapped_column(Numeric(20, 8), nullable=True)
-  market: Mapped[MarketTypeEnum] = mapped_column(
-    Enum(MarketTypeEnum), nullable=False
-  )
+  market: Mapped[MarketTypeEnum] = mapped_column(Enum(MarketTypeEnum), nullable=False)
   # Exchange/gateway the account trades through, e.g. MT5 (forex) or BINANCE
   # (crypto). Combined with market + account_id it forms the worker
   # addressing id <market>-<gateway>-<account_id> used on the SYSTEM subject.

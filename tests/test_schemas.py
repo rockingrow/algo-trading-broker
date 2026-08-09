@@ -11,6 +11,7 @@ from broker.schemas.publisher_schema import (
   AdminSignal,
   PublishTopicEnum,
   TradingSignal,
+  compose_admin_subject,
 )
 from broker.schemas.trade_event_schema import PositionEvent, PositionEventType
 from broker.schemas.webhook_schema import (
@@ -143,6 +144,22 @@ def test_publish_topic_enum_values():
   assert PublishTopicEnum.TRADE.value == "TRADE"
 
 
+def test_compose_admin_subject_from_enum_market():
+  from broker.schemas.account_schema import MarketTypeEnum
+
+  assert (
+    compose_admin_subject(MarketTypeEnum.FOREX, "MT5", "12345678")
+    == "ADMIN.FOREX.MT5.12345678"
+  )
+
+
+def test_compose_admin_subject_from_string_market():
+  assert (
+    compose_admin_subject("CRYPTO", "BINANCE", "7654321")
+    == "ADMIN.CRYPTO.BINANCE.7654321"
+  )
+
+
 # ── PositionEvent ──────────────────────────────────────────────────
 
 
@@ -179,6 +196,18 @@ def test_position_event_carries_reject_reason():
   )
   assert ev.status == "REJECTED"
   assert ev.reject_reason == "MAX ORDER limit reached"
+
+
+def test_position_event_rejected_for_open_position():
+  # A worker that already holds an open position rejects the broker's new
+  # SIGNAL and fires the same REJECTED TRADE, only the reason differs.
+  ev = PositionEvent(
+    **_event_dict(
+      status="REJECTED", reject_reason="Open position already exists for XAUUSD"
+    )
+  )
+  assert ev.status == "REJECTED"
+  assert ev.reject_reason == "Open position already exists for XAUUSD"
 
 
 def test_position_event_missing_required_rejected():

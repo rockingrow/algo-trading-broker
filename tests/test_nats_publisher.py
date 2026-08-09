@@ -5,6 +5,7 @@ from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminActionEnum,
+  CryptoLeverageConfig,
   PublishTopicEnum,
   SystemActionEnum,
   TradingSignal,
@@ -86,7 +87,7 @@ async def test_publish_flat_payload_shape():
   subject, body = conn.nc.published[0]
   assert subject == "strat-x"
   # signal_id is required so workers can de-duplicate a live FLAT against the
-  # same signal replayed inside a SYSTEM.RETRY_SIGNALS bundle.
+  # same signal replayed inside a WORKER_CONNECTED_ACK's retry_signals.
   assert body == {
     "signal_id": "sig-flat-1",
     "strategy": "strat-x",
@@ -96,7 +97,7 @@ async def test_publish_flat_payload_shape():
   }
 
 
-async def test_publish_admin_signal_to_admin_subject():
+async def test_publish_admin_signal_account_scoped_uses_private_subject():
   conn = FakeConn()
   publisher = NatsPublisher(connection=conn)
   await publisher.publish_admin_signal(
@@ -109,12 +110,30 @@ async def test_publish_admin_signal_to_admin_subject():
   )
 
   subject, body = conn.nc.published[0]
-  assert subject == PublishTopicEnum.ADMIN.value
+  # Account-scoped admin actions go to the per-account private subject so no
+  # other worker learns the account_id.
+  assert subject == "ADMIN.FOREX.MT5.acc-1"
   # use_enum_values=True means the action is serialised as its string value.
   assert body["action"] == "FLAT"
   assert body["account_id"] == "acc-1"
   assert body["market"] == "FOREX"
   assert body["gateway"] == "MT5"
+
+
+async def test_publish_admin_signal_broadcast_uses_shared_subject():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_admin_signal(
+    action=AdminActionEnum.FLAT,
+    strategy="s",
+    symbol="XAUUSD",
+  )
+
+  subject, body = conn.nc.published[0]
+  # No account_id -> broadcast on the shared ADMIN subject for every worker.
+  assert subject == PublishTopicEnum.ADMIN.value
+  assert body["action"] == "FLAT"
+  assert body["account_id"] is None
 
 
 async def test_publish_system_signal_to_system_subject():
@@ -161,6 +180,55 @@ async def test_publish_system_ack():
   assert subject == "_INBOX.ack"
   assert body["action"] == "WORKER_CONNECTED_ACK"
   assert body["account_id"] == "FOREX-MT5-1"
+  # The three configuration blocks are always present, empty when there is
+  # nothing to send, so a worker can parse them unconditionally.
+  assert body["strategy_magic_map"] == {}
+  assert body["retry_signals"] == []
+  assert body["crypto_leverage_init"] is None
+
+
+async def test_publish_system_ack_carries_the_whole_handshake_config():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_ack(
+    subject="_INBOX.ack",
+    account_id="CRYPTO-BINANCE-7654321",
+    strategy_magic_map={"MT5_GOLD_M5_V1": 20260409},
+    retry_signals=[_signal(strategy="MT5_GOLD_M5_V1")],
+    crypto_leverage_init=CryptoLeverageConfig(
+      symbols=["BTC", "ETH"], default_leverage=10
+    ),
+  )
+
+  # Everything the handshake used to send as separate messages fits in the one
+  # message a reply inbox accepts.
+  assert len(conn.nc.published) == 1
+  subject, body = conn.nc.published[0]
+  assert subject == "_INBOX.ack"
+  assert body["action"] == "WORKER_CONNECTED_ACK"
+  assert body["strategy_magic_map"] == {"MT5_GOLD_M5_V1": 20260409}
+  assert len(body["retry_signals"]) == 1
+  assert body["retry_signals"][0]["signal_id"] == "sig-1"
+  assert body["crypto_leverage_init"] == {
+    "symbols": ["BTC", "ETH"],
+    "default_leverage": 10,
+  }
+
+
+async def test_publish_system_ack_broadcasts_when_no_subject():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_system_ack(
+    account_id="CRYPTO-BINANCE-7654321",
+    strategy_magic_map={"MT5_GOLD_M5_V1": 20260409},
+  )
+
+  subject, body = conn.nc.published[0]
+  # No subject (fire-and-forget worker) → falls back to the shared SYSTEM
+  # subject, still carrying account_id so the worker can filter for itself.
+  assert subject == PublishTopicEnum.SYSTEM.value
+  assert body["action"] == "WORKER_CONNECTED_ACK"
+  assert body["account_id"] == "CRYPTO-BINANCE-7654321"
 
 
 async def test_publish_system_error():
@@ -194,29 +262,20 @@ async def test_publish_webhook_event_targets_jetstream_signal_subject():
   assert body["signal_id"] == "sig-123"
 
 
-async def test_publish_system_retry_signal_broadcasts_when_no_subject():
+async def test_replayed_signals_keep_the_live_signal_shape():
   conn = FakeConn()
   publisher = NatsPublisher(connection=conn)
-  signal = _signal(strategy="wt_cross_v1")
-  await publisher.publish_system_retry_signal(
-    account_id="FOREX-MT5-1", signals=[signal]
+  await publisher.publish_system_ack(
+    subject="_INBOX.reply",
+    account_id="FOREX-MT5-1",
+    retry_signals=[_signal(strategy="wt_cross_v1")],
   )
 
-  subject, body = conn.nc.published[0]
-  assert subject == PublishTopicEnum.SYSTEM.value
-  assert body["action"] == SystemActionEnum.RETRY_SIGNALS.value
-  assert body["account_id"] == "FOREX-MT5-1"
-  assert len(body["signals"]) == 1
-  assert body["signals"][0]["signal_id"] == "sig-1"
-
-
-async def test_publish_system_retry_signal_replies_directly_when_subject_set():
-  conn = FakeConn()
-  publisher = NatsPublisher(connection=conn)
-  await publisher.publish_system_retry_signal(
-    account_id="FOREX-MT5-1", signals=[], subject="_INBOX.reply"
-  )
-  subject, body = conn.nc.published[0]
-  assert subject == "_INBOX.reply"
-  assert body["action"] == SystemActionEnum.RETRY_SIGNALS.value
-  assert body["signals"] == []
+  _subject, body = conn.nc.published[0]
+  replayed = body["retry_signals"][0]
+  # Identical to what the worker sees live on the strategy subject, so it can
+  # run the replay through the same handler and de-duplicate by signal_id.
+  assert replayed["signal_id"] == "sig-1"
+  assert replayed["strategy"] == "wt_cross_v1"
+  assert replayed["action"] == SignalActionEnum.LONG.value
+  assert replayed["symbol"] == "XAUUSD"

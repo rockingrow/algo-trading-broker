@@ -20,7 +20,7 @@ def test_box_wraps_and_strips():
 
 
 async def test_disabled_is_noop(monkeypatch):
-  monkeypatch.setattr(ns.settings, "TELEGRAM_ENABLED", False)
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", False)
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
 
@@ -30,8 +30,8 @@ async def test_disabled_is_noop(monkeypatch):
 
 
 async def test_silent_signal_skips_send(monkeypatch):
-  monkeypatch.setattr(ns.settings, "TELEGRAM_ENABLED", True)
-  monkeypatch.setattr(ns.settings, "TELEGRAM_BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
 
@@ -43,8 +43,8 @@ async def test_silent_signal_skips_send(monkeypatch):
 
 
 async def test_missing_token_or_chat_id_is_noop(monkeypatch):
-  monkeypatch.setattr(ns.settings, "TELEGRAM_ENABLED", True)
-  monkeypatch.setattr(ns.settings, "TELEGRAM_BOT_TOKEN", "")
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "")
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
 
@@ -54,8 +54,8 @@ async def test_missing_token_or_chat_id_is_noop(monkeypatch):
 
 
 async def test_happy_path_posts_to_telegram(monkeypatch):
-  monkeypatch.setattr(ns.settings, "TELEGRAM_ENABLED", True)
-  monkeypatch.setattr(ns.settings, "TELEGRAM_BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent, status_code=200))
 
@@ -73,8 +73,8 @@ async def test_happy_path_posts_to_telegram(monkeypatch):
 
 
 async def test_non_200_is_handled_gracefully(monkeypatch):
-  monkeypatch.setattr(ns.settings, "TELEGRAM_ENABLED", True)
-  monkeypatch.setattr(ns.settings, "TELEGRAM_BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent, status_code=400))
 
@@ -85,8 +85,8 @@ async def test_non_200_is_handled_gracefully(monkeypatch):
 
 
 async def test_network_exception_is_swallowed(monkeypatch):
-  monkeypatch.setattr(ns.settings, "TELEGRAM_ENABLED", True)
-  monkeypatch.setattr(ns.settings, "TELEGRAM_BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
 
   class BoomClient:
     def __init__(self, *a, **k):

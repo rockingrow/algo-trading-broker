@@ -15,11 +15,11 @@ from app.utils.table import ACTIVE_MARK, render_table
 from app.utils.timezone import SHORT_TIME_FMT, format_local_time, format_utc_label
 
 # Broker wire action → the bot command that triggered it. Users type /prevent,
-# not BLOCK_ENTRIES; echoing the enum back leaks broker vocabulary at them.
+# not BLOCK_SIGNAL; echoing the enum back leaks broker vocabulary at them.
 _ACTION_LABEL = {
   "FLAT": "Flat",
-  "BLOCK_ENTRIES": "Prevent",
-  "ALLOW_ENTRIES": "Allow",
+  "BLOCK_SIGNAL": "Prevent",
+  "ALLOW_SIGNAL": "Allow",
 }
 
 # Table cells must stay single-width, so the status shows as an abbreviation
@@ -206,7 +206,10 @@ class AdminMessages:
   SETTING_META: dict[str, tuple[str, str]] = {
     "signal_blocked": ("Block signal", "block-signal"),
     "silent_signal": ("Mute notifications", "silent-signal"),
-    "notification_include_signal_raw": ("Include raw in notification", "include-signal-raw"),
+    "notification_include_signal_raw": (
+      "Include raw in notification",
+      "include-signal-raw",
+    ),
   }
 
   @staticmethod
@@ -246,8 +249,9 @@ class AdminMessages:
   def format_admin_trades(
     account_id: str, payload: dict[str, Any], tz_offset_hours: float
   ) -> str:
-    return f"<b>Account</b> <code>{_esc(account_id)}</code>\n\n" + UserMessages.format_trades(
-      payload, tz_offset_hours
+    return (
+      f"<b>Account</b> <code>{_esc(account_id)}</code>\n\n"
+      + UserMessages.format_trades(payload, tz_offset_hours)
     )
 
   @staticmethod
@@ -259,7 +263,9 @@ class AdminMessages:
       rows=[
         (
           s.get("state"),
-          AdminMessages.SETTING_META.get(str(s.get("setting")), (str(s.get("setting")), ""))[0],
+          AdminMessages.SETTING_META.get(
+            str(s.get("setting")), (str(s.get("setting")), "")
+          )[0],
         )
         for s in states
       ],
@@ -279,8 +285,7 @@ class AdminMessages:
     *invite_url* is None when the bot username wasn't reachable; the raw token
     above still works, so the line is simply omitted rather than erroring."""
     invite = (
-      f"{emojis.LINK} Invite link:\n"
-      f"<tg-spoiler>{_esc(invite_url)}</tg-spoiler>\n\n"
+      f"{emojis.LINK} Invite link:\n<tg-spoiler>{_esc(invite_url)}</tg-spoiler>\n\n"
       if invite_url
       else ""
     )
@@ -336,9 +341,31 @@ class AdminMessages:
     "/admin_flat — FLAT system-wide / account\n"
     "/admin_rotate — Rotate token + unlink users\n"
     "/admin_settings — Broker settings\n"
+    "/admin_magicmap — Edit strategy magic map\n"
     "/admin_linkaccount — Link a Telegram user to an account\n"
     "/admin_invite_url — One-tap invite link for an account"
   )
+
+  @staticmethod
+  def format_magic_map_prompt(current_value: Optional[str]) -> str:
+    """Show the current strategy_magic_map JSON and ask for the new value."""
+    body = _esc(current_value) if current_value else "—"
+    return (
+      f"{emojis.GEAR} <b>Strategy magic map</b>\n\n"
+      f"Current value:\n<code>{body}</code>\n\n"
+      "Send the new value as a JSON object mapping each strategy to its magic "
+      "number, e.g.\n"
+      '<code>{"MT5_GOLD_M5_V1": 20260409, "MT5_MULTI_M5_V1": 20260708}</code>'
+    )
+
+  @staticmethod
+  def format_magic_map_updated(value: str) -> str:
+    """Confirmation after the strategy_magic_map is changed."""
+    return (
+      f"{emojis.CHECK} <b>Strategy magic map updated</b>\n\n"
+      f"<code>{_esc(value)}</code>\n\n"
+      "<i>Workers apply the new map on their next connect.</i>"
+    )
 
   @staticmethod
   def format_linked_account(account: dict[str, Any], telegram_user_id: int) -> str:

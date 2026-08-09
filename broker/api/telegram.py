@@ -144,7 +144,10 @@ def get_telegram_router() -> APIRouter:
     "/{telegram_user_id}/active-account",
     summary="Switch which of a Telegram user's linked accounts is active",
     response_model=LinkedAccountResponse,
-    responses={**AUTH_RESPONSES, 404: {"description": "Account not found or not linked to this Telegram user."}},
+    responses={
+      **AUTH_RESPONSES,
+      404: {"description": "Account not found or not linked to this Telegram user."},
+    },
   )
   async def set_active_account(
     telegram_user_id: int,
@@ -243,7 +246,7 @@ def get_telegram_router() -> APIRouter:
     publisher: SignalPublisher = Depends(get_publisher),
   ) -> CommandResultResponse:
     action = (
-      AdminActionEnum.BLOCK_ENTRIES if body.enabled else AdminActionEnum.ALLOW_ENTRIES
+      AdminActionEnum.BLOCK_SIGNAL if body.enabled else AdminActionEnum.ALLOW_SIGNAL
     )
     await publisher.publish_admin_signal(
       action=action,

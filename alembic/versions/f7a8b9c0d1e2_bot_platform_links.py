@@ -128,7 +128,9 @@ def upgrade() -> None:
     sa.Column("active_account_id", sa.UUID(), nullable=True),
     *_timestamp_columns(),
     sa.PrimaryKeyConstraint("id"),
-    sa.ForeignKeyConstraint(["active_account_id"], ["accounts.id"], ondelete="SET NULL"),
+    sa.ForeignKeyConstraint(
+      ["active_account_id"], ["accounts.id"], ondelete="SET NULL"
+    ),
     sa.UniqueConstraint(
       "platform", "platform_user_id", name="uq_bot_sessions_platform_user"
     ),

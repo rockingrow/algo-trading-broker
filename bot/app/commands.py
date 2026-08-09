@@ -56,6 +56,7 @@ ADMIN_EXTRA_COMMANDS = [
   BotCommand(command="admin_flat", description="[ADMIN] FLAT system-wide / account"),
   BotCommand(command="admin_rotate", description="[ADMIN] Rotate token + unlink users"),
   BotCommand(command="admin_settings", description="[ADMIN] Broker settings"),
+  BotCommand(command="admin_magicmap", description="[ADMIN] Edit strategy magic map"),
   BotCommand(command="admin_linkaccount", description="[ADMIN] Link a Telegram user"),
   BotCommand(command="admin_invite_url", description="[ADMIN] One-tap invite link"),
 ]
