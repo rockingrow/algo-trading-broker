@@ -83,6 +83,50 @@ def test_format_trades_converts_to_local_time_with_zone_in_header():
   assert "01-01 07:00" in out
 
 
+def test_format_trades_shows_signed_pnl_when_balance_pair_present():
+  payload = {
+    "data": [
+      {
+        "symbol": "XAUUSD",
+        "action": "LONG",
+        "status": "CLOSED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 1010.0,
+        "account_balance_init": 1000.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      },
+      {
+        "symbol": "BTCUSDT",
+        "action": "SHORT",
+        "status": "CLOSED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 950.0,
+        "account_balance_init": 1000.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      },
+      {
+        "symbol": "ETHUSDT",
+        "action": "LONG",
+        "status": "OPENED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 1010.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      },
+    ],
+    "page": {"total": 3, "limit": 5, "offset": 0},
+  }
+  out = messages.UserMessages.format_trades(payload, 7.0)
+  assert "PNL" in out
+  # A gain is signed so a scanning eye can pick winners from losers.
+  assert "+10.00" in out
+  assert "-50.00" in out
+  # No initial balance means PnL is unknown — never zero, which would read wrong.
+  assert "—" in out
+
+
 def test_format_trades_renders_a_table_with_abbreviated_status():
   payload = {
     "data": [
