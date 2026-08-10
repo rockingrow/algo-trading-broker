@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-08-10
+
+### Added
+
+- **Bot: `PNL` column on `/trades` and `/atrades`** — Each row now shows the
+  signed realised PnL (`account_balance − account_balance_init`), e.g.
+  `+123.45`, with `—` when either balance is missing so an in-progress trade
+  isn't misread as a break-even close. New `_fmt_pnl` helper in
+  `app/presenters/messages.py`; the column sits between `BALANCE` and `TIME`.
+
 ## [1.1.2] - 2026-08-10
 
 ### Added
@@ -750,6 +760,7 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
+[1.1.3]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.7...v1.1.0

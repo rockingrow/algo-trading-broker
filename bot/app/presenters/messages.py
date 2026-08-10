@@ -46,6 +46,18 @@ def _fmt_num(value: Optional[float]) -> str:
     return _esc(value)
 
 
+def _fmt_pnl(balance: Any, balance_init: Any) -> str:
+  """Signed realised PnL from a trade's balance pair, or ``—`` when unknown."""
+  if balance is None or balance_init is None:
+    return "—"
+  try:
+    pnl = float(balance) - float(balance_init)
+  except (TypeError, ValueError):
+    return "—"
+  sign = "+" if pnl >= 0 else ""
+  return f"{sign}{pnl:,.2f}"
+
+
 def _page_range(page: dict[str, Any], shown: int) -> str:
   """``"1–8 / 23"`` — which slice of a paged list this message is showing.
 
@@ -67,6 +79,7 @@ def _trade_row(trade: dict[str, Any], tz_offset_hours: float) -> tuple[str, ...]
     _fmt_num(trade.get("price")),
     _fmt_num(trade.get("quantity")),
     _fmt_num(trade.get("account_balance")),
+    _fmt_pnl(trade.get("account_balance"), trade.get("account_balance_init")),
     format_local_time(
       trade.get("updatedAt"), tz_offset_hours, fmt=SHORT_TIME_FMT, with_label=False
     ),
@@ -190,10 +203,10 @@ class UserMessages:
       f"times in {format_utc_label(tz_offset_hours)}"
     )
     table = render_table(
-      headers=("SYMBOL", "ACTION", "STATUS", "PRICE", "QTY", "BALANCE", "TIME"),
+      headers=("SYMBOL", "ACTION", "STATUS", "PRICE", "QTY", "BALANCE", "PNL", "TIME"),
       rows=[_trade_row(t, tz_offset_hours) for t in data],
-      aligns=("l", "l", "l", "r", "r", "r", "l"),
-      max_widths=(12, 6, 7, None, None, None, None),
+      aligns=("l", "l", "l", "r", "r", "r", "r", "l"),
+      max_widths=(12, 6, 7, None, None, None, None, None),
     )
     return header + "\n\n" + table
 
