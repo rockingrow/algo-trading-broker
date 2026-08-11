@@ -42,6 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of only logging the config mismatch, so deployments created before
   this change pick the window up on their next start.
 
+- **A malformed alert body now says where it broke** — TradingView parses an
+  alert message itself and, when that fails, posts it as `text/plain`; FastAPI
+  then hands the raw body to the model and pydantic answers `Input should be a
+  valid dictionary or object to extract fields from`, which never mentions the
+  syntax error that caused it. The `422` handler now re-parses such a body and
+  logs (and returns, as `json_error`) the real reason with its position and a
+  window around it — e.g. `Expecting property name enclosed in double quotes at
+  line 1 column 230 — near: …"bar_index": 16,222}…` for a Pine
+  `str.tostring` that emitted a thousands separator. Ordinary field-level
+  validation errors are reported unchanged.
+
 ### Added
 
 - **Webhook response timing in the log** — Every `/secret/webhook` response is

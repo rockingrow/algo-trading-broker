@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import json
 import logging
 import time
 import traceback
@@ -201,15 +202,58 @@ def install_webhook_connection_close(app: FastAPI) -> None:
     return response
 
 
-def create_app() -> FastAPI:
-  """Build and return the FastAPI application with all routes wired up."""
-  app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
+def json_syntax_error(errors: list) -> str | None:
+  """Describe *where* a rejected body stopped being valid JSON, if that is why.
 
-  install_webhook_connection_close(app)
+  TradingView parses an alert message itself and, when the parse fails, sends
+  the text as ``text/plain`` instead of ``application/json``. FastAPI then
+  hands the raw body straight to the model, and pydantic reports the generic
+  ``Input should be a valid dictionary or object to extract fields from`` — a
+  message that says nothing about the actual problem, which is a syntax error
+  somewhere in the alert's JSON (a Pine ``str.tostring`` that emitted a
+  thousands separator, an unquoted value, a trailing comma).
+
+  Returns ``None`` when the body is not that case, so ordinary field-level
+  validation errors are reported unchanged.
+  """
+  for error in errors:
+    if tuple(error.get("loc") or ()) != ("body",):
+      continue
+    raw = error.get("input")
+    if isinstance(raw, bytes):
+      raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+      continue
+    try:
+      json.loads(raw)
+    except json.JSONDecodeError as exc:
+      # A window around the offending character — the whole alert body is
+      # hundreds of fields long and unreadable in a log line.
+      snippet = raw[max(0, exc.pos - 40) : exc.pos + 40]
+      return f"{exc.msg} at line {exc.lineno} column {exc.colno} — near: …{snippet}…"
+    except ValueError:
+      continue
+  return None
+
+
+def install_exception_handlers(app: FastAPI) -> None:
+  """Translate validation failures and crashes into logged JSON responses."""
 
   @app.exception_handler(RequestValidationError)
   async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors = jsonable_encoder(exc.errors())
+    json_error = json_syntax_error(errors)
+    if json_error:
+      log.warning(
+        "422 Unprocessable Content | %s %s | body is not valid JSON: %s",
+        request.method,
+        request.url.path,
+        json_error,
+      )
+      return JSONResponse(
+        status_code=422, content={"detail": errors, "json_error": json_error}
+      )
+
     log.warning(
       "422 Unprocessable Content | %s %s | %s",
       request.method,
@@ -223,6 +267,14 @@ def create_app() -> FastAPI:
     log.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
     log.error(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
+def create_app() -> FastAPI:
+  """Build and return the FastAPI application with all routes wired up."""
+  app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
+
+  install_webhook_connection_close(app)
+  install_exception_handlers(app)
 
   # Include Core Router — mount under secret prefix if configured
   api_prefix = (
