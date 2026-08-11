@@ -9,19 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`/admin_flat` scope pickers (strategy · market · gateway)** — Running
-  `/admin_flat` bare no longer jumps straight to the "confirm FLAT ALL" prompt.
-  It now walks the admin through three sequential inline-keyboard pickers —
-  strategy → market → gateway — each carrying an explicit "All" row so scope
-  can stay broad at every step. The selected filters are forwarded verbatim to
-  `POST /admin/flat`, so an admin can e.g. FLAT one strategy across every
-  account, or FLAT every strategy on a single market/gateway pair, without
-  having to type raw command args. `/admin_flat <account_id>` (single-account
-  flow, resolves market/gateway from the account list) is unchanged.
-- **`GET /admin/strategies`** — Returns the distinct `trades.strategy` values
-  the broker has ever recorded, alphabetically. Backs the bot's strategy picker
-  above; an empty list simply means no trades have been observed yet.
-  (`TradeRepository.list_distinct_strategies`.)
+- **Bot: `/admin_flat` scope pickers (strategy · market · gateway)** —
+  Running `/admin_flat` bare no longer jumps straight to the "confirm FLAT
+  ALL" prompt. It now walks the admin through three sequential
+  inline-keyboard pickers — strategy → market → gateway — each carrying an
+  explicit **All** row so scope can stay broad at every step. Whatever
+  survives is forwarded verbatim to `POST /admin/flat`, so an admin can
+  e.g. FLAT one strategy across every account, or FLAT every strategy on
+  a single market/gateway pair, without having to type raw command args.
+  Selecting a specific market narrows the gateway picker to that market's
+  gateways only (per `GATEWAYS_BY_MARKET`); with **All markets** the
+  gateway picker offers the union of every configured gateway so the admin
+  can still narrow one axis. Confirm shows the resolved scope inline
+  (`strategy=… · market=… · gateway=…`, unset legs read as **ALL**) and
+  Cancel never touches the broker. `/admin_flat <account_id>` (single-
+  account confirm flow — resolves market/gateway from the live account
+  list, ambiguous ids still open the disambiguation picker) is unchanged.
+- **Bot: three new `/admin_flat` callbacks and their state** — `afls:{i|a}`
+  (strategy), `aflm:{market|a}` (market), `aflg:{gateway|a}` (gateway),
+  with `a` as the one-byte **All** sentinel to keep every scheme well
+  clear of Telegram's 64-byte `callback_data` cap. Strategy picks travel
+  as the index into a per-session FSM `aflat_strategies` list so raw
+  strategy names (user-supplied text, up to 50 chars) never ride in
+  callback data or get echoed back through Telegram; markets and gateways
+  travel by name (they are enum-constrained). FSM data grows two new
+  keys, `aflat_strategies` (the cached list) and `aflat_scope` (the
+  running `{strategy, market, gateway}` selection); both are cleared once
+  the confirm/cancel callback fires.
+- **`GET /admin/strategies`** — Returns the distinct `trades.strategy`
+  values the broker has ever recorded, alphabetically. Backs the bot's
+  strategy picker above; an empty list simply means no trade has been
+  observed yet, so the picker offers only **All**. Backed by a new
+  `TradeRepository.list_distinct_strategies()` (added to the protocol in
+  `broker/interfaces/db_protocol.py` and implemented in
+  `SqlAlchemyTradeRepository`). Sourced from the trades table (not
+  signals or accounts) so a strategy that has never traded won't appear
+  in the picker — FLATting one worth nothing is worthless.
+- **Bruno request for the new endpoint** — `bruno/admin/STRATEGIES.yml`
+  covers `GET /admin/strategies` alongside the existing `FLAT.yml`.
 - **Telegram notifications reach several chats, and land in the right group
   topic** — Every chat-id setting takes a comma-separated list — the signals
   channel `TELEGRAM_CHAT_CHANNEL_ID`, the management chat `TELEGRAM_CHAT_ID`
@@ -76,6 +101,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Bot: `/admin_flat` bare-invocation semantics** — Was: immediately
+  presented the "Confirm FLAT for **ALL** accounts?" prompt. Now: opens
+  the strategy/market/gateway picker sequence described above. Picking
+  All at every step reproduces the old flat-everything behaviour with
+  three extra taps; anything else scopes the FLAT. `/admin_help` and the
+  `/admin_flat` command description in the menu are updated to reflect
+  the pickers.
+- **Bot: `_aflat_confirm_text` renamed to `_aflat_target_confirm_text`**
+  and joined by `_aflat_scope_confirm_text` / `_aflat_scope_text` — the
+  single-account confirm path was the only shape the old helper needed
+  to render; splitting the two makes each render exactly the fields it
+  scopes on and keeps the picker's scope summary out of the account
+  confirm text.
 - **Bot: an unlinked user is shown `/start` and nothing else** — The command
   menu of a Telegram user with no linked account is now trimmed to `/start`;
   `/help` goes with the rest, since it is a tour of commands that all need an
