@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-08-11
+
+### Fixed
+
+- **TradingView webhook: `request took too long and timed out`** — The webhook
+  waited for JetStream's `PubAck` with nats-py's default timeout of **5s**,
+  longer than TradingView waits for the entire request. One slow ack (a NATS
+  reconnect, a busy file store) held the response past TradingView's patience
+  and the alert was lost, since TradingView never re-sends a timed-out
+  delivery. The wait is now capped at `WEBHOOK_ENQUEUE_TIMEOUT` (default
+  `1.0s`, tunable): past it the envelope is handed to the new
+  `DeferredEnqueuer` and the alert still gets its `202`, now with
+  `status=deferred`. A publish attempted while the NATS client is disconnected
+  raises immediately instead of buffering the write and waiting out a timeout
+  for an ack that cannot arrive.
+- **Telegram no longer delays signal delivery to the workers** — A send to a
+  throttled or filtered `api.telegram.org` is accepted at the TCP level and
+  then never answered, so it hangs for the full HTTP timeout before raising
+  `httpx.ReadTimeout`. The JetStream `SignalWorker` processes envelopes one at
+  a time, so the fan-out awaiting that send delayed the *next* signal's
+  delivery by the same 5s. Signal/FLAT notifications now go through a
+  `QueuedNotifier` — the fan-out queues the text and moves on, a single
+  background task does the sending, in order. Completed-trade owner DMs and
+  NATS lifecycle alerts are queued the same way: nats-py awaits a
+  subscription's callback before pulling the next message, so a stuck DM
+  stalled the trade bookkeeping behind it, and a stuck lifecycle alert slowed
+  the very reconnect the webhook was waiting on.
+- **An enqueue retry can no longer open a second position** — Webhook
+  envelopes are published with a `Nats-Msg-Id` that stays the same across
+  deferred retries, and the `SIGNALS` stream now sets a 120s
+  `duplicate_window` (nats-py sends `duplicate_window: 0`, i.e. de-duplication
+  off, unless it is set explicitly). A first publish whose ack was merely slow
+  is therefore dropped by JetStream rather than replayed to the workers.
+  `ensure_signal_stream` reconciles an existing stream with `update_stream`
+  instead of only logging the config mismatch, so deployments created before
+  this change pick the window up on their next start.
+
+- **The webhook token no longer leaks into the logs** — A rejected alert is
+  reported with the offending input attached, so the entire body — `token`
+  included, which *is* `WEBHOOK_SECRET` — was written to the `422` log line
+  and returned in the response. Secret values are now redacted in both,
+  whether the body arrived parsed (a field-level error) or as raw text (a JSON
+  syntax error). Anyone whose logs already carry a rejected alert should
+  rotate the secret.
+- **A malformed alert body now says where it broke** — TradingView parses an
+  alert message itself and, when that fails, posts it as `text/plain`; FastAPI
+  then hands the raw body to the model and pydantic answers `Input should be a
+  valid dictionary or object to extract fields from`, which never mentions the
+  syntax error that caused it. The `422` handler now re-parses such a body and
+  logs (and returns, as `json_error`) the real reason with its position and a
+  window around it — e.g. `Expecting property name enclosed in double quotes at
+  line 1 column 230 — near: …"bar_index": 16,222}…` for a Pine
+  `str.tostring` that emitted a thousands separator. Ordinary field-level
+  validation errors are reported unchanged.
+
+### Added
+
+- **Webhook response timing in the log** — Every `/secret/webhook` response is
+  logged with its elapsed milliseconds, raised to `warning` when it overruns
+  `WEBHOOK_ENQUEUE_TIMEOUT`. TradingView reports a timeout with nothing on the
+  server side to correlate it with; this is that record.
+- **`WEBHOOK_ENQUEUE_TIMEOUT`** (default `1.0`) — Seconds the webhook may wait
+  for the JetStream ack before deferring. Also
+  `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` (`2.0`) and
+  `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` (`15`) for the background retry, and
+  `TELEGRAM_HTTP_TIMEOUT` (`5.0`) for the Bot API call that was previously
+  hard-coded.
+- **`503` on the webhook** — Returned when the enqueue failed *and* could not
+  be deferred (no queue wired, or its backlog full). A refusal TradingView can
+  show in its alert log is worth more than a request it can only report as too
+  slow.
+
 ## [1.1.3] - 2026-08-10
 
 ### Added

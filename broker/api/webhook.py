@@ -35,8 +35,15 @@ def get_webhook_router() -> APIRouter:
     tags=["webhook"],
     summary="Receive a TradingView alert",
     responses={
-      202: {"description": "Signal accepted and enqueued on JetStream."},
+      202: {
+        "description": (
+          "Signal accepted. `status=queued` when JetStream ack-ed the write "
+          "inside `WEBHOOK_ENQUEUE_TIMEOUT`, `status=deferred` when the ack "
+          "was too slow and the enqueue is being retried in the background."
+        )
+      },
       401: {"description": "Invalid webhook `token`."},
+      503: {"description": "Enqueue failed and could not be deferred."},
     },
   )
   async def receive_webhook(
@@ -51,6 +58,11 @@ def get_webhook_router() -> APIRouter:
     soon as the message is durably queued. Every other step — block gate,
     persistence, publish to workers, notification, retries — runs in the
     background ``SignalWorker`` and, on failure, the periodic retry job.
+
+    The wait for JetStream is bounded by ``WEBHOOK_ENQUEUE_TIMEOUT``: past it
+    the service defers the enqueue to a background retry and still answers
+    ``202``, because TradingView abandons a slow delivery ("request took too
+    long and timed out") and never re-sends the alert.
     """
     try:
       return await service.enqueue(payload)

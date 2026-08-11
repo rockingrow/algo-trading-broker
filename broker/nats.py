@@ -34,6 +34,15 @@ JETSTREAM_SIGNAL_STREAM = "SIGNALS"
 JETSTREAM_SIGNAL_SUBJECT_PREFIX = "SIGNALS"
 JETSTREAM_SIGNAL_SUBJECT_FILTER = "SIGNALS.>"
 
+# Window (seconds) in which JetStream rejects a second message carrying a
+# ``Nats-Msg-Id`` it has already stored. The webhook path retries an enqueue whose
+# PubAck did not arrive in time, and that ack may simply have been slow rather
+# than lost — without a dedup window the retry would store the same alert
+# twice and workers would open two positions. nats-py sends
+# ``duplicate_window: 0`` (dedup off) unless it is set explicitly, so it is
+# always spelled out here.
+JETSTREAM_DUPLICATE_WINDOW_SECONDS = 120.0
+
 
 class NatsClient:
   """Manages the NATS connection and its lifecycle callbacks."""
@@ -63,6 +72,17 @@ class NatsClient:
         raise RuntimeError("NATS connection not established — call connect() first.")
       self._js = self._nc.jetstream()
     return self._js
+
+  @property
+  def is_connected(self) -> bool:
+    """True only while the client holds a live connection to a NATS server.
+
+    Publishing while the client is reconnecting does not fail fast — the write
+    is buffered and a JetStream ack simply never arrives, so the caller waits
+    out its whole timeout. Callers on a latency budget (the webhook) check this
+    first and take their fallback path immediately instead.
+    """
+    return self._nc is not None and self._nc.is_connected
 
   def set_notifier(self, notifier: Notifier) -> None:
     """Wire a notification channel used for connection lifecycle alerts."""
@@ -103,8 +123,10 @@ class NatsClient:
     The webhook endpoint must succeed as long as JetStream itself is reachable,
     so the stream has to exist before the first ``publish`` call. Calling
     ``add_stream`` on an existing stream is a no-op when the config matches; a
-    mismatch (someone tweaked retention/storage out-of-band) is logged so it
-    can be reconciled instead of silently swallowed.
+    mismatch (an older stream created before ``duplicate_window`` was set, or
+    someone tweaking retention/storage out-of-band) is reconciled with
+    ``update_stream`` so a deployment that predates a config change does not
+    silently keep running on the old one.
     """
     config = StreamConfig(
       name=JETSTREAM_SIGNAL_STREAM,
@@ -113,17 +135,38 @@ class NatsClient:
       storage=StorageType.FILE,
       max_msgs=-1,
       max_bytes=-1,
+      duplicate_window=JETSTREAM_DUPLICATE_WINDOW_SECONDS,
     )
     try:
       await self.js.add_stream(config=config)
       log.info(
-        "JetStream stream ensured: %s (subjects=%s)",
+        "JetStream stream ensured: %s (subjects=%s, duplicate_window=%.0fs)",
         JETSTREAM_SIGNAL_STREAM,
         JETSTREAM_SIGNAL_SUBJECT_FILTER,
+        JETSTREAM_DUPLICATE_WINDOW_SECONDS,
       )
+      return
     except BadRequestError as exc:
+      log.info(
+        "JetStream stream '%s' exists with a different config (%s) — updating it",
+        JETSTREAM_SIGNAL_STREAM,
+        exc,
+      )
+
+    try:
+      await self.js.update_stream(config=config)
+      log.info(
+        "JetStream stream '%s' reconciled (duplicate_window=%.0fs)",
+        JETSTREAM_SIGNAL_STREAM,
+        JETSTREAM_DUPLICATE_WINDOW_SECONDS,
+      )
+    except Exception as exc:
+      # Not every field can be updated in place (storage type, for one). Keep
+      # running on the existing stream rather than refusing to start — the
+      # webhook still works, it just does not get this config's guarantees.
       log.warning(
-        "JetStream stream '%s' already exists with a different config: %s",
+        "Failed to reconcile JetStream stream '%s': %s. "
+        "Enqueue de-duplication may be inactive.",
         JETSTREAM_SIGNAL_STREAM,
         exc,
       )

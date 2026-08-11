@@ -1,7 +1,13 @@
+import asyncio
+
 import httpx
 
 from broker.services import notification_service as ns
-from broker.services.notification_service import TelegramNotification, _box
+from broker.services.notification_service import (
+  QueuedNotifier,
+  TelegramNotification,
+  _box,
+)
 
 
 class FakeSettingRepo:
@@ -106,6 +112,90 @@ async def test_network_exception_is_swallowed(monkeypatch):
   notifier = TelegramNotification(chat_id="c")
   # Exception must be caught inside send_message.
   await notifier.send_message("hi")
+
+
+# ── QueuedNotifier ──────────────────────────────────────────────────
+
+
+class SlowNotifier:
+  """Stands in for a send to a throttled api.telegram.org."""
+
+  def __init__(self, delay: float = 0.2):
+    self.delay = delay
+    self.sent: list[str] = []
+    self.started = asyncio.Event()
+
+  async def send_message(self, message_text, chat_id=None):
+    self.started.set()
+    await asyncio.sleep(self.delay)
+    self.sent.append(message_text)
+    return True
+
+
+async def test_queued_notifier_returns_before_the_send_completes():
+  inner = SlowNotifier(delay=0.2)
+  notifier = QueuedNotifier(inner)
+  await notifier.start()
+  try:
+    started = asyncio.get_running_loop().time()
+    await notifier.send_message("signal")
+    elapsed = asyncio.get_running_loop().time() - started
+
+    # The caller — the JetStream fan-out — must not inherit Telegram's latency.
+    assert elapsed < 0.1
+    assert inner.sent == []
+    await asyncio.wait_for(notifier._queue.join(), timeout=2)
+    assert inner.sent == ["signal"]
+  finally:
+    await notifier.stop()
+
+
+async def test_queued_notifier_preserves_order():
+  inner = SlowNotifier(delay=0.01)
+  notifier = QueuedNotifier(inner)
+  await notifier.start()
+  try:
+    for text in ("first", "second", "third"):
+      await notifier.send_message(text)
+    await asyncio.wait_for(notifier._queue.join(), timeout=2)
+  finally:
+    await notifier.stop()
+
+  assert inner.sent == ["first", "second", "third"]
+
+
+async def test_queued_notifier_drops_when_the_backlog_is_full():
+  inner = SlowNotifier(delay=5)
+  notifier = QueuedNotifier(inner, maxsize=1)
+
+  # Not started: nothing drains, so the second message has nowhere to go and is
+  # dropped rather than blocking the pipeline it was queued to stay out of.
+  assert await notifier.send_message("kept") is True
+  assert await notifier.send_message("dropped") is False
+  assert notifier.pending == 1
+
+
+async def test_queued_notifier_survives_a_failing_send():
+  class BoomNotifier:
+    def __init__(self):
+      self.calls = 0
+
+    async def send_message(self, message_text, chat_id=None):
+      self.calls += 1
+      raise RuntimeError("telegram down")
+
+  inner = BoomNotifier()
+  notifier = QueuedNotifier(inner)
+  await notifier.start()
+  try:
+    await notifier.send_message("one")
+    await notifier.send_message("two")
+    await asyncio.wait_for(notifier._queue.join(), timeout=2)
+  finally:
+    await notifier.stop()
+
+  # A failed send must not take the drain task down with it.
+  assert inner.calls == 2
 
 
 # ── helpers ─────────────────────────────────────────────────────────

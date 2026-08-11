@@ -78,6 +78,7 @@ if TYPE_CHECKING:
   from broker.services.trade_broadcast_service import TradeBroadcastService
 
 from nats.aio.subscription import Subscription
+from nats.js import api
 from pydantic import ValidationError
 
 from broker.constants import (
@@ -646,7 +647,13 @@ class NatsPublisher:
     self._conn = connection or nats_client
 
   async def publish_webhook_event(
-    self, *, signal_id: str, strategy: str, envelope: dict
+    self,
+    *,
+    signal_id: str,
+    strategy: str,
+    envelope: dict,
+    timeout: float | None = None,
+    msg_id: str | None = None,
   ) -> None:
     """Persist a raw webhook envelope to JetStream so it can be handled offline.
 
@@ -655,15 +662,32 @@ class NatsPublisher:
     consumer. TradingView therefore gets its 202 back as soon as the message is
     durably queued, closing the ``server closed the connection unexpectedly``
     failure mode that came from doing the whole pipeline inline.
+
+    *timeout* bounds the wait for the PubAck (nats-py's own default is 5s —
+    longer than TradingView waits for the whole request), and *msg_id* is sent
+    as ``Nats-Msg-Id`` so JetStream drops a re-enqueue of an envelope whose
+    first ack was merely slow instead of storing the alert twice.
+
+    Raises ``ConnectionError`` when the client has no live connection: nats-py
+    would otherwise buffer the write and let the caller wait out the full
+    timeout for an ack that cannot arrive.
     """
+    if not self._conn.is_connected:
+      raise ConnectionError("NATS connection is not established")
+
     subject = _jetstream_subject(strategy)
     payload = json.dumps(envelope, default=str).encode()
-    ack = await self._conn.js.publish(subject, payload)
+    headers = {api.Header.MSG_ID.value: msg_id} if msg_id else None
+    ack = await self._conn.js.publish(
+      subject, payload, timeout=timeout, headers=headers
+    )
     log.info(
-      "Enqueued [%s] signal_id=%s stream_seq=%s",
+      "Enqueued [%s] signal_id=%s msg_id=%s stream_seq=%s duplicate=%s",
       subject,
       signal_id,
+      msg_id,
       getattr(ack, "seq", None),
+      getattr(ack, "duplicate", False),
     )
 
   async def publish(self, signal: TradingSignal) -> None:

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.publisher_schema import TradingSignal
 from broker.schemas.webhook_schema import PositionSchema, WebhookPayload
 from broker.services.signal_processing_service import (
+  DeferredEnqueuer,
   SignalError,
   SignalProcessingService,
 )
@@ -96,10 +98,26 @@ class FakePublisher:
     self.published: list[TradingSignal] = []
     self.flats: list[tuple] = []
     self._publish_fails = publish_fails
+    # Set to make the next N enqueues fail, standing in for a NATS blip.
+    self.enqueue_failures = 0
+    self.enqueue_hangs = False
 
-  async def publish_webhook_event(self, *, signal_id, strategy, envelope):
+  async def publish_webhook_event(
+    self, *, signal_id, strategy, envelope, timeout=None, msg_id=None
+  ):
+    if self.enqueue_hangs:
+      await asyncio.sleep(3600)
+    if self.enqueue_failures > 0:
+      self.enqueue_failures -= 1
+      raise RuntimeError("jetstream unavailable")
     self.enqueued.append(
-      {"signal_id": signal_id, "strategy": strategy, "envelope": envelope}
+      {
+        "signal_id": signal_id,
+        "strategy": strategy,
+        "envelope": envelope,
+        "timeout": timeout,
+        "msg_id": msg_id,
+      }
     )
 
   async def publish(self, signal):
@@ -133,6 +151,17 @@ class FakeNotifier:
     self.messages.append(message_text)
 
 
+async def _wait_until(predicate, timeout: float = 2.0) -> None:
+  """Poll *predicate* until it holds, so tests never sleep on a fixed guess."""
+  loop = asyncio.get_running_loop()
+  deadline = loop.time() + timeout
+  while loop.time() < deadline:
+    if predicate():
+      return
+    await asyncio.sleep(0.01)
+  raise AssertionError("condition not reached within timeout")
+
+
 def _payload(action=SignalActionEnum.LONG, token="secret", **overrides):
   base = dict(
     strategy="strat",
@@ -152,6 +181,7 @@ def _make_service(
   signal_id=None,
   secret="secret",
   publish_fails=False,
+  deferred_enqueuer=None,
 ):
   publisher = FakePublisher(publish_fails=publish_fails)
   notifier = FakeNotifier()
@@ -162,6 +192,7 @@ def _make_service(
     publisher=publisher,
     notifier=notifier,
     webhook_secret=secret,
+    deferred_enqueuer=deferred_enqueuer,
   )
   return service, publisher, notifier, signal_repo
 
@@ -219,7 +250,7 @@ async def test_enqueue_does_not_check_block_gate():
   assert len(publisher.enqueued) == 1
 
 
-async def test_enqueue_failure_raises_500():
+async def test_enqueue_failure_without_a_deferred_queue_raises_503():
   service, publisher, _, _ = _make_service()
 
   async def boom(**_kwargs):
@@ -228,7 +259,82 @@ async def test_enqueue_failure_raises_500():
   publisher.publish_webhook_event = boom  # type: ignore[assignment]
   with pytest.raises(SignalError) as exc:
     await service.enqueue(_payload())
-  assert exc.value.status_code == 500
+  # 503, not a hung request: TradingView reports a refusal it can show the
+  # operator instead of "request took too long and timed out".
+  assert exc.value.status_code == 503
+
+
+async def test_enqueue_carries_the_deadline_and_a_dedup_id():
+  service, publisher, _, _ = _make_service()
+  await service.enqueue(_payload())
+
+  enq = publisher.enqueued[0]
+  assert enq["timeout"] == settings.webhook.ENQUEUE_TIMEOUT
+  assert enq["msg_id"]
+
+
+async def test_slow_enqueue_is_deferred_and_still_answers(monkeypatch):
+  monkeypatch.setattr(settings.webhook, "ENQUEUE_TIMEOUT", 0.05)
+  deferred = DeferredEnqueuer(FakePublisher(), interval_seconds=0.01)
+  service, publisher, _, _ = _make_service(deferred_enqueuer=deferred)
+  publisher.enqueue_hangs = True
+
+  started = asyncio.get_running_loop().time()
+  result = await service.enqueue(_payload())
+  elapsed = asyncio.get_running_loop().time() - started
+
+  # The alert is answered inside the deadline instead of waiting out nats-py's
+  # 5s PubAck timeout, and the envelope is kept for the background retry.
+  assert result["status"] == "deferred"
+  assert elapsed < 1.0
+  assert deferred.pending == 1
+
+
+async def test_deferred_enqueue_retries_until_jetstream_accepts():
+  publisher = FakePublisher()
+  publisher.enqueue_failures = 2
+  deferred = DeferredEnqueuer(publisher, interval_seconds=0.01)
+  await deferred.start()
+  try:
+    deferred.submit(strategy="strat", envelope={"payload": {}}, msg_id="mid-1")
+    await _wait_until(lambda: publisher.enqueued)
+  finally:
+    await deferred.stop()
+
+  assert len(publisher.enqueued) == 1
+  # Same id on every attempt, so an enqueue whose first ack was merely slow is
+  # dropped by JetStream rather than replayed into a second position.
+  assert publisher.enqueued[0]["msg_id"] == "mid-1"
+
+
+async def test_deferred_enqueue_gives_up_after_max_attempts():
+  publisher = FakePublisher()
+  publisher.enqueue_failures = 99
+  deferred = DeferredEnqueuer(publisher, interval_seconds=0.01, max_attempts=3)
+  await deferred.start()
+  try:
+    deferred.submit(strategy="strat", envelope={"payload": {}}, msg_id="mid-2")
+    await _wait_until(lambda: deferred.pending == 0 and publisher.enqueue_failures < 99)
+    await asyncio.sleep(0.05)
+  finally:
+    await deferred.stop()
+
+  # 99 - 3 attempts spent; the envelope is dropped rather than retried forever.
+  assert publisher.enqueue_failures == 96
+  assert publisher.enqueued == []
+
+
+async def test_enqueue_reports_503_when_the_backlog_is_full():
+  deferred = DeferredEnqueuer(FakePublisher(), interval_seconds=0.01, maxsize=1)
+  service, publisher, _, _ = _make_service(deferred_enqueuer=deferred)
+  publisher.enqueue_failures = 2
+
+  first = await service.enqueue(_payload())
+  assert first["status"] == "deferred"
+
+  with pytest.raises(SignalError) as exc:
+    await service.enqueue(_payload())
+  assert exc.value.status_code == 503
 
 
 # ── Handler path (JetStream consumer) ────────────────────────────────

@@ -27,7 +27,10 @@ from broker.interfaces import (
   TradeRepository,
 )
 from broker.services.notification_service import TelegramNotification
-from broker.services.signal_processing_service import SignalProcessingService
+from broker.services.signal_processing_service import (
+  DeferredEnqueuer,
+  SignalProcessingService,
+)
 from broker.settings import settings
 
 
@@ -82,11 +85,24 @@ def get_publisher(request: Request) -> SignalPublisher:
   return request.app.state.publisher
 
 
+def get_deferred_enqueuer(request: Request) -> DeferredEnqueuer | None:
+  """The background enqueue-retry queue created during app startup.
+
+  Request-scoped like every other dependency here, but the object itself
+  outlives the request — the whole point is that it keeps retrying a webhook's
+  JetStream publish after that webhook has been answered. ``None`` when the app
+  was assembled without a lifespan (tests), which simply means a failed enqueue
+  is reported instead of retried.
+  """
+  return getattr(request.app.state, "deferred_enqueuer", None)
+
+
 def get_signal_service(
   signal_repository: SignalRepository = Depends(get_signal_repository),
   setting_repository: SettingRepository = Depends(get_setting_repository),
   publisher: SignalPublisher = Depends(get_publisher),
   notifier: Notifier = Depends(get_signals_notifier),
+  deferred_enqueuer: DeferredEnqueuer | None = Depends(get_deferred_enqueuer),
 ) -> SignalProcessingService:
   return SignalProcessingService(
     signal_repository=signal_repository,
@@ -94,4 +110,5 @@ def get_signal_service(
     publisher=publisher,
     notifier=notifier,
     webhook_secret=settings.webhook.SECRET,
+    deferred_enqueuer=deferred_enqueuer,
   )
