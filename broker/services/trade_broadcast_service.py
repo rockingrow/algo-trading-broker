@@ -9,6 +9,10 @@ events to the DB, and so the broadcast decision (which statuses count as
 
 Delivery is best-effort: a lookup failure or a failed send is logged and never
 propagates back into the TRADE consumer, which must still persist the event.
+It should also be *quick*: nats-py awaits this consumer's callback before it
+pulls the next TRADE message, so the app wraps the notifier in a
+``QueuedNotifier`` — a DM to a throttled Telegram would otherwise hold up the
+bookkeeping of every event behind it for the whole HTTP timeout.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from broker.constants import NOTIFICATION_TIMEZONE_KEY
 from broker.db.models import Trade
 from broker.domain.trade_status import TradeStatusPolicy
 from broker.helpers.message_formatter import format_completed_trade_message
-from broker.interfaces import SettingRepository, TradeBroadcastRepository
+from broker.interfaces import Notifier, SettingRepository, TradeBroadcastRepository
 from broker.logger import get_logger
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.trade_schema import TradeStatusEnum
@@ -34,7 +38,7 @@ class TradeBroadcastService:
     *,
     broadcast_repository: TradeBroadcastRepository,
     setting_repository: SettingRepository,
-    notifier: OwnerBroadcastNotifier | None = None,
+    notifier: Notifier | None = None,
     policy: TradeStatusPolicy | None = None,
   ) -> None:
     self._broadcasts = broadcast_repository

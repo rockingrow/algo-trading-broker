@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
@@ -31,16 +33,19 @@ class FakeAck:
 class FakeJS:
   def __init__(self):
     self.published: list[tuple[str, dict]] = []
+    self.calls: list[dict] = []
 
-  async def publish(self, subject, payload):
+  async def publish(self, subject, payload, timeout=None, headers=None):
     self.published.append((subject, json.loads(payload.decode())))
+    self.calls.append({"timeout": timeout, "headers": headers})
     return FakeAck(seq=len(self.published))
 
 
 class FakeConn:
-  def __init__(self):
+  def __init__(self, is_connected: bool = True):
     self.nc = FakeNC()
     self.js = FakeJS()
+    self.is_connected = is_connected
 
 
 def _signal(**overrides) -> TradingSignal:
@@ -260,6 +265,36 @@ async def test_publish_webhook_event_targets_jetstream_signal_subject():
   subject, body = conn.js.published[0]
   assert subject == "SIGNALS.wt_cross_v1"
   assert body["signal_id"] == "sig-123"
+
+
+async def test_publish_webhook_event_forwards_deadline_and_dedup_id():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_webhook_event(
+    signal_id="",
+    strategy="wt_cross_v1",
+    envelope={"payload": {"strategy": "wt_cross_v1"}},
+    timeout=0.75,
+    msg_id="abc123",
+  )
+
+  # The caller's deadline bounds the PubAck wait (nats-py would wait 5s), and
+  # the id lets JetStream drop a retry of an envelope it already stored.
+  assert conn.js.calls[0]["timeout"] == 0.75
+  assert conn.js.calls[0]["headers"] == {"Nats-Msg-Id": "abc123"}
+
+
+async def test_publish_webhook_event_fails_fast_while_disconnected():
+  conn = FakeConn(is_connected=False)
+  publisher = NatsPublisher(connection=conn)
+
+  # Buffering the write and waiting out the timeout for an ack that cannot
+  # arrive is exactly what costs TradingView its delivery.
+  with pytest.raises(ConnectionError):
+    await publisher.publish_webhook_event(
+      signal_id="", strategy="wt_cross_v1", envelope={"payload": {}}
+    )
+  assert conn.js.published == []
 
 
 async def test_replayed_signals_keep_the_live_signal_shape():

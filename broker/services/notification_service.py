@@ -5,6 +5,13 @@ broker/services/notification_service.py — Notification channels.
 Telegram message never blocks the event loop (previously a synchronous
 ``requests.post`` stalled the whole webhook handler for up to its timeout).
 
+Being non-blocking is not the same as being fast: a send to a throttled
+``api.telegram.org`` still *awaits* for the full ``TELEGRAM_HTTP_TIMEOUT``
+before raising ``httpx.ReadTimeout``, and any pipeline that awaits it inherits
+that delay. :class:`QueuedNotifier` decorates a channel so callers on a latency
+budget — the JetStream signal fan-out above all — hand the message off and move
+on.
+
 This module also owns the Telegram **error-log hook**. A standard
 :class:`logging.Handler` cannot ``await`` anything: ``emit`` is synchronous and
 may run from any context (sync code, the event loop, a worker thread). Yet
@@ -39,12 +46,11 @@ import httpx
 from broker.constants import SILENT_SIGNAL
 from broker.helpers import emoji_constants as em
 from broker.interfaces.db_protocol import SettingRepository
+from broker.interfaces.notifier_protocol import Notifier
 from broker.logger import get_logger
 from broker.settings import settings
 
 logger = get_logger("broker.services.notification_service")
-
-_HTTP_TIMEOUT = 5.0
 
 
 def _box(text: str) -> str:
@@ -106,7 +112,7 @@ class Notification(abc.ABC):
     }
 
     try:
-      async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
         response = await client.post(self.url, json=payload)
       if response.status_code != 200:
         logger.error(
@@ -169,6 +175,82 @@ class OwnerBroadcastNotifier(Notification):
       if bot_token is not None
       else settings.telegram.SERVICE_BOT_TOKEN
     )
+
+
+class QueuedNotifier:
+  """Wraps a :class:`Notifier` so sending never blocks the caller.
+
+  ``api.telegram.org`` is throttled or filtered on plenty of networks: the TCP
+  connection is accepted and then no response arrives, so a send sits there for
+  the whole ``TELEGRAM_HTTP_TIMEOUT`` before failing with
+  ``httpx.ReadTimeout``. On the signal path that delay is not cosmetic — the
+  JetStream ``SignalWorker`` processes envelopes one at a time, so every
+  further signal's fan-out to the trading workers waits behind a notification
+  nobody is reading yet.
+
+  ``send_message`` therefore only queues the text and returns; a single
+  background task performs the real sends, in order, at whatever pace Telegram
+  allows. The queue is bounded — under a long outage the oldest text is worth
+  more than an unbounded backlog, so a full queue drops the message with a
+  warning rather than blocking the pipeline it was meant to stay out of.
+  """
+
+  def __init__(self, inner: Notifier, *, maxsize: int = 200) -> None:
+    self._inner = inner
+    self._queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue(maxsize=maxsize)
+    self._task: asyncio.Task[None] | None = None
+
+  @property
+  def pending(self) -> int:
+    return self._queue.qsize()
+
+  async def start(self) -> None:
+    """Launch the drain task; safe to call once per app lifetime."""
+    if self._task is not None and not self._task.done():
+      return
+    self._task = asyncio.create_task(self._worker(), name="queued-notifier")
+
+  async def stop(self, drain_timeout: float = 3.0) -> None:
+    """Give the backlog a short grace period to flush, then cancel."""
+    if self._task is None:
+      return
+    try:
+      await asyncio.wait_for(self._queue.join(), timeout=drain_timeout)
+    except asyncio.TimeoutError:
+      logger.warning(
+        "Notification queue still holds %d message(s) at shutdown", self.pending
+      )
+    self._task.cancel()
+    try:
+      await self._task
+    except asyncio.CancelledError:
+      pass
+    self._task = None
+
+  async def send_message(self, message_text: str, chat_id: str | None = None) -> bool:
+    """Queue *message_text*. Returns False only when the backlog is full."""
+    try:
+      self._queue.put_nowait((message_text, chat_id))
+    except asyncio.QueueFull:
+      logger.warning(
+        "Notification queue full (%d) — dropping message", self._queue.maxsize
+      )
+      return False
+    return True
+
+  async def _worker(self) -> None:
+    while True:
+      message_text, chat_id = await self._queue.get()
+      try:
+        await self._inner.send_message(message_text, chat_id)
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        # send_message already logs its own failures; never let one kill the
+        # drain task, or notifications stop silently for the whole process.
+        pass
+      finally:
+        self._queue.task_done()
 
 
 # ── Telegram error-log hook ────────────────────────────────────────────────

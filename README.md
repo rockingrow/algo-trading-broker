@@ -187,12 +187,18 @@ Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their lo
 The webhook endpoint is a fast enqueue-only path. Everything else runs from a background handler, with a retry loop that can re-try failed signals a bounded number of times.
 
 1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
+   - That ack is waited for under a hard deadline (`WEBHOOK_ENQUEUE_TIMEOUT`, default `1.0s`). nats-py would otherwise wait `5s` for it, which is longer than TradingView waits for the whole request: one slow ack — a NATS reconnect, a busy file store — and the alert dies as **"request took too long and timed out"**, never to be re-sent.
+   - Past the deadline the envelope goes to the in-memory **`DeferredEnqueuer`**, the response is `202 {"status":"deferred"}`, and a background task keeps re-publishing it every `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` seconds up to `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` times. Giving up (or a full backlog) is logged at `error`. If the queue cannot take the envelope at all, the webhook answers `503` immediately — a refusal TradingView shows in its alert log beats a timeout it can only report as "too slow".
+   - Every enqueue carries a `Nats-Msg-Id` header that stays the same across those retries, and the stream sets a 120s `duplicate_window`. So a first publish whose ack was merely *slow* (the message did land) is de-duplicated by JetStream instead of reaching the workers twice as a second position.
+   - Each webhook response is logged with the elapsed milliseconds — raised to `warning` past the deadline — since TradingView's own timeout leaves no trace on the server.
 2. **`SignalWorker`** (`broker/services/signal_processing_service.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
 3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
 4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.signal.RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
 5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
 
 **Retry-aware notifications**: the Telegram signal / FLAT message carries an `Attempt: N` line on the 2nd and 3rd attempts (not on the fresh first attempt) so the operator sees when the broker is retrying.
+
+**Notifications never sit on the signal path**: the fan-out hands its Telegram message to a `QueuedNotifier` and moves on. `api.telegram.org` is throttled or filtered on many networks — the connection is accepted and no response arrives, so a send hangs for the whole `TELEGRAM_HTTP_TIMEOUT` — and the `SignalWorker` handles envelopes one at a time, so awaiting that send would delay the *next* signal's delivery to the trading workers by the same amount. NATS lifecycle alerts are queued for the same reason: nats-py awaits those callbacks inside its own reconnect loop.
 
 Enable JetStream on your NATS server (`nats-server -js -sd <path>`) — the bundled `docker-compose.yml` already does so and mounts the `nats_data` volume for durability.
 
@@ -356,6 +362,12 @@ WEBHOOK_PORT=80            # docker-compose defaults this to 8080 instead
 # "server closed the connection unexpectedly".
 WEBHOOK_KEEPALIVE_TIMEOUT=120
 
+# Seconds the webhook may wait for JetStream to ack the enqueue before it
+# answers anyway and keeps retrying in the background. Must stay well under
+# TradingView's own patience, or the alert dies as
+# "request took too long and timed out" — and TradingView never re-sends it.
+WEBHOOK_ENQUEUE_TIMEOUT=1.0
+
 # Optional HMAC secret — set the same value in TradingView alert header
 # X-Signature: <sha256-hex-of-body>
 # Leave blank to disable validation.
@@ -390,6 +402,7 @@ TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
 # Forward log records at ERROR level or above to Telegram.
 TELEGRAM_LOG_ERRORS_ENABLED=false
 TELEGRAM_LOG_DEDUP_WINDOW=60   # seconds — suppress identical messages
+TELEGRAM_HTTP_TIMEOUT=5.0      # seconds per Bot API call
 TELEGRAM_LOG_BOT_TOKEN=        # dedicated log bot (falls back to TELEGRAM_BOT_TOKEN)
 TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_CHAT_ID)
 
@@ -411,6 +424,8 @@ environment if you really need to:
 
 | Env var | In-code path | Default | Effect |
 | ------- | ------------ | ------- | ------ |
+| `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` | `settings.webhook.DEFERRED_ENQUEUE_INTERVAL` | `2.0` | Gap between background re-enqueue attempts after the webhook deadline expired |
+| `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` | `settings.webhook.DEFERRED_ENQUEUE_MAX_ATTEMPTS` | `15` | Re-enqueue attempts spent on one envelope before it is dropped (logged at `error`) |
 | `SIGNAL_MAX_ATTEMPTS` | `settings.signal.MAX_ATTEMPTS` | `3` | Total fan-out attempts before a signal is marked `FAILED` |
 | `SIGNAL_RETRY_INTERVAL_SECONDS` | `settings.signal.RETRY_INTERVAL_SECONDS` | `15` | Retry-job tick, and the minimum gap between two attempts on one row |
 | `JETSTREAM_SIGNAL_CONSUMER` | `settings.jetstream.SIGNAL_CONSUMER` | `broker_signal_handler` | Durable consumer name on the `SIGNALS` stream |
@@ -551,6 +566,8 @@ Returns `{"status": "ok"}`. No authentication required.
 ### POST `/secret/webhook`
 
 Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
+
+The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the response is still `202`, with `status=deferred`, and the enqueue is retried in the background (see [JetStream signal pipeline](#jetstream-signal-pipeline)). `503` means the enqueue failed *and* could not be deferred — the signal was dropped.
 
 **Example Payload:**
 

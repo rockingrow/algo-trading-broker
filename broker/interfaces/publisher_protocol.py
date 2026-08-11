@@ -11,7 +11,13 @@ class SignalPublisher(Protocol):
   """Publishes trading signals / directives to downstream subscribers."""
 
   async def publish_webhook_event(
-    self, *, signal_id: str, strategy: str, envelope: dict
+    self,
+    *,
+    signal_id: str,
+    strategy: str,
+    envelope: dict,
+    timeout: float | None = None,
+    msg_id: str | None = None,
   ) -> None: ...
 
   async def publish(self, signal: TradingSignal) -> None: ...
