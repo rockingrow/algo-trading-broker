@@ -89,7 +89,7 @@ docs:
     | Seq | Request | Method & Endpoint | Notes |
     | --- | --- | --- | --- |
     | 1 | [Commands - Flat](bruno/telegram/admin/Commands%20-%20Flat.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/commands/flat` | Publishes `AdminActionEnum.FLAT` scoped to the caller's account. Body (both optional): `strategy`, `symbol` |
-    | 2 | [Commands - Prevent](bruno/telegram/admin/Commands%20-%20Prevent.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/commands/prevent` | Publishes `BLOCK_SIGNAL`/`ALLOW_SIGNAL`. Body: `enabled` (`true` → block new entries, `false` → allow) |
+    | 2 | [Commands - Prevent](bruno/telegram/admin/Commands%20-%20Prevent.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/commands/prevent` | Persists `signal_blocked` on the account (`accounts.settings`, replayed to the worker on every connect) and publishes `BLOCK_SIGNAL`/`ALLOW_SIGNAL` live. Body: `enabled` (`true` → block new entries, `false` → allow). Response echoes the stored blob in `settings` |
 
     ---
 

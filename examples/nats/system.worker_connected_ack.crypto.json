@@ -6,6 +6,9 @@
     "wt_cross_v1": 20260617
   },
   "retry_signals": [],
+  "settings": {
+    "signal_blocked": true
+  },
   "crypto_leverage_init": {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10

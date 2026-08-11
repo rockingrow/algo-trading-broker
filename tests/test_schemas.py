@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from broker.schemas.account_schema import MarketTypeEnum
+from broker.constants import ACCOUNT_SETTING_SIGNAL_BLOCKED
+from broker.schemas.account_schema import AccountSettings, MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminActionEnum,
   AdminSignal,
   PublishTopicEnum,
+  SystemWorkerConnectedAck,
   TradingSignal,
   compose_admin_subject,
 )
@@ -231,6 +233,41 @@ def test_compose_admin_subject_from_string_market():
     compose_admin_subject("CRYPTO", "BINANCE", "7654321")
     == "ADMIN.CRYPTO.BINANCE.7654321"
   )
+
+
+# ── AccountSettings (accounts.settings ⇄ the ACK's settings block) ──
+
+
+def test_account_settings_default_to_no_command_ever_run():
+  # An account with `{}` in the column must still produce a complete block.
+  assert AccountSettings().model_dump() == {"signal_blocked": False}
+
+
+def test_account_settings_keys_match_the_constants():
+  # The constant is what the command endpoint writes into the JSONB blob and
+  # the field is what the worker reads out of the ACK — a rename that touches
+  # only one of them would silently stop persisting.
+  assert ACCOUNT_SETTING_SIGNAL_BLOCKED in AccountSettings.model_fields
+
+
+def test_account_settings_drops_unknown_keys():
+  # A key written by a newer broker is not forwarded to the worker (it stays in
+  # the row — writes merge rather than replace).
+  settings = AccountSettings(**{"signal_blocked": True, "from_the_future": "x"})
+  assert settings.model_dump() == {"signal_blocked": True}
+
+
+def test_account_settings_rejects_a_wrong_typed_value():
+  # Callers catch this and fall back to the defaults rather than failing a
+  # handshake; see _parse_account_settings.
+  with pytest.raises(ValidationError):
+    AccountSettings(signal_blocked="maybe")
+
+
+def test_worker_connected_ack_always_carries_a_settings_block():
+  ack = SystemWorkerConnectedAck(account_id="FOREX-MT5-1")
+  body = json.loads(ack.model_dump_json())
+  assert body["settings"] == {"signal_blocked": False}
 
 
 # ── PositionEvent ──────────────────────────────────────────────────

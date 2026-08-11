@@ -142,6 +142,16 @@ class AccountRepository(Protocol):
 
   async def rotate_link_token(self, account_id: str) -> uuid.UUID | None: ...
 
+  # Per-account settings blob (``accounts.settings``). Read by the
+  # WORKER_CONNECTED handshake, written by the bot command that changed one.
+  async def get_settings(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> dict: ...
+
+  async def update_settings(
+    self, account_uuid: uuid.UUID, patch: dict
+  ) -> dict | None: ...
+
 
 @runtime_checkable
 class TradeBroadcastRepository(Protocol):

@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MarketTypeEnum(str, Enum):
@@ -53,6 +53,46 @@ def decompose_worker_id(worker_id: str, market: str, gateway: str) -> str:
   """
   market = market.value if isinstance(market, MarketTypeEnum) else str(market)
   return worker_id.removeprefix(f"{market}-{gateway}-")
+
+
+class AccountSettings(BaseModel):
+  """The settings a bot user has set on an account with a command.
+
+  Persisted in the ``accounts.settings`` JSONB column and handed to the worker
+  in the ``settings`` block of its WORKER_CONNECTED_ACK, so a worker that
+  connects (or reconnects after being offline) starts from what the owner
+  actually set instead of from its own defaults. The ADMIN signal each command
+  publishes stays the *live* push; this is the durable copy replayed on
+  connect.
+
+  Every field has a default, so the block is always complete: a worker can read
+  ``settings.signal_blocked`` unconditionally, including for an account that
+  has never run a command (``{}`` in the DB).
+
+  Unknown keys read back from the row are dropped by pydantic's default
+  ``extra="ignore"`` — a worker only ever receives keys this broker version
+  knows. They are not *erased*, though: writes go through a JSONB merge
+  (``AccountRepository.update_settings``), so a key written by a newer broker
+  survives a round trip through an older one.
+
+  Adding a setting: declare a field here with its default, add its key to the
+  constants block in ``broker/constants.py``, and write it from the command's
+  endpoint. No migration — the column is a blob.
+  """
+
+  model_config = ConfigDict(
+    json_schema_extra={"example": {"signal_blocked": False}},
+  )
+
+  # Written by POST /v1/telegram/{id}/commands/prevent: /prevent sets it True
+  # (the endpoint publishes BLOCK_SIGNAL), /allow sets it False (ALLOW_SIGNAL).
+  signal_blocked: bool = Field(
+    default=False,
+    description=(
+      "True when the owner has blocked new entries for this account "
+      "(bot /prevent); False after /allow."
+    ),
+  )
 
 
 @dataclass

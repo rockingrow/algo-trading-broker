@@ -31,18 +31,20 @@ inbound consumption.
   reply. When a message carries a reply inbox (``msg.reply``), the broker
   answers *that one worker* directly with **exactly one** message:
 
-  * settings OK               → ``WORKER_CONNECTED_ACK``
-  * settings missing/invalid  → ``WORKER_CONNECTED_ERROR`` (with a reason)
+  * config OK                     → ``WORKER_CONNECTED_ACK``
+  * crypto config missing/invalid → ``WORKER_CONNECTED_ERROR`` (with a reason)
 
   One and only one, because that is all a reply inbox accepts: ``request()``
   resolves its future (or, ``old_style``, auto-unsubscribes at ``max_msgs=1``)
   on the first reply and silently drops anything after it. So the ACK carries
   the worker's entire initial configuration in a single payload — the
   ``strategy_magic_map`` filtered to the strategies it announced, the
-  ``retry_signals`` replay, and (crypto only) the ``crypto_leverage_init``
-  block. A crypto worker whose settings are missing or invalid gets the ERROR
-  instead: it is not told the handshake succeeded when the config it needs
-  could not be built.
+  ``retry_signals`` replay, the ``settings`` its owner set from the bot (the
+  ``accounts.settings`` blob, e.g. ``signal_blocked`` from /prevent), and
+  (crypto only) the ``crypto_leverage_init`` block. A crypto worker whose
+  broker-wide crypto settings are missing or invalid gets the ERROR instead:
+  it is not told the handshake succeeded when the config it needs could not be
+  built.
 
   Because every path replies, a worker's ``request`` always resolves instead
   of silently hanging, and the worker can retry on timeout (e.g. if the
@@ -64,7 +66,10 @@ inbound consumption.
   rather than running them concurrently. The two crypto BrokerSetting reads
   are combined into a single ``get_many`` query and cached briefly
   (``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``) so that burst doesn't turn into one
-  DB round trip per worker.
+  DB round trip per worker. The per-account ``settings`` read is deliberately
+  left uncached — it is scoped to one account, so caching it would only ever
+  serve the same worker reconnecting twice, at the cost of replying with a
+  block that a command run in the meantime has already invalidated.
 """
 
 from __future__ import annotations
@@ -99,7 +104,11 @@ from broker.interfaces import (
 )
 from broker.logger import get_logger
 from broker.nats import JETSTREAM_SIGNAL_SUBJECT_PREFIX, NatsClient, nats_client
-from broker.schemas.account_schema import MarketTypeEnum, decompose_worker_id
+from broker.schemas.account_schema import (
+  AccountSettings,
+  MarketTypeEnum,
+  decompose_worker_id,
+)
 from broker.schemas.core import MarketEnum, SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminSignal,
@@ -138,6 +147,36 @@ def _jetstream_subject(strategy: str) -> str:
 # so a short TTL is a deliberate trade-off between freshness and load: an
 # admin update reaches new handshakes within CRYPTO_SETTINGS_CACHE_TTL_SECONDS.
 CRYPTO_SETTINGS_CACHE_TTL_SECONDS = 30.0
+
+
+def _parse_account_settings(raw: object, account_id: str) -> AccountSettings:
+  """Shape an ``accounts.settings`` blob into the ACK's ``settings`` block.
+
+  Anything unusable — a row that predates the column, a hand-edited value of
+  the wrong type, a key whose value doesn't fit its field — falls back to the
+  schema defaults rather than raising: a bad blob must not cost the worker its
+  whole configuration, and "no settings" is exactly what the defaults mean.
+  Unknown keys are dropped by the model itself (``extra="ignore"``); they stay
+  in the row, since writes merge rather than replace.
+  """
+  if not isinstance(raw, dict):
+    if raw is not None:
+      log.warning(
+        "accounts.settings for account_id=%s is not an object, got %s — using defaults",
+        account_id,
+        type(raw).__name__,
+      )
+    return AccountSettings()
+  try:
+    return AccountSettings(**raw)
+  except ValidationError as exc:
+    log.error(
+      "accounts.settings for account_id=%s is invalid: %s | raw=%r — using defaults",
+      account_id,
+      exc,
+      raw,
+    )
+    return AccountSettings()
 
 
 def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
@@ -264,8 +303,9 @@ class SystemEventConsumer:
   """Consumes SYSTEM events from NATS and answers the WORKER_CONNECTED handshake.
 
   Answers with a single WORKER_CONNECTED_ACK carrying the worker's whole initial
-  configuration (strategy magic map, retry replay, and the crypto leverage block
-  for crypto workers), because a reply inbox only accepts one message.
+  configuration (strategy magic map, retry replay, the account's own settings,
+  and the crypto leverage block for crypto workers), because a reply inbox only
+  accepts one message.
   """
 
   SUBJECT = PublishTopicEnum.SYSTEM
@@ -381,12 +421,14 @@ class SystemEventConsumer:
 
     magic_map = await self._build_strategy_magic_map(event.strategies)
     retry_signals = await self._build_retry_signals(event.account_id, event.strategies)
+    account_settings = await self._build_account_settings(event)
 
     await self._reply_ack(
       reply_to,
       event.account_id,
       strategy_magic_map=magic_map,
       retry_signals=retry_signals,
+      settings=account_settings,
       crypto_leverage_init=crypto_leverage,
     )
 
@@ -416,6 +458,35 @@ class SystemEventConsumer:
         account_id,
         exc,
       )
+
+  async def _build_account_settings(
+    self, event: SystemWorkerConnectedSignal
+  ) -> AccountSettings:
+    """Return what the account's owner set from the bot (``/prevent`` & co.).
+
+    Read straight from the row on every handshake — deliberately *not* cached
+    like the broker-wide settings: this one is per account, so a cache would
+    only ever help a worker that reconnects twice in a row, and would be worth
+    a stale block the moment a user runs a command mid-storm.
+
+    Not cached also means not fatal: a failed read logs and hands the worker
+    the schema defaults, same as an account that has never run a command.
+    """
+    account_id = decompose_worker_id(event.account_id, event.market, event.gateway)
+    try:
+      raw = await self._accounts.get_settings(
+        account_id=account_id,
+        market=MarketTypeEnum(event.market),
+        gateway=event.gateway,
+      )
+    except Exception as exc:
+      log.exception(
+        "SYSTEM settings lookup failed account_id=%s: %s — using defaults",
+        account_id,
+        exc,
+      )
+      return AccountSettings()
+    return _parse_account_settings(raw, account_id)
 
   async def _build_strategy_magic_map(self, strategies: list[str]) -> dict[str, int]:
     """Return the strategy → magic-number map filtered to *strategies*.
@@ -615,6 +686,7 @@ class SystemEventConsumer:
     *,
     strategy_magic_map: dict[str, int],
     retry_signals: list[TradingSignal],
+    settings: AccountSettings,
     crypto_leverage_init: Optional[CryptoLeverageConfig] = None,
   ) -> None:
     """Answer the handshake with the worker's complete initial configuration.
@@ -629,6 +701,7 @@ class SystemEventConsumer:
         account_id=account_id,
         strategy_magic_map=strategy_magic_map,
         retry_signals=retry_signals,
+        settings=settings,
         crypto_leverage_init=crypto_leverage_init,
       )
     except Exception as exc:
@@ -811,8 +884,8 @@ class NatsPublisher:
 
   async def publish_system_ack(self, *, subject: str | None = None, **kwargs) -> None:
     """Answer a WORKER_CONNECTED handshake with the worker's whole initial
-    configuration — magic map, signal replay and (crypto only) leverage config —
-    in the one message a NATS reply inbox accepts.
+    configuration — magic map, signal replay, account settings and (crypto
+    only) leverage config — in the one message a NATS reply inbox accepts.
 
     Delivered on *subject* (the request's reply inbox) when set, so only the
     worker that asked sees its own configuration; otherwise broadcast on the

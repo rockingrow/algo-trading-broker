@@ -23,6 +23,7 @@ from sqlalchemy import (
   func,
   Integer,
   UniqueConstraint,
+  text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from broker.schemas.account_schema import MarketTypeEnum
@@ -226,6 +227,32 @@ class Account(Base):
 
   last_activity_at: Mapped[datetime | None] = mapped_column(
     DateTime(timezone=True), nullable=True
+  )
+
+  # Per-account settings the owner toggles with a bot command (today only
+  # ``signal_blocked``, from /prevent and /allow — see
+  # :class:`broker.schemas.account_schema.AccountSettings`). Sent to the worker
+  # in the ``settings`` block of its WORKER_CONNECTED_ACK, so a worker that
+  # (re)connects picks up what was set while it was offline instead of coming
+  # up with defaults.
+  #
+  # JSONB rather than one boolean column per command: the set of commands grows
+  # and each new toggle would otherwise cost a migration, while the whole blob
+  # travels to the worker as a single object anyway. It also beats TEXT holding
+  # JSON (as ``broker_settings.value`` does) because Postgres can then merge a
+  # single key server-side — ``settings || '{"k": v}'`` in
+  # ``AccountRepository.update_settings`` — instead of the read-modify-write
+  # that loses a concurrent command's update, and the column stays queryable
+  # (``WHERE settings @> '{"signal_blocked": true}'``, GIN-indexable) if a
+  # future admin view needs it.
+  #
+  # NOT NULL with a ``{}`` default so readers never have to distinguish "no
+  # settings" from NULL; an account that has never run a command has ``{}``.
+  settings: Mapped[dict] = mapped_column(
+    JSONB,
+    nullable=False,
+    default=dict,
+    server_default=text("'{}'::jsonb"),
   )
 
   # No bot/chat-platform columns live here on purpose: an account is a trading

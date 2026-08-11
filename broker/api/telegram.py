@@ -18,6 +18,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from broker.constants import ACCOUNT_SETTING_SIGNAL_BLOCKED
 from broker.db.models import Account
 from broker.interfaces import (
   AccountRepository,
@@ -260,10 +261,27 @@ def get_telegram_router() -> APIRouter:
     body: PreventCommandRequest,
     account: Account = Depends(get_linked_account),
     publisher: SignalPublisher = Depends(get_publisher),
+    account_repo: AccountRepository = Depends(get_account_repository),
   ) -> CommandResultResponse:
     action = (
       AdminActionEnum.BLOCK_SIGNAL if body.enabled else AdminActionEnum.ALLOW_SIGNAL
     )
+    # Persist before publishing, not after. The ADMIN signal only reaches a
+    # worker that is connected *right now*; ``accounts.settings`` is what the
+    # WORKER_CONNECTED_ACK replays on every (re)connect, so it — not the
+    # publish — is what makes the command stick. Doing it in this order means a
+    # DB failure fails the command outright (nothing published, nothing half
+    # applied), while a NATS failure still leaves the intent recorded for the
+    # worker to pick up when it comes back.
+    settings = await account_repo.update_settings(
+      account.id, {ACCOUNT_SETTING_SIGNAL_BLOCKED: body.enabled}
+    )
+    if settings is None:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to persist account settings",
+      )
+
     await publisher.publish_admin_signal(
       action=action,
       timestamp=datetime.now(timezone.utc),
@@ -272,8 +290,10 @@ def get_telegram_router() -> APIRouter:
       gateway=account.gateway,
     )
     scope = _scope(account.account_id, strategy=None, symbol=None)
-    log.info("Telegram %s published scope=%s", action.value, scope)
-    return CommandResultResponse(action=action.value, scope=scope)
+    log.info(
+      "Telegram %s published scope=%s settings=%s", action.value, scope, settings
+    )
+    return CommandResultResponse(action=action.value, scope=scope, settings=settings)
 
   # ── Completed-trade broadcast opt-in ─────────────────────────────
   # A per-user preference (spans every account the user holds), so these are

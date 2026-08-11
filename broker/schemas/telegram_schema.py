@@ -78,6 +78,13 @@ class CommandResultResponse(BaseModel):
   action: str
   scope: str
   status: str = "published"
+  # The account's settings blob after the command, for commands that change one
+  # (``/prevent`` and ``/allow`` write ``signal_blocked``). ``None`` for a
+  # command that only publishes and stores nothing, like FLAT.
+  settings: Optional[dict] = Field(
+    default=None,
+    description="Account settings after the command; null if it changed none.",
+  )
 
 
 class BroadcastSubscriptionResponse(BaseModel):

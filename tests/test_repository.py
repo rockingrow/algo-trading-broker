@@ -10,6 +10,7 @@ own logic (field mapping, lifecycle rules), not SQLAlchemy itself.
 from __future__ import annotations
 
 import contextlib
+import uuid
 from datetime import datetime, timezone
 
 
@@ -634,6 +635,105 @@ async def test_upsert_gateway_swallows_db_error(monkeypatch):
   )
 
 
+# ── AccountRepository settings (accounts.settings JSONB) ──────────────
+
+
+async def test_get_settings_returns_the_blob(monkeypatch):
+  session = FakeSession(results=[[{"signal_blocked": True}]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_settings(
+    "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+  assert result == {"signal_blocked": True}
+
+
+async def test_get_settings_empty_for_unknown_account(monkeypatch):
+  _patch_session(monkeypatch, FakeSession(results=[[]]))
+
+  result = await SqlAlchemyAccountRepository().get_settings(
+    "nope", MarketTypeEnum.FOREX, "MT5"
+  )
+  # The worker gets the schema defaults rather than a failed handshake.
+  assert result == {}
+
+
+async def test_get_settings_swallows_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+
+  result = await SqlAlchemyAccountRepository().get_settings(
+    "acc-1", MarketTypeEnum.FOREX, "MT5"
+  )
+  assert result == {}
+
+
+async def test_update_settings_returns_the_merged_blob(monkeypatch):
+  # The merge itself is Postgres' `||`, so what the repository must get right
+  # is returning what came back rather than what it sent.
+  session = FakeSession(
+    results=[[{"signal_blocked": True, "kept_by_the_merge": "yes"}]]
+  )
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+  assert result == {"signal_blocked": True, "kept_by_the_merge": "yes"}
+
+
+async def test_update_settings_none_for_unknown_account(monkeypatch):
+  # UPDATE ... RETURNING matched no row.
+  _patch_session(monkeypatch, FakeSession(results=[[]]))
+
+  result = await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+  # None is what makes the command endpoint answer 500 instead of silently
+  # dropping the user's setting.
+  assert result is None
+
+
+async def test_update_settings_none_on_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+
+  result = await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+  assert result is None
+
+
+async def test_update_settings_merges_server_side(monkeypatch):
+  """The statement must be a jsonb merge, not a read-modify-write: two
+  commands landing together would otherwise drop each other's keys."""
+  captured: list[str] = []
+
+  class CapturingSession(FakeSession):
+    async def execute(self, stmt):
+      captured.append(str(stmt))
+      return await super().execute(stmt)
+
+  session = CapturingSession(results=[[{"signal_blocked": True}]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+
+  assert len(captured) == 1
+  sql = captured[0]
+  assert sql.startswith("UPDATE accounts SET settings=")
+  assert "||" in sql
+  assert "RETURNING accounts.settings" in sql
+
+
 # ── AccountRepository.create_account (admin manual registration) ──────
 
 
@@ -696,7 +796,6 @@ async def test_create_account_swallows_db_error(monkeypatch):
 # ``platform_user_id`` is a *string* on the row even though callers pass an int.
 
 
-import uuid  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 
 
