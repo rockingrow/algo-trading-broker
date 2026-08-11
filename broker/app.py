@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
+import re
 import time
 import traceback
 
@@ -202,6 +203,37 @@ def install_webhook_connection_close(app: FastAPI) -> None:
     return response
 
 
+_REDACTED = "***"
+
+# Keys whose value is a shared secret rather than data worth logging. The
+# webhook's ``token`` *is* WEBHOOK_SECRET, and a rejected alert's body — the
+# whole of it, before this — went straight into the 422 log line.
+_SECRET_KEYS = frozenset({"token"})
+
+# Same secret seen inside a raw (unparsed) body. The trailing alternative
+# catches a value the snippet window cut in half.
+_SECRET_IN_TEXT = re.compile(r'("token"\s*:\s*")(?:[^"]*"|[^"]*$)')
+
+
+def redact_secrets(value):
+  """Replace secret values anywhere in *value* — dict, list, or raw body text.
+
+  A validation error carries the offending input back to the caller, so
+  everything the webhook was sent (its ``token`` included) reaches the log and
+  the response body unless it is scrubbed here first.
+  """
+  if isinstance(value, dict):
+    return {
+      key: (_REDACTED if key in _SECRET_KEYS else redact_secrets(item))
+      for key, item in value.items()
+    }
+  if isinstance(value, list):
+    return [redact_secrets(item) for item in value]
+  if isinstance(value, str):
+    return _SECRET_IN_TEXT.sub(rf'\1{_REDACTED}"', value)
+  return value
+
+
 def json_syntax_error(errors: list) -> str | None:
   """Describe *where* a rejected body stopped being valid JSON, if that is why.
 
@@ -228,8 +260,9 @@ def json_syntax_error(errors: list) -> str | None:
       json.loads(raw)
     except json.JSONDecodeError as exc:
       # A window around the offending character — the whole alert body is
-      # hundreds of fields long and unreadable in a log line.
-      snippet = raw[max(0, exc.pos - 40) : exc.pos + 40]
+      # hundreds of fields long and unreadable in a log line. Sliced before
+      # redacting so the reported position still matches the body as sent.
+      snippet = redact_secrets(raw[max(0, exc.pos - 40) : exc.pos + 40])
       return f"{exc.msg} at line {exc.lineno} column {exc.colno} — near: …{snippet}…"
     except ValueError:
       continue
@@ -241,8 +274,10 @@ def install_exception_handlers(app: FastAPI) -> None:
 
   @app.exception_handler(RequestValidationError)
   async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    errors = jsonable_encoder(exc.errors())
-    json_error = json_syntax_error(errors)
+    # Position first (needs the body as sent), secrets scrubbed second.
+    raw_errors = jsonable_encoder(exc.errors())
+    json_error = json_syntax_error(raw_errors)
+    errors = redact_secrets(raw_errors)
     if json_error:
       log.warning(
         "422 Unprocessable Content | %s %s | body is not valid JSON: %s",

@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of only logging the config mismatch, so deployments created before
   this change pick the window up on their next start.
 
+- **The webhook token no longer leaks into the logs** — A rejected alert is
+  reported with the offending input attached, so the entire body — `token`
+  included, which *is* `WEBHOOK_SECRET` — was written to the `422` log line
+  and returned in the response. Secret values are now redacted in both,
+  whether the body arrived parsed (a field-level error) or as raw text (a JSON
+  syntax error). Anyone whose logs already carry a rejected alert should
+  rotate the secret.
 - **A malformed alert body now says where it broke** — TradingView parses an
   alert message itself and, when that fails, posts it as `text/plain`; FastAPI
   then hands the raw body to the model and pydantic answers `Input should be a
