@@ -61,6 +61,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admin FLAT already reads `Status: FLAT`, so it is not repeated as
   `FLAT (FLAT)`.
 
+### Changed
+
+- **Bot: an unlinked user is shown `/start` and nothing else** — The command
+  menu of a Telegram user with no linked account is now trimmed to `/start`;
+  `/help` goes with the rest, since it is a tour of commands that all need an
+  account behind them (and is refused with them until one is linked). Link
+  status is re-checked on **every** update, so the menu also corrects itself
+  after a change made elsewhere — an `/admin_rotate` that unlinked the user, an
+  `/admin_linkaccount` that linked them — and it is re-applied the moment they
+  link or `/unlink`, rather than on their next message. The full menu comes
+  back exactly when an account is linked. Admins keep their `admin_` commands
+  either way (those never needed a linked account) and lose only the user half
+  of the menu while unlinked. A broker that can't be reached leaves the menu
+  untouched: an outage is not evidence that anyone unlinked. The menu last
+  applied to each chat is remembered in-process, so a linked user chatting
+  away costs no extra Telegram calls, and the account resolved for the menu is
+  handed to `AuthMiddleware`, so the check costs no extra broker calls either.
+
 ### Fixed
 
 - **TradingView webhook: `request took too long and timed out`** — The webhook

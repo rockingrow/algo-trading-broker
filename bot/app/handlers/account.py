@@ -23,6 +23,7 @@ from app.utils.pagination import paginate
 from app.utils.telegram import safe_edit_text
 from app.keyboards import inline
 from app.services.broker_client import BrokerClientUser
+from app.services.menu import CommandMenu
 
 router = Router(name="account")
 
@@ -194,8 +195,14 @@ async def cmd_unlink(message: Message, account: dict[str, Any]) -> None:
 
 
 @router.callback_query(F.data == "unlink:confirm")
-async def cb_unlink(call: CallbackQuery, broker: BrokerClientUser) -> None:
+async def cb_unlink(
+  call: CallbackQuery, broker: BrokerClientUser, menu: CommandMenu
+) -> None:
   ok = await broker.unlink(call.from_user.id)
+  if ok:
+    # Unlinking drops the *active* account, and the user may still hold others,
+    # so the broker decides whether the commands go away — not this handler.
+    await menu.refresh(call.bot, broker, call.from_user.id)
   await safe_edit_text(
     call.message,
     f"{emojis.CHECK} Unlinked. Type /start to link again."

@@ -12,6 +12,7 @@ from aiogram.types import Message
 from app import emojis
 from app.presenters import messages
 from app.services.broker_client import BrokerClientUser
+from app.services.menu import CommandMenu
 from app.states import LinkAccount
 from app.utils.invite import parse_code
 
@@ -48,7 +49,11 @@ async def cmd_link(
 
 
 async def apply_link_token(
-  message: Message, state: FSMContext, broker: BrokerClientUser, raw: str
+  message: Message,
+  state: FSMContext,
+  broker: BrokerClientUser,
+  raw: str,
+  menu: CommandMenu,
 ) -> bool:
   """Link the account behind code *raw* to the sender, answering with the
   outcome either way; returns whether it worked.
@@ -71,6 +76,9 @@ async def apply_link_token(
     return False
 
   await state.clear()
+  # The user arrived here with the /start-only menu; hand them the full one now
+  # rather than on their next message.
+  await menu.sync(message.bot, message.from_user.id, linked=True)
   headline = (
     f"{emojis.CHECK} <b>Linked successfully!</b>"
     if account.get("is_active")
@@ -90,9 +98,9 @@ async def apply_link_token(
 # Only treat non-command text as a candidate token while onboarding.
 @router.message(LinkAccount.waiting_for_token, F.text & ~F.text.startswith("/"))
 async def receive_token(
-  message: Message, state: FSMContext, broker: BrokerClientUser
+  message: Message, state: FSMContext, broker: BrokerClientUser, menu: CommandMenu
 ) -> None:
-  await apply_link_token(message, state, broker, message.text or "")
+  await apply_link_token(message, state, broker, message.text or "", menu)
 
 
 # Non-text messages (photo, sticker…) while onboarding: prompt for UUID as text.

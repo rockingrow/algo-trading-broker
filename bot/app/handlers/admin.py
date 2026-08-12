@@ -46,6 +46,7 @@ from app.constants import (
 )
 from app.filters.is_admin import IsAdmin
 from app.presenters import messages
+from app.services.menu import CommandMenu
 from app.states import (
   AdminCryptoAllowedSymbol,
   AdminCryptoMaxLeverage,
@@ -392,7 +393,10 @@ async def cb_admin_linkaccount_pick(call: CallbackQuery, state: FSMContext) -> N
   AdminLinkAccount.waiting_for_telegram_id, F.text & ~F.text.startswith("/")
 )
 async def receive_link_telegram_id(
-  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+  message: Message,
+  state: FSMContext,
+  broker_admin: BrokerClientAdmin,
+  menu: CommandMenu,
 ) -> None:
   raw = (message.text or "").strip()
   if not raw.isdigit():
@@ -416,6 +420,9 @@ async def receive_link_telegram_id(
       "Run /admin_linkaccount to retry."
     )
     return
+  # The user linked from here has been sitting on the /start-only menu; give
+  # them their commands now instead of when they next message the bot.
+  await menu.sync(message.bot, int(raw), linked=True)
   await message.answer(messages.AdminMessages.format_linked_account(account, int(raw)))
 
 

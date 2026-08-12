@@ -16,12 +16,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from app.commands import setup_bot_commands
 from app.config import settings
 from app.handlers import get_routers
 from app.logger import get_logger
 from app.middlewares.deps import DepsMiddleware
+from app.middlewares.menu import CommandMenuMiddleware
 from app.services.broker_client import BrokerClientAdmin, BrokerClientUser
+from app.services.menu import CommandMenu
 
 log = get_logger("bot")
 
@@ -40,19 +41,24 @@ async def main() -> None:
   broker = BrokerClientUser(**broker_kwargs)
   broker_admin = BrokerClientAdmin(**broker_kwargs)
 
+  admin_ids = settings.admin_ids
+  menu = CommandMenu(admin_ids)
+
   dp = Dispatcher(storage=MemoryStorage())
   dp.update.outer_middleware(DepsMiddleware(broker, broker_admin))
+  # After DepsMiddleware: it needs the broker client to resolve the sender's
+  # account, and hands that account on to AuthMiddleware.
+  dp.update.outer_middleware(CommandMenuMiddleware(menu))
   for router in get_routers():
     dp.include_router(router)
 
   async def on_startup() -> None:
-    admin_ids = settings.admin_ids
     log.info(
       "Bot starting — broker base_url=%s, admins=%d",
       settings.BOT_BROKER_BASE_URL,
       len(admin_ids),
     )
-    await setup_bot_commands(bot, admin_ids)
+    await menu.setup(bot, broker)
 
   async def on_shutdown() -> None:
     log.info("Bot shutting down — closing resources")

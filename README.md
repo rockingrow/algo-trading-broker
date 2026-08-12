@@ -943,10 +943,13 @@ broker endpoints with the broker `X-API-KEY`.
 > only covers what the *broker* side needs to know: the data model backing the
 > bot and the endpoints it calls.
 
-Command menus are role-aware (Telegram command **scopes**) and re-initialised on
-every startup: endusers get the default menu; each id in `TELEGRAM_ADMIN_IDS`
-gets an extended admin menu (`/accounts`, `/newaccount`, `/atrades`, `/aflat`,
-`/rotate`, `/settings`).
+Command menus are role-aware **and** link-aware (Telegram command **scopes**): a
+user with no linked account sees `/start` and nothing else — every other
+command, `/help` included, needs an account behind it — and the full menu
+appears the moment they link. Each id in `TELEGRAM_ADMIN_IDS` additionally gets
+the admin menu (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
+`/admin_flat`, `/admin_rotate`, `/admin_settings`, …), which is not gated on
+linking.
 
 **Onboarding / auth flow**
 
