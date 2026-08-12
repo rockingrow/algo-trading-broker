@@ -398,8 +398,9 @@ TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
 TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
-# Both accept a comma-separated list, and an entry may address one topic of a
-# group with Topics enabled: -1002173777783_924584 (see below).
+# Every chat id (incl. TELEGRAM_LOG_CHAT_ID) accepts a comma-separated list,
+# and an entry may address one topic of a group with Topics enabled:
+# -1002173777783_924584 (see below).
 
 # Forward log records at ERROR level or above to Telegram.
 TELEGRAM_LOG_ERRORS_ENABLED=false
@@ -420,13 +421,17 @@ BOT_REQUEST_TIMEOUT=10.0
 
 ### Telegram chat ids: many chats, and group topics
 
-Every `TELEGRAM_*CHAT*_ID` above is parsed the same way, so one channel can
-reach several chats and can address a **topic** inside a group that has the
-Topics feature switched on:
+`TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_CHANNEL_ID` and `TELEGRAM_LOG_CHAT_ID` are
+all parsed the same way — none of them is special — so each can reach several
+chats and can address a **topic** inside a group that has the Topics feature
+switched on:
 
 ```bash
 # Two groups + one topic inside a third, all from one setting
 TELEGRAM_CHAT_CHANNEL_ID="-1001111111111,@public_channel,-1002173777783_924584"
+# The same syntax works for the management chat and the error-log chat
+TELEGRAM_CHAT_ID="-1001111111111,-1002173777783_100"
+TELEGRAM_LOG_CHAT_ID="-1002173777783_555"
 ```
 
 | Entry | Delivered to |
@@ -454,6 +459,11 @@ Notes:
   chat (bot kicked, topic deleted) is logged without stopping the others.
 - Whitespace and empty entries are ignored, and a chat listed twice is only
   notified once.
+- An empty `TELEGRAM_LOG_CHAT_ID` still falls back to `TELEGRAM_CHAT_ID`,
+  list and topics included.
+- Completed-trade owner DMs take their chat id from the database rather than
+  from `.env`, but run through the same parsing, so nothing has to special-case
+  a plain user id.
 
 ### Not in `.env`
 

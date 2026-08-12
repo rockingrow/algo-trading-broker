@@ -199,6 +199,93 @@ async def test_chat_id_that_parses_to_nothing_is_a_noop(monkeypatch):
   assert sent == []
 
 
+# ── every chat-id *setting* takes a list, not just the signals channel ──
+#
+# The parsing lives in one place (``Notification.send_message``), but each
+# setting reaches it by a different route — a default argument, a provider, a
+# subclass with its own fallback — so each route is pinned here.
+
+
+def _targets_of(sent):
+  """(chat_id, message_thread_id) actually posted, in order."""
+  return [(p["chat_id"], p.get("message_thread_id")) for _, p in sent]
+
+
+async def test_management_chat_id_setting_takes_a_list(monkeypatch):
+  """TELEGRAM_CHAT_ID — broker lifecycle + admin notifications."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "CHAT_ID", "-100111,-1002173777783_924584")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  # No chat_id argument: the channel falls back to the setting.
+  await TelegramNotification().send_message("hi")
+
+  assert _targets_of(sent) == [("-100111", None), ("-1002173777783", 924584)]
+
+
+async def test_signals_channel_setting_takes_a_list(monkeypatch):
+  """TELEGRAM_CHAT_CHANNEL_ID — published trade alerts, via the provider."""
+  from broker.providers import make_signals_notifier
+
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(
+    ns.settings.telegram, "CHAT_CHANNEL_ID", "-100111,-1002173777783_924584"
+  )
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = make_signals_notifier(FakeSettingRepo(value="0"))
+  await notifier.send_message("signal")
+
+  assert _targets_of(sent) == [("-100111", None), ("-1002173777783", 924584)]
+
+
+async def test_log_chat_id_setting_takes_a_list(monkeypatch):
+  """TELEGRAM_LOG_CHAT_ID — forwarded ERROR logs."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "LOG_BOT_TOKEN", "")
+  monkeypatch.setattr(
+    ns.settings.telegram, "LOG_CHAT_ID", "-100999,-1002173777783_924584"
+  )
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  await ns.TelegramLogNotification().send_message("boom")
+
+  assert _targets_of(sent) == [("-100999", None), ("-1002173777783", 924584)]
+
+
+async def test_log_chat_id_falls_back_to_the_management_list(monkeypatch):
+  """An unset TELEGRAM_LOG_CHAT_ID inherits TELEGRAM_CHAT_ID — list included."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "LOG_BOT_TOKEN", "")
+  monkeypatch.setattr(ns.settings.telegram, "LOG_CHAT_ID", "")
+  monkeypatch.setattr(ns.settings.telegram, "CHAT_ID", "-100111,-100222_7")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  await ns.TelegramLogNotification().send_message("boom")
+
+  assert _targets_of(sent) == [("-100111", None), ("-100222", 7)]
+
+
+async def test_owner_broadcast_chat_id_takes_a_list(monkeypatch):
+  """Per-call chat ids (owner DMs) go through the same parsing."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = ns.OwnerBroadcastNotifier(bot_token="svc-tok")
+  await notifier.send_message("closed", chat_id="555,777_3")
+
+  assert _targets_of(sent) == [("555", None), ("777", 3)]
+
+
 async def test_non_200_is_handled_gracefully(monkeypatch):
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")

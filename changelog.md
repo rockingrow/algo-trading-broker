@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Telegram notifications reach several chats, and land in the right group
-  topic** — Every chat-id setting (`TELEGRAM_CHAT_CHANNEL_ID`,
-  `TELEGRAM_CHAT_ID`, `TELEGRAM_LOG_CHAT_ID`) now takes a comma-separated
-  list, so one channel can fan out to several groups, and an entry may address
+  topic** — Every chat-id setting takes a comma-separated list — the signals
+  channel `TELEGRAM_CHAT_CHANNEL_ID`, the management chat `TELEGRAM_CHAT_ID`
+  and the error-log chat `TELEGRAM_LOG_CHAT_ID` alike, plus the per-call chat
+  ids used for completed-trade owner DMs; none of them is special-cased, since
+  they all resolve through one parser. So one channel can fan out to several
+  groups, and an entry may address
   a single **topic** of a supergroup that has the Topics feature enabled by
   suffixing the topic id: `-1002173777783_924584`. Such an entry is split into
   the chat and its `message_thread_id` — the Bot API field for "the target
