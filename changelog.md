@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] - 2026-08-12
+
+### Added
+
+- **Telegram notifications reach several chats, and land in the right group
+  topic** — Every chat-id setting (`TELEGRAM_CHAT_CHANNEL_ID`,
+  `TELEGRAM_CHAT_ID`, `TELEGRAM_LOG_CHAT_ID`) now takes a comma-separated
+  list, so one channel can fan out to several groups, and an entry may address
+  a single **topic** of a supergroup that has the Topics feature enabled by
+  suffixing the topic id: `-1002173777783_924584`. Such an entry is split into
+  the chat and its `message_thread_id` — the Bot API field for "the target
+  message thread (topic) of a forum" — which is the only way a bot can post
+  into a specific topic instead of *General*; both numbers are the ones in the
+  topic's link (`t.me/c/2173777783/924584`). The field is sent **only** for
+  topic entries, since Telegram answers `400 Bad Request: message thread not
+  found` when it is passed for a chat without that thread. Only numeric chat ids may carry
+  the suffix, so a username that itself contains underscores (`@my_group_2`)
+  is never mistaken for one; plain ids, user ids and `@username` handles are
+  unchanged. Each chat gets its own Bot API call, all issued concurrently so a
+  slow group costs one `TELEGRAM_HTTP_TIMEOUT` for the batch rather than one
+  each, and a chat that rejects the send (bot kicked, topic deleted) is logged
+  without stopping delivery to the rest.
+
 ## [1.1.4] - 2026-08-11
 
 ### Fixed

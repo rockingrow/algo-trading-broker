@@ -4,9 +4,11 @@ import httpx
 
 from broker.services import notification_service as ns
 from broker.services.notification_service import (
+  ChatTarget,
   QueuedNotifier,
   TelegramNotification,
   _box,
+  parse_chat_targets,
 )
 
 
@@ -76,6 +78,125 @@ async def test_happy_path_posts_to_telegram(monkeypatch):
   assert payload["chat_id"] == "chat-123"
   assert payload["parse_mode"] == "HTML"
   assert payload["text"] == "<pre>hello world</pre>"
+
+
+# ── chat targets: multiple groups & forum topics ────────────────────
+
+
+def test_parse_chat_targets_keeps_a_plain_chat_id_untouched():
+  assert parse_chat_targets("-1001111111111") == [ChatTarget("-1001111111111")]
+
+
+def test_parse_chat_targets_splits_a_topic_suffix():
+  # "<chat id>_<topic id>" is what a group with Topics enabled looks like.
+  assert parse_chat_targets("-1002173777783_924584") == [
+    ChatTarget("-1002173777783", 924584)
+  ]
+
+
+def test_parse_chat_targets_reads_a_comma_separated_list():
+  raw = " -1001111111111 ,-1002173777783_924584,, @public_channel "
+  assert parse_chat_targets(raw) == [
+    ChatTarget("-1001111111111"),
+    ChatTarget("-1002173777783", 924584),
+    ChatTarget("@public_channel"),
+  ]
+
+
+def test_parse_chat_targets_collapses_duplicates():
+  raw = "-100111,-100111,-100111_5"
+  assert parse_chat_targets(raw) == [ChatTarget("-100111"), ChatTarget("-100111", 5)]
+
+
+def test_parse_chat_targets_ignores_empty_values():
+  assert parse_chat_targets("") == []
+  assert parse_chat_targets(None) == []
+  assert parse_chat_targets(" , ") == []
+
+
+def test_parse_chat_targets_does_not_invent_topics_from_usernames():
+  # A username may legitimately contain underscores (and end in digits); only a
+  # numeric chat id can carry a topic suffix.
+  assert parse_chat_targets("@my_group_2") == [ChatTarget("@my_group_2")]
+  assert parse_chat_targets("-100111_abc") == [ChatTarget("-100111_abc")]
+
+
+async def test_topic_chat_id_sends_message_thread_id(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = TelegramNotification(chat_id="-1002173777783_924584")
+  assert await notifier.send_message("hi") is True
+
+  assert len(sent) == 1
+  _, payload = sent[0]
+  assert payload["chat_id"] == "-1002173777783"
+  # Bot API type is Integer, and the topic must not leak into the chat id.
+  assert payload["message_thread_id"] == 924584
+
+
+async def test_plain_chat_id_omits_message_thread_id(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = TelegramNotification(chat_id="-1001111111111")
+  await notifier.send_message("hi")
+
+  # Telegram rejects the field on a group without that thread, so it may only
+  # be present when a topic was actually configured.
+  assert "message_thread_id" not in sent[0][1]
+
+
+async def test_fans_out_to_every_configured_chat(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = TelegramNotification(chat_id="-100111,-1002173777783_924584,@chan")
+  assert await notifier.send_message("hello") is True
+
+  assert [(p["chat_id"], p.get("message_thread_id")) for _, p in sent] == [
+    ("-100111", None),
+    ("-1002173777783", 924584),
+    ("@chan", None),
+  ]
+  # One body, formatted once, delivered to each.
+  assert {p["text"] for _, p in sent} == {"<pre>hello</pre>"}
+
+
+async def test_one_failing_chat_does_not_stop_the_others(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  # Middle group answers 400 (bot kicked, topic closed, …).
+  monkeypatch.setattr(
+    httpx,
+    "AsyncClient",
+    _client_recorder(
+      sent, status_for=lambda p: 400 if p["chat_id"] == "-100222" else 200
+    ),
+  )
+
+  notifier = TelegramNotification(chat_id="-100111,-100222,-100333")
+  # Reported as a failure, but every other group was still notified.
+  assert await notifier.send_message("hi") is False
+  assert [p["chat_id"] for _, p in sent] == ["-100111", "-100222", "-100333"]
+
+
+async def test_chat_id_that_parses_to_nothing_is_a_noop(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = TelegramNotification(chat_id=" , ")
+  assert await notifier.send_message("hi") is False
+  assert sent == []
 
 
 async def test_non_200_is_handled_gracefully(monkeypatch):
@@ -201,13 +322,16 @@ async def test_queued_notifier_survives_a_failing_send():
 # ── helpers ─────────────────────────────────────────────────────────
 
 
-def _client_recorder(sink: list, status_code: int = 200):
-  """Build a fake httpx.AsyncClient class that records POST calls into *sink*."""
+def _client_recorder(sink: list, status_code: int = 200, status_for=None):
+  """Build a fake httpx.AsyncClient class that records POST calls into *sink*.
+
+  ``status_for`` optionally derives the status code from the payload, so a test
+  can fail one chat of a fan-out while the rest succeed."""
 
   class _Resp:
-    def __init__(self):
-      self.status_code = status_code
-      self.text = "err" if status_code != 200 else "ok"
+    def __init__(self, code):
+      self.status_code = code
+      self.text = "err" if code != 200 else "ok"
 
   class _Client:
     def __init__(self, *a, **k):
@@ -221,6 +345,6 @@ def _client_recorder(sink: list, status_code: int = 200):
 
     async def post(self, url, json):
       sink.append((url, json))
-      return _Resp()
+      return _Resp(status_for(json) if status_for else status_code)
 
   return _Client
