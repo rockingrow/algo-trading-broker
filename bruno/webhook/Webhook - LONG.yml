@@ -17,9 +17,9 @@ http:
         "timestamp": "2026-04-10 22:55:00",
         "position": {
           "action": "LONG",
-          "price": 65100.5,
+          "price": 63000.5,
           "quantity": 0.1,
-          "sl": 64500,
+          "sl": 60000,
           "tp1": 66000.00,
           "tp2": 67000.00,
           "risk_percent": 5.0,

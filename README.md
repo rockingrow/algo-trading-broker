@@ -398,6 +398,9 @@ TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
 TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
+# Every chat id (incl. TELEGRAM_LOG_CHAT_ID) accepts a comma-separated list,
+# and an entry may address one topic of a group with Topics enabled:
+# -1002173777783_924584 (see below).
 
 # Forward log records at ERROR level or above to Telegram.
 TELEGRAM_LOG_ERRORS_ENABLED=false
@@ -415,6 +418,52 @@ BOT_BROKER_BASE_URL=http://localhost:8080   # → http://broker:8080 in Docker
 BOT_LOG_LEVEL=INFO
 BOT_REQUEST_TIMEOUT=10.0
 ```
+
+### Telegram chat ids: many chats, and group topics
+
+`TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_CHANNEL_ID` and `TELEGRAM_LOG_CHAT_ID` are
+all parsed the same way — none of them is special — so each can reach several
+chats and can address a **topic** inside a group that has the Topics feature
+switched on:
+
+```bash
+# Two groups + one topic inside a third, all from one setting
+TELEGRAM_CHAT_CHANNEL_ID="-1001111111111,@public_channel,-1002173777783_924584"
+# The same syntax works for the management chat and the error-log chat
+TELEGRAM_CHAT_ID="-1001111111111,-1002173777783_100"
+TELEGRAM_LOG_CHAT_ID="-1002173777783_555"
+```
+
+| Entry | Delivered to |
+| ----- | ------------ |
+| `-1001111111111` | The group/channel itself (a group with Topics enabled gets it in **General**) |
+| `@public_channel` | Public channel by username |
+| `-1002173777783_924584` | Topic `924584` of supergroup `-1002173777783` |
+
+The `_<topic id>` suffix makes the broker add
+[`message_thread_id`](https://core.telegram.org/bots/api#sendmessage) to the
+`sendMessage` call — the Bot API's identifier for "the target message thread
+(topic) of a forum", and the only way a bot can post into a specific topic
+rather than General. Both numbers are the ones in the topic's own link:
+`t.me/c/2173777783/924584` → `-1002173777783_924584` (the chat id is the link's
+first number prefixed with `-100`).
+
+Notes:
+
+- Only a **numeric** chat id may carry a topic suffix — usernames may contain
+  underscores themselves (`@my_group_2`), so those are never split.
+- The suffix is sent *only* when configured: Telegram answers
+  `400 Bad Request: message thread not found` if a `message_thread_id` is
+  passed for a chat that has no such topic.
+- Each chat gets its own Bot API call, issued concurrently, and one failing
+  chat (bot kicked, topic deleted) is logged without stopping the others.
+- Whitespace and empty entries are ignored, and a chat listed twice is only
+  notified once.
+- An empty `TELEGRAM_LOG_CHAT_ID` still falls back to `TELEGRAM_CHAT_ID`,
+  list and topics included.
+- Completed-trade owner DMs take their chat id from the database rather than
+  from `.env`, but run through the same parsing, so nothing has to special-case
+  a plain user id.
 
 ### Not in `.env`
 

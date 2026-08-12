@@ -5,6 +5,11 @@ broker/services/notification_service.py — Notification channels.
 Telegram message never blocks the event loop (previously a synchronous
 ``requests.post`` stalled the whole webhook handler for up to its timeout).
 
+Every channel resolves its chat-id setting through :func:`parse_chat_targets`,
+so any of them — ``TELEGRAM_CHAT_CHANNEL_ID`` above all — may name several
+chats at once and may address a single topic inside a supergroup that has the
+Topics feature enabled (``-1002173777783_924584``).
+
 Being non-blocking is not the same as being fast: a send to a throttled
 ``api.telegram.org`` still *awaits* for the full ``TELEGRAM_HTTP_TIMEOUT``
 before raising ``httpx.ReadTimeout``, and any pipeline that awaits it inherits
@@ -39,7 +44,9 @@ from __future__ import annotations
 import abc
 import asyncio
 import logging
+import re
 import time
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -57,14 +64,77 @@ def _box(text: str) -> str:
   return f"<pre>{text.strip()}</pre>"
 
 
+# ── Chat targets ───────────────────────────────────────────────────────────
+
+# A chat id carrying a forum topic, e.g. "-1002173777783_924584". Only a
+# *numeric* chat id may be suffixed this way: a channel username can itself
+# contain underscores (``@my_group_2``), so splitting those would invent a
+# topic out of part of the name.
+_CHAT_TOPIC_RE = re.compile(r"(?P<chat>-?\d+)_(?P<topic>\d+)")
+
+
+class ChatTarget(NamedTuple):
+  """One Telegram destination: a chat, optionally a topic inside it.
+
+  ``message_thread_id`` is the Bot API's name for a forum topic — "unique
+  identifier for the target message thread (topic) of a forum; for forum
+  supergroups and private chats of bots with forum topic mode enabled only".
+  Sending without it lands the message in the group's *General* topic, which
+  is why a group with topics enabled needs the id carried all the way down to
+  the payload."""
+
+  chat_id: str
+  message_thread_id: int | None = None
+
+  @property
+  def label(self) -> str:
+    """Identify this target in a log line."""
+    if self.message_thread_id is None:
+      return self.chat_id
+    return f"{self.chat_id} (topic {self.message_thread_id})"
+
+
+def parse_chat_targets(raw: str | None) -> list[ChatTarget]:
+  """Parse a chat-id setting into the chats (and topics) to deliver to.
+
+  The value is a comma-separated list, so one channel can fan out to several
+  groups: ``"-1001111111111,-1002173777783_924584,@public_channel"``.
+
+  An entry of the form ``<chat id>_<topic id>`` addresses a *topic* inside a
+  supergroup that has the Topics feature switched on — the shape Telegram
+  itself shows in a topic link (``t.me/c/2173777783/924584``). It is split back
+  into the chat and its ``message_thread_id``; everything else is passed
+  through untouched, so plain ids (``-1001111111111``), user ids and
+  ``@username`` handles keep working exactly as before.
+
+  Blank entries are skipped and duplicates collapse, so a stray comma or a
+  chat listed twice costs nothing (and never double-posts).
+  """
+  if not raw:
+    return []
+
+  targets: list[ChatTarget] = []
+  for spec in raw.split(","):
+    spec = spec.strip()
+    if not spec:
+      continue
+    match = _CHAT_TOPIC_RE.fullmatch(spec)
+    target = (
+      ChatTarget(match["chat"], int(match["topic"])) if match else ChatTarget(spec)
+    )
+    if target not in targets:
+      targets.append(target)
+  return targets
+
+
 class Notification(abc.ABC):
   """Base class for Telegram notification channels.
 
   Owns everything the channels share: the enabled flag, the credentials, the
-  Bot API ``url`` built from the token, and the send itself (payload, HTTP
-  call, error logging). Subclasses only customise *which* credentials they
-  default to, how the body is formatted (:meth:`format_text`) and whether a
-  send should be skipped (:meth:`should_send`)."""
+  Bot API ``url`` built from the token, and the send itself (target parsing,
+  payload, HTTP call, error logging). Subclasses only customise *which*
+  credentials they default to, how the body is formatted (:meth:`format_text`)
+  and whether a send should be skipped (:meth:`should_send`)."""
 
   #: Name of the setting a subclass reads its token from, for warning messages.
   token_setting_name = "TELEGRAM_BOT_TOKEN"
@@ -89,40 +159,77 @@ class Notification(abc.ABC):
 
   async def send_message(self, message_text: str, chat_id: str | None = None) -> bool:
     """Deliver *message_text* (HTML) to *chat_id*, or to the channel's own
-    ``chat_id`` when omitted. Returns True on a 200 send, False on any
+    ``chat_id`` when omitted.
+
+    Either may name several chats (comma-separated) and may address a topic
+    inside a group — see :func:`parse_chat_targets`. Every chat gets its own
+    Bot API call, all in flight together so a slow group costs one
+    ``HTTP_TIMEOUT`` for the batch rather than one each.
+
+    Returns True only when every chat took the message; False on any
     skip/failure — never raises, since notifications are best-effort."""
     if not self.enabled:
       logger.debug("Telegram notifications are disabled in settings.")
       return False
 
-    target = chat_id if chat_id is not None else self.chat_id
-    if not self.bot_token or not target:
+    raw_target = chat_id if chat_id is not None else self.chat_id
+    if not self.bot_token or not raw_target:
       logger.warning(
         "%s and a chat id must be set for notifications.", self.token_setting_name
       )
       return False
 
+    targets = parse_chat_targets(raw_target)
+    if not targets:
+      logger.warning("No usable chat id in %r — nothing to notify.", raw_target)
+      return False
+
     if not await self.should_send():
       return False
 
-    payload = {
-      "chat_id": target,
-      "text": self.format_text(message_text),
-      "parse_mode": "HTML",
-    }
-
+    text = self.format_text(message_text)
     try:
       async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
-        response = await client.post(self.url, json=payload)
-      if response.status_code != 200:
-        logger.error(
-          "Failed to send Telegram message chat_id=%s: %s", target, response.text
+        results = await asyncio.gather(
+          *(self._deliver(client, target, text) for target in targets)
         )
-        return False
-      return True
     except Exception as exc:
-      logger.exception("Exception sending Telegram message chat_id=%s: %s", target, exc)
+      logger.exception("Exception sending Telegram message: %s", exc)
       return False
+    return all(results)
+
+  async def _deliver(
+    self, client: httpx.AsyncClient, target: ChatTarget, text: str
+  ) -> bool:
+    """POST one already-formatted message to one chat/topic.
+
+    Contains its own failures: with several chats configured, one group the bot
+    was kicked from (or one deleted topic) must not stop the others from being
+    notified."""
+    payload: dict[str, Any] = {
+      "chat_id": target.chat_id,
+      "text": text,
+      "parse_mode": "HTML",
+    }
+    # Only for topic targets: the Bot API answers "400 Bad Request: message
+    # thread not found" when a group has no such thread.
+    if target.message_thread_id is not None:
+      payload["message_thread_id"] = target.message_thread_id
+
+    try:
+      response = await client.post(self.url, json=payload)
+    except Exception as exc:
+      logger.exception(
+        "Exception sending Telegram message chat_id=%s: %s", target.label, exc
+      )
+      return False
+
+    if response.status_code != 200:
+      logger.error(
+        "Failed to send Telegram message chat_id=%s: %s", target.label, response.text
+      )
+      return False
+    return True
 
 
 class TelegramNotification(Notification):

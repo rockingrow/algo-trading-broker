@@ -5,7 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.4] - 2026-08-11
+## [Unreleased]
+
+### Added
+
+- **Telegram notifications reach several chats, and land in the right group
+  topic** — Every chat-id setting takes a comma-separated list — the signals
+  channel `TELEGRAM_CHAT_CHANNEL_ID`, the management chat `TELEGRAM_CHAT_ID`
+  and the error-log chat `TELEGRAM_LOG_CHAT_ID` alike, plus the per-call chat
+  ids used for completed-trade owner DMs; none of them is special-cased, since
+  they all resolve through one parser. So one channel can fan out to several
+  groups, and an entry may address
+  a single **topic** of a supergroup that has the Topics feature enabled by
+  suffixing the topic id: `-1002173777783_924584`. Such an entry is split into
+  the chat and its `message_thread_id` — the Bot API field for "the target
+  message thread (topic) of a forum" — which is the only way a bot can post
+  into a specific topic instead of *General*; both numbers are the ones in the
+  topic's link (`t.me/c/2173777783/924584`). The field is sent **only** for
+  topic entries, since Telegram answers `400 Bad Request: message thread not
+  found` when it is passed for a chat without that thread. Only numeric chat ids may carry
+  the suffix, so a username that itself contains underscores (`@my_group_2`)
+  is never mistaken for one; plain ids, user ids and `@username` handles are
+  unchanged. Each chat gets its own Bot API call, all issued concurrently so a
+  slow group costs one `TELEGRAM_HTTP_TIMEOUT` for the batch rather than one
+  each, and a chat that rejects the send (bot kicked, topic deleted) is logged
+  without stopping delivery to the rest.
+- **Webhook response timing in the log** — Every `/secret/webhook` response is
+  logged with its elapsed milliseconds, raised to `warning` when it overruns
+  `WEBHOOK_ENQUEUE_TIMEOUT`. TradingView reports a timeout with nothing on the
+  server side to correlate it with; this is that record.
+- **`WEBHOOK_ENQUEUE_TIMEOUT`** (default `1.0`) — Seconds the webhook may wait
+  for the JetStream ack before deferring. Also
+  `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` (`2.0`) and
+  `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` (`15`) for the background retry, and
+  `TELEGRAM_HTTP_TIMEOUT` (`5.0`) for the Bot API call that was previously
+  hard-coded.
+- **`503` on the webhook** — Returned when the enqueue failed *and* could not
+  be deferred (no queue wired, or its backlog full). A refusal TradingView can
+  show in its alert log is worth more than a request it can only report as too
+  slow.
+- **Bot: `PNL` column on `/trades` and `/atrades`** — Each row now shows the
+  signed realised PnL (`account_balance − account_balance_init`), e.g.
+  `+123.45`, with `—` when either balance is missing so an in-progress trade
+  isn't misread as a break-even close. New `_fmt_pnl` helper in
+  `app/presenters/messages.py`; the column sits between `BALANCE` and `TIME`.
 
 ### Fixed
 
@@ -41,7 +84,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ensure_signal_stream` reconciles an existing stream with `update_stream`
   instead of only logging the config mismatch, so deployments created before
   this change pick the window up on their next start.
-
 - **The webhook token no longer leaks into the logs** — A rejected alert is
   reported with the offending input attached, so the entire body — `token`
   included, which *is* `WEBHOOK_SECRET` — was written to the `422` log line
@@ -59,33 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line 1 column 230 — near: …"bar_index": 16,222}…` for a Pine
   `str.tostring` that emitted a thousands separator. Ordinary field-level
   validation errors are reported unchanged.
-
-### Added
-
-- **Webhook response timing in the log** — Every `/secret/webhook` response is
-  logged with its elapsed milliseconds, raised to `warning` when it overruns
-  `WEBHOOK_ENQUEUE_TIMEOUT`. TradingView reports a timeout with nothing on the
-  server side to correlate it with; this is that record.
-- **`WEBHOOK_ENQUEUE_TIMEOUT`** (default `1.0`) — Seconds the webhook may wait
-  for the JetStream ack before deferring. Also
-  `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` (`2.0`) and
-  `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` (`15`) for the background retry, and
-  `TELEGRAM_HTTP_TIMEOUT` (`5.0`) for the Bot API call that was previously
-  hard-coded.
-- **`503` on the webhook** — Returned when the enqueue failed *and* could not
-  be deferred (no queue wired, or its backlog full). A refusal TradingView can
-  show in its alert log is worth more than a request it can only report as too
-  slow.
-
-## [1.1.3] - 2026-08-10
-
-### Added
-
-- **Bot: `PNL` column on `/trades` and `/atrades`** — Each row now shows the
-  signed realised PnL (`account_balance − account_balance_init`), e.g.
-  `+123.45`, with `—` when either balance is missing so an in-progress trade
-  isn't misread as a break-even close. New `_fmt_pnl` helper in
-  `app/presenters/messages.py`; the column sits between `BALANCE` and `TIME`.
 
 ## [1.1.2] - 2026-08-10
 
@@ -832,7 +847,7 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
-[1.1.3]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.2...v1.1.3
+[Unreleased]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.2...HEAD
 [1.1.2]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.7...v1.1.0
