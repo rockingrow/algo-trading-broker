@@ -1179,6 +1179,14 @@ A `FLATTED` event reports `closed_price=0` when the worker has no close price to
 give. No instrument closes at 0, so the broker treats it as missing and keeps the
 open price rather than persisting — and DM-ing — a bogus `0`.
 
+The DM's status line names the event that ended the trade in brackets —
+`Status: CLOSED (TP2)`, `CLOSED (SL)`, `CLOSED (R_SL)`,
+`CLOSED (TERMINAL_CLOSED)`, `CLOSED (FORCED_CLOSED)` — since five worker events
+collapse onto the one `CLOSED`, while the DM's `Action` line stays the entry
+direction (`LONG` / `SHORT`) the trade was opened with. The label is the `TRADE`
+event's own status, with `FLATTED` shown as the `FLAT` it is; an admin FLAT
+therefore reads `Status: FLAT`, not `FLAT (FLAT)`.
+
 | Column | Type | Description |
 | ------- | ------------ | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |

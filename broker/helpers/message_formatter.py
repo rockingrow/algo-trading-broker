@@ -148,16 +148,30 @@ def format_signal_message(
   return base + (f"\n{flags}" if flags else "") + raw
 
 
-def format_completed_trade_message(trade, *, timezone_offset: str | None = None) -> str:
+def format_completed_trade_message(
+  trade,
+  *,
+  last_action: str | None = None,
+  timezone_offset: str | None = None,
+) -> str:
   """Telegram DM body sent to an account owner when one of their trades closes.
 
   Renders the persisted ``trades`` row (see ``broker.db.models.Trade``) — not a
   webhook payload — because this fires off the worker's TRADE completion event,
   after the trade has been upserted. Shows realised PnL when both the initial
   and current account balance are known.
+
+  *last_action* is the event that ended the trade (``TP2``, ``SL``, ``R_SL``,
+  ``FLAT``, ...), shown in brackets after the status: several events map onto
+  the same ``CLOSED``, and the row itself keeps the entry action, so the status
+  alone never says *how* the trade ended. Comes from the caller because only
+  the TRADE event carries it.
   """
   status = getattr(trade.status, "value", str(trade.status))
   action = getattr(trade.action, "value", str(trade.action))
+  # A FLATTED event yields status FLAT and last action FLAT — say it once.
+  if last_action and last_action != status:
+    status = f"{status} ({last_action})"
 
   lines = [
     f"{em.FLAT} <b>Trade completed</b>",

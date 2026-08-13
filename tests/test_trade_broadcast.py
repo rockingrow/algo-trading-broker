@@ -170,6 +170,8 @@ async def test_broadcast_service_dms_subscribed_owners_on_close():
 
   assert [c for c, _ in notifier.sent] == ["111", "222"]
   assert repo.target_calls == [("acc-1", MarketTypeEnum.FOREX, "MT5")]
+  # The closing event is named after the status, so CLOSED says how it closed.
+  assert all("Status: <b>CLOSED (TP2)</b>" in m for _, m in notifier.sent)
 
 
 async def test_broadcast_service_dms_owners_on_admin_flat():
@@ -185,6 +187,32 @@ async def test_broadcast_service_dms_owners_on_admin_flat():
   await svc.maybe_broadcast(_event("FLATTED"), _make_trade(TradeStatusEnum.FLAT))
 
   assert [c for c, _ in notifier.sent] == ["111"]
+  # Status and last action are both FLAT here — no "FLAT (FLAT)".
+  assert "Status: <b>FLAT</b>" in notifier.sent[0][1]
+
+
+@pytest.mark.parametrize(
+  "position_status,expected",
+  [
+    ("TP2", "CLOSED (TP2)"),
+    ("SL", "CLOSED (SL)"),
+    ("R_SL", "CLOSED (R_SL)"),
+    ("TERMINAL_CLOSED", "CLOSED (TERMINAL_CLOSED)"),
+    ("FORCED_CLOSED", "CLOSED (FORCED_CLOSED)"),
+  ],
+)
+async def test_broadcast_status_line_names_the_closing_event(position_status, expected):
+  """Every one of these persists as CLOSED, so the DM must say which fired."""
+  notifier = FakeOwnerNotifier()
+  svc = TradeBroadcastService(
+    broadcast_repository=FakeBroadcastRepo(targets=["111"]),
+    setting_repository=FakeSettingRepo(),
+    notifier=notifier,
+  )
+
+  await svc.maybe_broadcast(_event(position_status), _make_trade())
+
+  assert f"Status: <b>{expected}</b>" in notifier.sent[0][1]
 
 
 async def test_broadcast_service_skips_non_completion():
@@ -251,6 +279,19 @@ def test_format_completed_trade_message_has_pnl():
   assert "CLOSED" in msg
   assert "Gateway: <b>MT5</b>" in msg
   assert "Strategy" not in msg
+
+
+def test_format_completed_trade_message_without_last_action():
+  """No last action known (unknown worker status) — bare status, no brackets."""
+  msg = format_completed_trade_message(_make_trade(), last_action=None)
+  assert "Status: <b>CLOSED</b>" in msg
+
+
+def test_format_completed_trade_message_keeps_entry_action():
+  """The closing event goes next to the status, never over the entry action."""
+  msg = format_completed_trade_message(_make_trade(), last_action="SL")
+  assert "Action: <b>LONG</b>" in msg
+  assert "Status: <b>CLOSED (SL)</b>" in msg
 
 
 # ── Broadcast opt-in endpoints ───────────────────────────────────────

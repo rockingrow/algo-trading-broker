@@ -68,6 +68,28 @@ def test_is_open_only_for_opened_and_tp1():
   assert policy.is_open("WHATEVER") is False
 
 
+def test_to_last_action_labels_every_worker_status():
+  expected = {
+    "OPENED": "OPENED",
+    "REJECTED": "REJECTED",
+    "TP1": "TP1",
+    "TP2": "TP2",
+    "SL": "SL",
+    "R_SL": "R_SL",
+    "TERMINAL_CLOSED": "TERMINAL_CLOSED",
+    "FORCED_CLOSED": "FORCED_CLOSED",
+    # The admin FLAT directive is known as FLAT, not by the worker's past tense.
+    "FLATTED": "FLAT",
+  }
+  for worker_status, label in expected.items():
+    assert policy.to_last_action(worker_status) == label
+
+
+def test_to_last_action_unknown_status_returns_none():
+  assert policy.to_last_action("NOPE") is None
+  assert policy.to_last_action("") is None
+
+
 def test_partially_closed_to_closed_is_progression():
   assert (
     policy.is_downgrade(TradeStatusEnum.CLOSED, TradeStatusEnum.PARTIALLY_CLOSED)
