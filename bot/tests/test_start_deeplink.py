@@ -22,6 +22,7 @@ class FakeMessage:
   def __init__(self):
     self.from_user = FakeUser()
     self.answers = []
+    self.bot = object()  # only ever passed through to the command menu
 
   async def answer(self, text, **kwargs):
     self.answers.append(text)
@@ -62,6 +63,16 @@ class FakeBroker:
     return None
 
 
+class FakeMenu:
+  """Stands in for CommandMenu — records who was given which menu."""
+
+  def __init__(self):
+    self.synced = []
+
+  async def sync(self, bot, user_id, *, linked):
+    self.synced.append((user_id, linked))
+
+
 # ── filter routing ──────────────────────────────────────────────────
 # start.py registers CommandStart(deep_link=True) ahead of plain CommandStart()
 # because the plain filter matches with or without a payload. These pin the
@@ -87,10 +98,10 @@ async def test_plain_start_filter_matches_with_payload_too():
 
 @pytest.mark.parametrize("payload", [DASHED, HEX])
 async def test_deep_link_links_the_account_without_prompting(payload):
-  message, state, broker = FakeMessage(), FakeState(), FakeBroker()
+  message, state, broker, menu = FakeMessage(), FakeState(), FakeBroker(), FakeMenu()
 
   await cmd_start_deeplink(
-    message, CommandObject(command="start", args=payload), state, broker
+    message, CommandObject(command="start", args=payload), state, broker, menu
   )
 
   # The broker always sees the canonical dashed form, whichever the URL carried.
@@ -99,26 +110,32 @@ async def test_deep_link_links_the_account_without_prompting(payload):
   # No fallback prompt, and the FSM is not parked waiting for a token.
   assert "UUID" not in message.text_of_all
   assert state.state is None
+  # The user tapped the link with the /start-only menu; they leave with the
+  # full one, without having to send another message first.
+  assert menu.synced == [(4242, True)]
 
 
 async def test_deep_link_with_unknown_code_falls_back_to_manual_prompt():
-  message, state, broker = FakeMessage(), FakeState(), FakeBroker(known=())
+  message, state, menu = FakeMessage(), FakeState(), FakeMenu()
+  broker = FakeBroker(known=())
 
   await cmd_start_deeplink(
-    message, CommandObject(command="start", args=DASHED), state, broker
+    message, CommandObject(command="start", args=DASHED), state, broker, menu
   )
 
   assert broker.link_calls == [(DASHED, 4242)]
   assert "No account found" in message.text_of_all
   # Falls through to onboarding so the user can still type a code.
   assert state.state == LinkAccount.waiting_for_token
+  # Nothing was linked, so the menu stays as it was: /start only.
+  assert menu.synced == []
 
 
 async def test_deep_link_with_a_malformed_payload_never_reaches_the_broker():
-  message, state, broker = FakeMessage(), FakeState(), FakeBroker()
+  message, state, broker, menu = FakeMessage(), FakeState(), FakeBroker(), FakeMenu()
 
   await cmd_start_deeplink(
-    message, CommandObject(command="start", args="junk"), state, broker
+    message, CommandObject(command="start", args="junk"), state, broker, menu
   )
 
   assert broker.link_calls == []
@@ -127,9 +144,11 @@ async def test_deep_link_with_a_malformed_payload_never_reaches_the_broker():
 
 
 async def test_apply_link_token_reports_a_non_active_add():
-  message, state = FakeMessage(), FakeState()
+  message, state, menu = FakeMessage(), FakeState(), FakeMenu()
   broker = FakeBroker(account={"account_id": "acc-2", "is_active": False})
 
-  assert await apply_link_token(message, state, broker, DASHED) is True
+  assert await apply_link_token(message, state, broker, DASHED, menu) is True
   assert "Account added" in message.text_of_all
   assert state.cleared == 1
+  # A second account is still a linked account — the full menu either way.
+  assert menu.synced == [(4242, True)]

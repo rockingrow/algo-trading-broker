@@ -12,18 +12,47 @@ broker's HTTP API and never touches the database or NATS directly.
 | **Enduser** | Anyone who links an account | Sends one of the account's link tokens (UUID) via `/start`; the bot records their Telegram id against that account. |
 | **Admin** | Telegram IDs in `TELEGRAM_ADMIN_IDS` | Router-level `IsAdmin` filter. Admins don't need a linked account. |
 
-Menus are role-aware via Telegram command **scopes**, re-applied on every
-startup (`setup_bot_commands`): endusers get the default menu, each admin id
-gets an extended chat-scoped menu.
+Menus are role-aware **and** link-aware, via Telegram command **scopes**
+(`app/services/menu.py`):
+
+| Who | Menu |
+| --- | ---- |
+| Not linked | `/start` — nothing else |
+| Linked | The full enduser menu |
+| Admin, not linked | `/start` + the `admin_` commands |
+| Admin, linked | Enduser menu + the `admin_` commands |
+
+Every user command needs an account behind it, so until one is linked the menu
+is trimmed to the command that gets the user somewhere: `/start`. `/help` is
+trimmed with the rest — it is a tour of commands they cannot run — and is
+refused alongside them (it sits on a router behind `AuthMiddleware`). Admin
+commands never needed a linked account, so an unlinked admin loses only the
+user half of their menu.
+
+`CommandMenuMiddleware` re-checks the sender's link status on **every** update,
+which is what keeps the menu honest after a change the bot never saw in that
+chat — an `/admin_rotate` that unlinked the user, an `/admin_linkaccount` that
+linked them. Linking and `/unlink` also re-apply the menu on the spot, so it
+changes with the same tap instead of on the next message. Two things keep that
+cheap: the menu last applied to each chat is remembered in-process (no Telegram
+call when nothing changed), and the account resolved for the menu is passed on
+to `AuthMiddleware` (no second broker call). A broker that can't be reached
+leaves the menu alone — an outage is not evidence that a user unlinked.
+
+On startup the **default** scope — what every chat the bot has never spoken to
+falls back to — is set to the `/start`-only menu, and each admin's own menu is
+refreshed.
 
 > An admin must `/start` the bot once before Telegram will accept a chat-scoped
-> menu for them ("chat not found" is caught and logged; the menu applies on the
-> next startup after their first message).
+> menu for them ("chat not found" is caught and logged; nothing is cached, so
+> the next update after their first message applies it).
 
 ### Enduser commands
 
 `/start` (link), `/trades`, `/flat`, `/prevent`, `/allow`, `/status`,
-`/myaccounts`, `/link`, `/switch`, `/unlink`, `/help`.
+`/myaccounts`, `/link`, `/switch`, `/unlink`, `/subscribe`, `/unsubscribe`,
+`/help` — all but `/start` require a linked account, and are hidden until
+there is one.
 
 `FLAT`/`PREVENT`/`ALLOW` each require a confirmation tap.
 
@@ -154,7 +183,7 @@ to UTC+7, the broker's own default.
 ```
 app/
 ├── __main__.py        # Dispatcher, polling, graceful shutdown
-├── commands.py        # USER/ADMIN command lists + scoped setup_bot_commands
+├── commands.py        # START-only/USER/ADMIN command lists + menu_for()
 ├── config.py          # BotSettings (pydantic-settings; admin_ids)
 ├── constants.py       # markets + gateways valid per market
 ├── emojis.py          # named emoji constants (no raw glyphs in source)
@@ -162,7 +191,9 @@ app/
 ├── states.py          # FSM: LinkAccount, CreateAccount
 ├── filters/           # is_admin.py — IsAdmin router gate
 ├── services/          # broker_client.py — httpx client (enduser + admin calls)
-├── middlewares/       # deps.py (DI), auth.py (require-linked guard)
+│                      # menu.py — applies the link-aware command menu
+├── middlewares/       # deps.py (DI), auth.py (require-linked guard),
+│                      # menu.py (re-check link status on every update)
 ├── handlers/          # start, link, trades, commands, account, admin
 ├── keyboards/         # inline keyboards (confirm, pagination, pickers, settings)
 ├── presenters/        # render API payloads → Telegram HTML

@@ -62,6 +62,32 @@ async def test_get_account_404_returns_none():
   await client.aclose()
 
 
+async def test_resolve_account_separates_no_account_from_no_broker():
+  """The command menu acts on the answer, so "not linked" and "couldn't ask"
+  must not look the same (see services/menu.py)."""
+
+  def linked(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"account_id": "acc-1"})
+
+  def unlinked(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(404)
+
+  def unreachable(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("broker down", request=request)
+
+  client = _client(linked)
+  assert await client.resolve_account(7) == (True, {"account_id": "acc-1"})
+  await client.aclose()
+
+  client = _client(unlinked)
+  assert await client.resolve_account(7) == (True, None)
+  await client.aclose()
+
+  client = _client(unreachable)
+  assert await client.resolve_account(7) == (False, None)
+  await client.aclose()
+
+
 async def test_list_trades_passes_pagination_params():
   captured = {}
 

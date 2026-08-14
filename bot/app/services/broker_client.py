@@ -132,13 +132,30 @@ class BrokerClientUser(BrokerClient):
       )
     )
 
+  async def resolve_account(
+    self, telegram_user_id: int
+  ) -> tuple[bool, Optional[dict[str, Any]]]:
+    """``(answered, account)`` for the user's currently active account.
+
+    ``get_account`` collapses "the broker says this user has no account" and
+    "the broker couldn't be reached" into the same ``None``, which is all a
+    handler needs — either way it has nothing to act on. Anything that *stores*
+    the answer needs them apart: the command menu must not strip a linked
+    user's commands because one call timed out (see services/menu.py).
+    """
+    resp = await self._request(
+      "GET", self._path(self.ENDPOINTS.ACCOUNT, telegram_id=telegram_user_id)
+    )
+    if resp is None:
+      return False, None
+    if resp.status_code == 404:
+      return True, None
+    return True, resp.json()
+
   async def get_account(self, telegram_user_id: int) -> Optional[dict[str, Any]]:
     """Return the Telegram user's currently active account, or None if unbound."""
-    return self._json_or_none(
-      await self._request(
-        "GET", self._path(self.ENDPOINTS.ACCOUNT, telegram_id=telegram_user_id)
-      )
-    )
+    _, account = await self.resolve_account(telegram_user_id)
+    return account
 
   async def list_accounts(
     self, telegram_user_id: int

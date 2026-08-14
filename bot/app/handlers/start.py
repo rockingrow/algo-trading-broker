@@ -1,5 +1,10 @@
 """
 app/handlers/start.py — Onboarding entry: /start and /help.
+
+/start is the one command an unlinked user has (it is the only one their menu
+shows), so it lives on a public router. /help sits on a second, protected
+router: it is a tour of commands that all need a linked account, so it is
+hidden and refused along with them until the user links — see commands.menu_for.
 """
 
 from __future__ import annotations
@@ -13,8 +18,12 @@ from app import emojis
 from app.handlers.link import apply_link_token, start_link_flow
 from app.presenters import messages
 from app.services.broker_client import BrokerClientUser
+from app.services.menu import CommandMenu
 
 router = Router(name="start")
+
+# Gets AuthMiddleware in handlers/__init__.py, unlike ``router`` above.
+help_router = Router(name="help")
 
 
 # ``/start <code>`` — the invite-link entry (see /admin_invite_url). Tapping a
@@ -25,10 +34,14 @@ router = Router(name="start")
 # handlers in registration order.
 @router.message(CommandStart(deep_link=True))
 async def cmd_start_deeplink(
-  message: Message, command: CommandObject, state: FSMContext, broker: BrokerClientUser
+  message: Message,
+  command: CommandObject,
+  state: FSMContext,
+  broker: BrokerClientUser,
+  menu: CommandMenu,
 ) -> None:
   await state.clear()
-  if await apply_link_token(message, state, broker, command.args or ""):
+  if await apply_link_token(message, state, broker, command.args or "", menu):
     return
 
   # Bad or unknown code: apply_link_token already said why, so just drop into
@@ -55,6 +68,6 @@ async def cmd_start(
   await start_link_flow(message, state, already_linked=False)
 
 
-@router.message(Command("help"))
+@help_router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
   await message.answer(messages.UserMessages.HELP_TEXT)
