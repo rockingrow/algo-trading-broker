@@ -92,7 +92,7 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_accounts` | Accounts + linked-user count + link token (spoiler), then a second table of row UUIDs | `GET /v1/accounts` |
 | `/admin_newaccount` | Register an account (pick market → gateway → type id) | `POST /admin/accounts` |
 | `/admin_trades [account_id]` | Trades of any account (picker if no arg) | `GET /v1/{account_id}/trades` |
-| `/admin_flat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |
+| `/admin_flat [account_id]` | Bare: walk strategy → market → gateway pickers (each with **All**) then confirm; with `account_id`: one account (confirm) | `GET /admin/strategies`, `POST /admin/flat` |
 | `/admin_rotate [account_id]` | Rotate a link token — revokes old **and unlinks every linked user** (confirm) | `POST /admin/accounts/{id}/link-token/rotate` |
 | `/admin_linkaccount` | Bind a Telegram user to an account directly (pick account → type user id) | `POST /admin/accounts/{uuid}/link-telegram` |
 | `/admin_invite_url [code]` | One-tap invite link for an account (picker if no arg) | `GET /v1/accounts` (picker only) |

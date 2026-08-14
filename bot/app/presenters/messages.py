@@ -351,7 +351,7 @@ class AdminMessages:
     "/admin_accounts — Account list\n"
     "/admin_newaccount — Register a new account\n"
     "/admin_trades — Trades for an account\n"
-    "/admin_flat — FLAT system-wide / account\n"
+    "/admin_flat — FLAT with strategy/market/gateway pickers (each has All) / one account\n"
     "/admin_rotate — Rotate token + unlink users\n"
     "/admin_settings — Broker settings\n"
     "/admin_magicmap — Edit strategy magic map\n"

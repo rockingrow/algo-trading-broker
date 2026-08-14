@@ -1380,3 +1380,22 @@ class SqlAlchemyTradeRepository:
     except Exception as exc:
       log.exception("Failed to count trades for account_id=%s: %s", account_id, exc)
       return 0
+
+  async def list_distinct_strategies(self) -> list[str]:
+    """Distinct non-empty ``strategy`` values seen on the ``trades`` table,
+    alphabetically. Backs the admin FLAT strategy picker — a FLAT scoped to a
+    strategy the broker has never observed is worthless, so the picker only
+    offers ones a trade has actually carried."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Trade.strategy)
+          .where(Trade.strategy.is_not(None))
+          .where(Trade.strategy != "")
+          .distinct()
+          .order_by(Trade.strategy.asc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception("Failed to list distinct strategies: %s", exc)
+      return []
