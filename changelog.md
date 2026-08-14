@@ -49,6 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `+123.45`, with `—` when either balance is missing so an in-progress trade
   isn't misread as a break-even close. New `_fmt_pnl` helper in
   `app/presenters/messages.py`; the column sits between `BALANCE` and `TIME`.
+- **The completed-trade DM names the event that ended the trade** — The
+  subscriber's `Trade completed` notification carries the closing action in
+  brackets after the status: `Status: CLOSED (TP2)`, `CLOSED (SL)`,
+  `CLOSED (R_SL)`, `CLOSED (TERMINAL_CLOSED)`, `CLOSED (FORCED_CLOSED)`. Five
+  different worker events all persist as `CLOSED`, and the row's `Action` line
+  keeps the entry direction (`LONG`/`SHORT`), so until now the DM could not say
+  whether a trade ran to target or was stopped out. The label comes from the
+  `TRADE` event's own status — the row does not record it — via the new
+  `TradeStatusPolicy.to_last_action`, which renames only `FLATTED` → `FLAT`. An
+  admin FLAT already reads `Status: FLAT`, so it is not repeated as
+  `FLAT (FLAT)`.
 
 ### Fixed
 

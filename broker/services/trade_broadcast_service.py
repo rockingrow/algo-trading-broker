@@ -82,7 +82,13 @@ class TradeBroadcastService:
       return
 
     timezone_offset = await self._settings.get(NOTIFICATION_TIMEZONE_KEY)
-    message = format_completed_trade_message(trade, timezone_offset=timezone_offset)
+    # The event, not the row, is what says how the trade ended: TP2/SL/R_SL all
+    # persist as CLOSED, and the row's own action stays the entry direction.
+    message = format_completed_trade_message(
+      trade,
+      last_action=self._policy.to_last_action(event.status),
+      timezone_offset=timezone_offset,
+    )
 
     for chat_id in targets:
       await self._notifier.send_message(message, chat_id=chat_id)
