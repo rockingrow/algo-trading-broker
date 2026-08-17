@@ -15,9 +15,10 @@ http:
         "symbol": "OANDA:{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-22 03:50:00",
+        "signal_uxid": "9f2c4b7e18a3d008",
         "position": {
           "action": "TP1",
-          "price": 60100.50,
+          "price": 63500.50,
           "quantity": 0.01,
           "risk_percent": 3.0,
           "is_running": true,

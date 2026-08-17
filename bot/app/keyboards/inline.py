@@ -144,9 +144,7 @@ def aflat_strategy_picker(strategies: list[str]) -> InlineKeyboardMarkup:
     [InlineKeyboardButton(text="All strategies", callback_data=f"afls:{AFLAT_ALL}")]
   ]
   for i, name in enumerate(strategies):
-    rows.append(
-      [InlineKeyboardButton(text=name, callback_data=f"afls:{i}")]
-    )
+    rows.append([InlineKeyboardButton(text=name, callback_data=f"afls:{i}")])
   return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -157,9 +155,7 @@ def aflat_market_picker() -> InlineKeyboardMarkup:
     [InlineKeyboardButton(text="All markets", callback_data=f"aflm:{AFLAT_ALL}")]
   ]
   for market in MARKETS:
-    rows.append(
-      [InlineKeyboardButton(text=market, callback_data=f"aflm:{market}")]
-    )
+    rows.append([InlineKeyboardButton(text=market, callback_data=f"aflm:{market}")])
   return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -181,9 +177,7 @@ def aflat_gateway_picker(market: Optional[str]) -> InlineKeyboardMarkup:
     [InlineKeyboardButton(text="All gateways", callback_data=f"aflg:{AFLAT_ALL}")]
   ]
   for gw in gateways:
-    rows.append(
-      [InlineKeyboardButton(text=gw, callback_data=f"aflg:{gw}")]
-    )
+    rows.append([InlineKeyboardButton(text=gw, callback_data=f"aflg:{gw}")])
   return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

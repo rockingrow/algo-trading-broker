@@ -18,6 +18,15 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   Validate and normalise a raw TradingView webhook payload into a TradingSignal.
 
   The payload is structured according to the examples/*.json format.
+
+  Two ids travel to the worker and they answer different questions:
+
+  * ``signal_id`` — this one signal, minted per persisted signal (the
+    ``signals`` row id). Unique per action, and therefore the de-duplication
+    key a worker uses to recognise a signal it has already acted on.
+  * ``signal_uxid`` — the trade **cycle** the signal belongs to, shared by the
+    entry and every TP/SL/FLAT that follows it, so a worker can tie a close
+    back to the position it opened.
   """
   position = payload.position
   action = position.action
@@ -36,6 +45,7 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   # Action is already validated by Pydantic
   signal = TradingSignal(
     signal_id=signal_id,
+    signal_uxid=payload.signal_uxid,
     strategy=payload.strategy,
     action=action,
     symbol=symbol,

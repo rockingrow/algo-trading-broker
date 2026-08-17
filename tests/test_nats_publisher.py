@@ -86,15 +86,21 @@ async def test_publish_flat_payload_shape():
   publisher = NatsPublisher(connection=conn)
   ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
   await publisher.publish_flat(
-    signal_id="sig-flat-1", symbol="XAUUSD", timestamp=ts, strategy="strat-x"
+    signal_id="sig-flat-1",
+    signal_uxid="9f2c4b7e18a3d605",
+    symbol="XAUUSD",
+    timestamp=ts,
+    strategy="strat-x",
   )
 
   subject, body = conn.nc.published[0]
   assert subject == "strat-x"
   # signal_id is required so workers can de-duplicate a live FLAT against the
-  # same signal replayed inside a WORKER_CONNECTED_ACK's retry_signals.
+  # same signal replayed inside a WORKER_CONNECTED_ACK's retry_signals;
+  # signal_uxid names the trade cycle being closed.
   assert body == {
     "signal_id": "sig-flat-1",
+    "signal_uxid": "9f2c4b7e18a3d605",
     "strategy": "strat-x",
     "timestamp": ts.isoformat(),
     "action": SignalActionEnum.FLAT.value,

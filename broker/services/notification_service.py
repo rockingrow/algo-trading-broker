@@ -6,7 +6,7 @@ Telegram message never blocks the event loop (previously a synchronous
 ``requests.post`` stalled the whole webhook handler for up to its timeout).
 
 Every channel resolves its chat-id setting through :func:`parse_chat_targets`,
-so any of them — ``TELEGRAM_CHAT_CHANNEL_ID`` above all — may name several
+so any of them — ``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` above all — may name several
 chats at once and may address a single topic inside a supergroup that has the
 Topics feature enabled (``-1002173777783_924584``).
 
@@ -46,6 +46,7 @@ import asyncio
 import logging
 import re
 import time
+from enum import Enum
 from typing import Any, NamedTuple
 
 import httpx
@@ -243,7 +244,7 @@ class TelegramNotification(Notification):
     setting_repository: SettingRepository | None = None,
   ):
     super().__init__(
-      chat_id=chat_id if chat_id is not None else settings.telegram.CHAT_ID,
+      chat_id=chat_id if chat_id is not None else settings.telegram.BROKER_LOG_CHAT_IDS,
       bot_token=bot_token if bot_token is not None else settings.telegram.BOT_TOKEN,
     )
     self._setting_repository = setting_repository
@@ -282,6 +283,157 @@ class OwnerBroadcastNotifier(Notification):
       if bot_token is not None
       else settings.telegram.SERVICE_BOT_TOKEN
     )
+
+
+class EditOutcome(Enum):
+  """Result of trying to rewrite an existing broadcast message.
+
+  A tri-state, not a bool, because the caller reacts differently to each: an
+  OK edit updates the stored body, a MISSING one falls back to a fresh send
+  (the message is gone from the channel and cannot be edited), and a FAILED
+  one keeps the stored id and retries on the next pass — re-sending on a rate
+  limit would duplicate the cycle in the chat.
+  """
+
+  OK = "OK"
+  #: The message is gone or can no longer be edited — re-send to recover.
+  MISSING = "MISSING"
+  #: Transient failure — keep the message id and retry on the next signal.
+  FAILED = "FAILED"
+
+
+#: Bot API error fragments (lower-cased) that mean the message is unrecoverable.
+_MESSAGE_GONE_MARKERS = (
+  "message to edit not found",
+  "message can't be edited",
+  "message_id_invalid",
+)
+
+
+class BroadcastNotifier:
+  """Sends and edits Telegram messages for one signal-cycle broadcast.
+
+  Distinct from :class:`Notification` because the callers on this side are
+  stateful from the message's point of view: one trade cycle owns a single
+  message per chat, so the send has to hand back the ``message_id`` for later
+  edits, and every subsequent update rewrites that same message in place.
+  Like :class:`TelegramNotification`, the body is wrapped in the same
+  ``<pre>`` box (see :func:`_box`) so a cycle reads the same way in the chat
+  as every other broker notification.
+  """
+
+  def __init__(self, bot_token: str | None = None) -> None:
+    self.enabled = settings.telegram.ENABLED
+    self.bot_token = bot_token if bot_token is not None else settings.telegram.BOT_TOKEN
+
+  def _api_url(self, method: str) -> str:
+    return f"https://api.telegram.org/bot{self.bot_token}/{method}"
+
+  def _ready(self, target: ChatTarget) -> bool:
+    if not self.enabled:
+      logger.debug("Telegram notifications are disabled in settings.")
+      return False
+    if not self.bot_token or not target.chat_id:
+      logger.warning("TELEGRAM_BOT_TOKEN and a chat id must be set for broadcasts.")
+      return False
+    return True
+
+  def _payload(self, target: ChatTarget, text: str) -> dict:
+    payload: dict[str, Any] = {
+      "chat_id": target.chat_id,
+      "text": _box(text),
+      "parse_mode": "HTML",
+      "disable_web_page_preview": True,
+    }
+    if target.message_thread_id is not None:
+      payload["message_thread_id"] = target.message_thread_id
+    return payload
+
+  async def send_and_get_message_id(self, target: ChatTarget, text: str) -> str | None:
+    """Post *text* to *target* and return Telegram's ``message_id``.
+
+    ``None`` means nothing was sent (disabled/misconfigured) or the send
+    failed. A send that succeeded but whose response could not be parsed also
+    yields ``None``: without an id the cycle cannot be edited later, so the
+    caller must treat it as "no message to update".
+    """
+    if not self._ready(target):
+      return None
+    try:
+      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
+        response = await client.post(
+          self._api_url("sendMessage"), json=self._payload(target, text)
+        )
+      if response.status_code != 200:
+        logger.error(
+          "Telegram sendMessage failed chat_id=%s: %s",
+          target.label,
+          response.text,
+        )
+        return None
+      body = _safe_json(response)
+      message_id = body.get("message_id") if isinstance(body, dict) else None
+      if message_id is None:
+        logger.warning(
+          "Telegram sendMessage chat_id=%s returned no message_id", target.label
+        )
+        return None
+      return str(message_id)
+    except Exception as exc:
+      logger.exception(
+        "Exception on Telegram sendMessage chat_id=%s: %s", target.label, exc
+      )
+      return None
+
+  async def edit_message(
+    self, target: ChatTarget, message_id: str, text: str
+  ) -> EditOutcome:
+    """Rewrite an already-sent broadcast message.
+
+    Three outcomes drive different recoveries in the caller. An edit Telegram
+    rejects because the body is byte-identical (``message is not modified``)
+    counts as OK — it is a no-op, and calling it a failure would make a
+    re-delivered signal re-post the whole cycle.
+    """
+    if not self._ready(target):
+      return EditOutcome.FAILED
+    payload = self._payload(target, text)
+    payload["message_id"] = message_id
+    try:
+      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
+        response = await client.post(self._api_url("editMessageText"), json=payload)
+      if response.status_code == 200:
+        return EditOutcome.OK
+      body = (response.text or "").lower()
+      if "message is not modified" in body:
+        return EditOutcome.OK
+      logger.error(
+        "Telegram editMessageText failed chat_id=%s message_id=%s: %s",
+        target.label,
+        message_id,
+        response.text,
+      )
+      if any(marker in body for marker in _MESSAGE_GONE_MARKERS):
+        return EditOutcome.MISSING
+      return EditOutcome.FAILED
+    except Exception as exc:
+      logger.exception(
+        "Exception editing Telegram message chat_id=%s message_id=%s: %s",
+        target.label,
+        message_id,
+        exc,
+      )
+      return EditOutcome.FAILED
+
+
+def _safe_json(response) -> dict:
+  """Best-effort JSON parse of a Bot API response's ``result`` object."""
+  try:
+    body = response.json()
+  except Exception:
+    return {}
+  result = body.get("result") if isinstance(body, dict) else None
+  return result if isinstance(result, dict) else {}
 
 
 class QueuedNotifier:
@@ -378,7 +530,7 @@ class TelegramLogNotification(TelegramNotification):
 
   def __init__(self) -> None:
     super().__init__(
-      chat_id=settings.telegram.LOG_CHAT_ID or settings.telegram.CHAT_ID,
+      chat_id=settings.telegram.LOG_CHAT_ID or settings.telegram.BROKER_LOG_CHAT_IDS,
       bot_token=settings.telegram.LOG_BOT_TOKEN or settings.telegram.BOT_TOKEN,
     )
 

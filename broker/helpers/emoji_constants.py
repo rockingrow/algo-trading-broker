@@ -8,14 +8,15 @@ and easy to swap out without hunting through multiple files.
 import emoji
 
 # ── Trading signal actions ────────────────────────────────────────────────────
-LONG: str = emoji.emojize(":green_circle:")  # 🟢
-SHORT: str = emoji.emojize(":red_circle:")  # 🔴
+LONG: str = emoji.emojize(":chart_increasing:")  # 📈
+SHORT: str = emoji.emojize(":chart_decreasing:")  # 📉
 TP1: str = emoji.emojize(":bullseye:")  # 🎯
 TP2: str = emoji.emojize(":rocket:")  # 🚀
 R_SL: str = emoji.emojize(":shield:")  # 🛡️
-SL: str = emoji.emojize(":cross_mark:")  # ❌
+SL: str = emoji.emojize(":hollow_red_circle:")  # ⭕
 FLAT: str = emoji.emojize(":white_flag:")  # 🏳️
 DEFAULT_SIGNAL: str = emoji.emojize(":satellite_antenna:")  # 📡
+BAR_CHART: str = emoji.emojize(":bar_chart:")  # 📊
 
 # ── Broker lifecycle ──────────────────────────────────────────────────────────
 BROKER_STARTED: str = emoji.emojize(":green_circle:")  # 🟢
@@ -36,6 +37,13 @@ ERROR_ALERT: str = emoji.emojize(":police_car_light:")  # 🚨
 GEAR: str = emoji.emojize(":gear:")  # ⚙️
 ADMIN_FLAT: str = emoji.emojize(":shield:")  # 🛡️
 BLOCKED: str = emoji.emojize(":prohibited:")  # 🚫
+
+# ── Broadcast cycle status ────────────────────────────────────────────────────
+# One Telegram message per signal cycle: the header carries a status icon that
+# changes in place as the cycle progresses.
+CYCLE_RUNNING: str = emoji.emojize(":hourglass_not_done:")  # ⏳
+CYCLE_CLOSED: str = emoji.emojize(":chequered_flag:")  # 🏁
+CYCLE_RETRY: str = emoji.emojize(":counterclockwise_arrows_button:")  # 🔄
 
 # ── Position flags ────────────────────────────────────────────────────────────
 FLAG_ON: str = emoji.emojize(":green_circle:")  # 🟢

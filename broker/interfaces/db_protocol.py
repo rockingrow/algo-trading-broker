@@ -1,13 +1,43 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from broker.db.models import Account, Signal, Trade
+from broker.db.models import (
+  Account,
+  BroadcastMessage,
+  BroadcastMessageChat,
+  BroadcastMessageLog,
+  BroadcastMessageWorker,
+  Signal,
+  Trade,
+)
 from broker.schemas.account_schema import AccountLinkSummary, MarketTypeEnum
-from broker.schemas.core import BotPlatformTypeEnum
+from broker.schemas.core import (
+  BotPlatformTypeEnum,
+  BroadcastAudienceEnum,
+  SignalActionEnum,
+)
 from broker.schemas.trade_event_schema import PositionEvent
+from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
+
+
+@dataclass(frozen=True)
+class BroadcastCycleView:
+  """Everything the dispatcher needs to render and deliver one cycle.
+
+  Loaded in a single call so the message body, the chats it goes to and the
+  worker table inside it all come from the same database snapshot — rendering
+  from three separately-timed reads could show a worker row that the body's
+  own state does not know about yet.
+  """
+
+  message: BroadcastMessage
+  chats: list[BroadcastMessageChat] = field(default_factory=list)
+  workers: list[BroadcastMessageWorker] = field(default_factory=list)
 
 
 @runtime_checkable
@@ -142,6 +172,80 @@ class TradeBroadcastRepository(Protocol):
     gateway: str | None,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> list[str]: ...
+
+
+@runtime_checkable
+class BroadcastMessageRepository(Protocol):
+  """Stores one Telegram message per signal cycle, the per-chat copies of it,
+  the workers that executed it, and the write log that drives delivery.
+
+  The split is deliberate: the first two methods are *writers* (a signal, a
+  worker report) that only touch the database, and the rest is what the
+  dispatcher uses to turn those durable changes into Telegram edits.
+  """
+
+  async def record_event(
+    self,
+    *,
+    strategy: str,
+    signal_uxid: str,
+    symbol: str,
+    timeframe: str | None,
+    action: SignalActionEnum,
+    event: dict,
+  ) -> BroadcastMessage | None: ...
+
+  async def record_worker_execution(
+    self,
+    *,
+    strategy: str,
+    signal_uxid: str,
+    worker_id: str,
+    account_id: str,
+    market: MarketTypeEnum | None,
+    gateway: str | None,
+    latest_status: TradeStatusEnum,
+    latest_action: str | None = None,
+    reject_reason: str | None = None,
+    event_at: datetime | None = None,
+  ) -> BroadcastMessage | None: ...
+
+  async def claim_pending_logs(
+    self, broadcast_message_id: uuid.UUID, *, max_attempts: int
+  ) -> list[BroadcastMessageLog]: ...
+
+  async def finish_logs(
+    self,
+    log_ids: list[uuid.UUID],
+    *,
+    delivered: bool,
+    error: str | None = None,
+    max_attempts: int | None = None,
+  ) -> bool: ...
+
+  async def list_cycles_with_pending_logs(
+    self, *, max_attempts: int, stale_after_seconds: int, limit: int = 50
+  ) -> list[uuid.UUID]: ...
+
+  async def reclaim_stale_logs(self, *, stale_after_seconds: int) -> int: ...
+
+  async def load_cycle(
+    self, broadcast_message_id: uuid.UUID
+  ) -> BroadcastCycleView | None: ...
+
+  async def upsert_chat(
+    self,
+    broadcast_message_id: uuid.UUID,
+    *,
+    audience: BroadcastAudienceEnum,
+    chat_id: str,
+    message_id: str | None,
+    message: str | None,
+    delivered_seq: int | None = None,
+    last_error: str | None = None,
+  ) -> bool: ...
+
+  async def mark_broadcast(self, broadcast_message_id: uuid.UUID) -> bool: ...
 
 
 @runtime_checkable

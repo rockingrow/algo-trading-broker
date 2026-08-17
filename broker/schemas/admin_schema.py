@@ -89,6 +89,23 @@ class CryptoAllowedSymbolRequest(BaseModel):
   )
 
 
+class PublicBroadcastChatIdsRequest(BaseModel):
+  """Request body for POST /settings/public-broadcast-chat-ids.
+
+  The chats the **public** signal broadcast is delivered to. An empty list is
+  allowed and meaningful — it turns the public broadcast off — which is why
+  this has no ``min_length`` unlike the other list settings.
+  """
+
+  chat_ids: list[str] = Field(
+    default_factory=list,
+    description=(
+      "Telegram chat ids (or @channel usernames) to broadcast publicly to, "
+      "e.g. ['-1001234567890', '@my_public_channel']. Empty disables it."
+    ),
+  )
+
+
 class CryptoMaxLeverageRequest(BaseModel):
   """Request body for POST /settings/crypto-max-leverage."""
 

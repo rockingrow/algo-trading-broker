@@ -396,8 +396,8 @@ DOCS_ENABLED=false
 # ── Telegram notifier (broker → chat, send-only) ─────
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
-TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
+TELEGRAM_BROKER_LOG_CHAT_IDS=          # management chat: broker lifecycle events
+TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS=   # private signal-cycle broadcast: strategy, signal id + worker table
 # Every chat id (incl. TELEGRAM_LOG_CHAT_ID) accepts a comma-separated list,
 # and an entry may address one topic of a group with Topics enabled:
 # -1002173777783_924584 (see below).
@@ -407,7 +407,7 @@ TELEGRAM_LOG_ERRORS_ENABLED=false
 TELEGRAM_LOG_DEDUP_WINDOW=60   # seconds — suppress identical messages
 TELEGRAM_HTTP_TIMEOUT=5.0      # seconds per Bot API call
 TELEGRAM_LOG_BOT_TOKEN=        # dedicated log bot (falls back to TELEGRAM_BOT_TOKEN)
-TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_CHAT_ID)
+TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_BROKER_LOG_CHAT_IDS)
 
 # ── Telegram bot service (interactive, ./bot) ────────
 # A *second* BotFather bot, separate from TELEGRAM_BOT_TOKEN above.
@@ -421,16 +421,16 @@ BOT_REQUEST_TIMEOUT=10.0
 
 ### Telegram chat ids: many chats, and group topics
 
-`TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_CHANNEL_ID` and `TELEGRAM_LOG_CHAT_ID` are
+`TELEGRAM_BROKER_LOG_CHAT_IDS`, `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS` and `TELEGRAM_LOG_CHAT_ID` are
 all parsed the same way — none of them is special — so each can reach several
 chats and can address a **topic** inside a group that has the Topics feature
 switched on:
 
 ```bash
 # Two groups + one topic inside a third, all from one setting
-TELEGRAM_CHAT_CHANNEL_ID="-1001111111111,@public_channel,-1002173777783_924584"
+TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS="-1001111111111,@public_channel,-1002173777783_924584"
 # The same syntax works for the management chat and the error-log chat
-TELEGRAM_CHAT_ID="-1001111111111,-1002173777783_100"
+TELEGRAM_BROKER_LOG_CHAT_IDS="-1001111111111,-1002173777783_100"
 TELEGRAM_LOG_CHAT_ID="-1002173777783_555"
 ```
 
@@ -459,7 +459,7 @@ Notes:
   chat (bot kicked, topic deleted) is logged without stopping the others.
 - Whitespace and empty entries are ignored, and a chat listed twice is only
   notified once.
-- An empty `TELEGRAM_LOG_CHAT_ID` still falls back to `TELEGRAM_CHAT_ID`,
+- An empty `TELEGRAM_LOG_CHAT_ID` still falls back to `TELEGRAM_BROKER_LOG_CHAT_IDS`,
   list and topics included.
 - Completed-trade owner DMs take their chat id from the database rather than
   from `.env`, but run through the same parsing, so nothing has to special-case
@@ -624,6 +624,7 @@ The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the respon
 {
   "token": "your_secure_token",
   "strategy": "wt_cross_v1",
+  "signal_uxid": "9f2c4b7e18a3d605",
   "symbol": "XAUUSD",
   "timeframe": "M5",
   "timestamp": "2024-03-20T10:00:00Z",
@@ -655,6 +656,16 @@ The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the respon
 ```
 
 **Supported Actions:** `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`, `SL`, `FLAT`.
+
+**`signal_uxid` (required):** a 16-character lowercase-hex short uuid the
+TradingView strategy generates once per *trade cycle* and reuses across
+every action of that cycle — the `LONG` entry, its `TP1`, `TP2`, `SL`, and
+the closing `FLAT` all carry the same `signal_uxid`. That is what ties the
+whole trade to one edited-in-place Telegram broadcast message. A payload
+that omits it or sends any other shape is rejected with `422`. The
+per-signal `signal_id` the broker mints on persist is still unique per
+alert (workers keep deduping on it) — the two ids serve different jobs and
+both travel on every downstream NATS payload.
 
 #### Position fields — `tp1`/`tp2`/`sl` vs `scaling`
 
@@ -1024,6 +1035,7 @@ and local development.
 | ------------------ | ---------------- | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `strategy` | String(50) | Strategy name that generated the signal |
+| `signal_uxid` | String(16) (Nullable) | Cycle correlator — 16-char lowercase-hex short uuid shared by every signal of one trade (entry + TPs + SL + FLAT). Ties a signal to its `broadcast_messages` row so the trade renders as one edited-in-place Telegram message. |
 | `symbol` | String(50) | Trading symbol (e.g., XAUUSD) |
 | `timeframe` | String(20) | Chart timeframe (e.g., M15) |
 | `timestamp` | DateTime | Signal generation time from TradingView |
@@ -1219,7 +1231,102 @@ therefore reads `Status: FLAT`, not `FLAT (FLAT)`.
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `strategy_magic_map` | `'{"MT5_GOLD_M5_V1": 20260409, …}'` | `POST` / `GET /admin/settings/strategy-magic-map` | JSON-text strategy → magic-number map sent to every worker in its `WORKER_CONNECTED_ACK` on connect, filtered to the strategies it announces |
 | `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
+| `public_broadcast_chat_ids` | `""` | `POST` / `GET /admin/settings/public-broadcast-chat-ids` | Comma-separated chat ids (with the same topic suffix syntax as `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`) that receive the **public** signal-cycle broadcast — the bare price/level/timeline copy, without strategy internals or the worker execution table. Editable at runtime from the admin API and the bot's `/admin_public_chats` command; empty turns the public broadcast off. |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
+
+### `broadcast_messages` table
+
+One row per signal *cycle*: everything the broker has seen for one trade
+(``strategy`` + ``signal_uxid``) rolled up into a single record. The row's
+``events`` list — an ordered JSONB array of the actions in the order they
+arrived — is what the Telegram message body is rendered from every time an
+edit is due, so the operator sees the full timeline in one place instead of
+one message per action.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `strategy` | String(50) | Strategy the cycle belongs to |
+| `signal_uxid` | String(16) | 16-char lowercase-hex cycle correlator (matches `signals.signal_uxid`) |
+| `symbol` | String(50) | Symbol carried on the entry signal |
+| `timeframe` | String(20) (Nullable) | Chart timeframe carried on the entry signal |
+| `status` | Enum | `RUNNING` until a closing action arrives (TP2, R_SL, SL, FLAT); then `CLOSED` |
+| `events` | JSONB | Ordered list of stored action events — action, price/qty/levels, timestamp, attempt number, indicator/input dumps |
+| `last_seq` | Integer | Sequence number of the most recent write-log entry against this cycle (see below) |
+| `last_broadcast_at` | DateTime (Nullable) | Timestamp of the last successful dispatcher run for this cycle |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
+
+**Unique constraint:** `(strategy, signal_uxid)` — the cycle key.
+
+### `broadcast_message_chats` table
+
+Per-chat delivery state for a cycle. Every chat the cycle addressed (private
+audience from `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`, public audience from the
+`public_broadcast_chat_ids` broker setting) has its own row here, so the
+same cycle can carry a different Telegram `message_id` in each chat and can
+render a slightly different body per audience (the private copy carries the
+strategy name, signal id, the worker execution table and the raw dump; the
+public copy is the bare price/level/timeline body only).
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `broadcast_message_id` | UUID | FK → `broadcast_messages.id`, `ON DELETE CASCADE` |
+| `audience` | Enum | `PRIVATE` (operator) or `PUBLIC` (subscribers) |
+| `chat_id` | String(255) | The setting entry the row represents — verbatim, so `-1002173777783_924584` (a group + topic id) is distinct from `-1002173777783_924585` |
+| `message_id` | String(64) (Nullable) | Telegram `message_id` of the chat's cycle message; `NULL` until the first send succeeds |
+| `message` | Text (Nullable) | Last body actually delivered to this chat — kept so the dispatcher can skip a no-op edit |
+| `delivered_seq` | Integer | Highest `last_seq` this chat has been shown; a delivery whose seq is not greater is dropped so a slow edit cannot overwrite a newer body |
+| `last_error` | String(500) (Nullable) | Last transient error seen when editing/sending, or `NULL` on success |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
+
+**Unique constraint:** `(broadcast_message_id, chat_id)`.
+
+### `broadcast_message_workers` table
+
+Rows appended by the TRADE consumer for the *public* broadcast's execution
+table (one line per worker per cycle, updated in place as the worker
+progresses through the trade). Account ids are stored verbatim; the
+formatter masks them to their last four characters when rendering
+(`MT5 ****5678`) so the public channel never publishes anyone's full
+account number.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `broadcast_message_id` | UUID | FK → `broadcast_messages.id`, `ON DELETE CASCADE` |
+| `worker_id` | String(255) | `<market>-<gateway>-<account_id>` composed by `compose_worker_id` |
+| `account_id` | String(50) | Worker's raw account id (masked at render time) |
+| `market` | Enum (Nullable) | `FOREX` / `CRYPTO`, copied from the TRADE event or the persisted account |
+| `gateway` | String(50) (Nullable) | Exchange the account trades through |
+| `latest_status` | Enum | Last trade status seen from this worker for this cycle: `OPENED`, `PARTIALLY_CLOSED`, `CLOSED`, `FLAT`, `REJECTED` |
+| `latest_action` | String(20) (Nullable) | Last raw action label the worker reported (e.g. `TP1`, `SL`, `R_SL`) |
+| `reject_reason` | String(255) (Nullable) | Reason if the last event was a rejection |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
+
+**Unique constraint:** `(broadcast_message_id, worker_id)`.
+
+### `broadcast_message_logs` table
+
+Append-only write log that turns a cycle change into a delivery. Every
+recorded event and every worker execution appends one row here *in the same
+transaction*, and a Postgres trigger fires `pg_notify` on the
+`broadcast_message_logs` channel so `BroadcastDispatcher` can wake up and
+edit the affected chats without polling. A sweeper re-drains the log on a
+timer as a safety net for anything appended while the dispatcher was down.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `broadcast_message_id` | UUID | FK → `broadcast_messages.id`, `ON DELETE CASCADE` |
+| `seq` | Integer | Per-cycle sequence handed out under a row lock; strictly increasing |
+| `kind` | Enum | `SIGNAL_EVENT` (a signal folded in) or `WORKER_EXECUTION` (a TRADE event) |
+| `payload` | JSONB | Copy of the event that was recorded — kept so the log is self-contained if the cycle is later purged |
+| `status` | Enum | `PENDING` on insert; `SENDING` while the dispatcher claims it; `DELIVERED` on success; `FAILED` after the retry cap is reached |
+| `attempts` | Integer | Delivery attempts spent on this row |
+| `last_error` | String(500) (Nullable) | Last error seen from the notifier, `NULL` on success |
+| `claimed_at` | DateTime (Nullable) | Set while the row is `SENDING` — a stale claim is reclaimed by the sweeper after 60 s |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
 
 ---
 

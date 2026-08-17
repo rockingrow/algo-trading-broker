@@ -29,17 +29,25 @@ Each signal is published on the subject **equal to its `strategy` field** (e.g.
 only to the strategies it handles, so it never sees another strategy's traffic.
 
 - **Entry / target / stop payloads** are a full `TradingSignal`: `signal_id`,
-  `timestamp`, `strategy`, `action`, `symbol`, `price`, `quantity`, plus the
+  `signal_uxid`, `timestamp`, `strategy`, `action`, `symbol`, `price`,
+  `quantity`, plus the
   optional `sl` / `tp1` / `tp2` / `risk_percent` risk levels. A **scale-in**
   additionally sets `is_scale_position: true`, `scale_strategy`, and a `scaling`
   block (`tp` / `sl` / `quantity`) describing the add.
 - **The FLAT directive** is a lighter payload carrying only `signal_id`,
-  `strategy`, `timestamp`, `action`, `symbol` — no price/quantity, because it
-  means "close everything on this strategy".
+  `signal_uxid`, `strategy`, `timestamp`, `action`, `symbol` — no
+  price/quantity, because it means "close everything on this strategy".
 
-`signal_id` is the de-duplication key: a worker that sees a signal live and then
-again inside a `WORKER_CONNECTED_ACK`'s `retry_signals` can drop the duplicate
-by id.
+Two ids travel with every payload and they answer different questions:
+
+- `signal_id` — **this one signal**, minted per persisted signal, so it is
+  unique per action. It is the **de-duplication key**: a worker that sees a
+  signal live and then again inside a `WORKER_CONNECTED_ACK`'s `retry_signals`
+  drops the duplicate by this id.
+- `signal_uxid` — the **trade cycle** the signal belongs to, shared by the entry
+  and every TP/SL/FLAT that follows it. Use it to **correlate** a close with the
+  position it opened — never for de-duplication, since a whole trade shares one
+  value.
 `action` is one of `SignalActionEnum`: `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`,
 `SL`, `FLAT`.
 
@@ -129,7 +137,9 @@ Besides the trade fields (`symbol`, `action`, `volume`, `opened_price`,
 (`account_id`, `account_name`, `gateway`, `account_leverage`,
 `account_balance`) the broker needs to create/upsert the trade and address the
 worker later. `ref_id` is the gateway's own order/ticket reference; `signal_id`
-ties the event back to the originating signal.
+echoes back the id the worker was given on the SIGNAL payload, which ties the
+event to the originating signal — and, through that signal's `signal_uxid`, to
+the broadcast message the broker renders for the trade.
 
 `status` is the **worker** position status; the broker maps it onto its own
 trade lifecycle state via `broker/domain/trade_status.py` (shown in the last

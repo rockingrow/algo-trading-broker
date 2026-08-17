@@ -283,6 +283,7 @@ class BrokerClientAdmin(BrokerClient):
     STRATEGY_MAGIC_MAP = "settings/strategy-magic-map"
     CRYPTO_ALLOWED_SYMBOL = "settings/crypto-allowed-symbol"
     CRYPTO_MAX_LEVERAGE = "settings/crypto-max-leverage"
+    PUBLIC_BROADCAST_CHAT_IDS = "settings/public-broadcast-chat-ids"
 
   async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
     """All trading accounts (includes link_token + linked_user_ids)."""
@@ -457,5 +458,25 @@ class BrokerClientAdmin(BrokerClient):
         "POST",
         self._path(self.ENDPOINTS.CRYPTO_MAX_LEVERAGE),
         json={"default_leverage": default_leverage},
+      )
+    )
+
+  async def get_public_broadcast_chat_ids(self) -> Optional[dict[str, Any]]:
+    """Current ``public_broadcast_chat_ids`` value (comma-separated chat ids,
+    empty string when the public broadcast is off)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.PUBLIC_BROADCAST_CHAT_IDS))
+    )
+
+  async def set_public_broadcast_chat_ids(
+    self, chat_ids: list[str]
+  ) -> Optional[dict[str, Any]]:
+    """Replace the public broadcast chats; an empty list turns them off. The
+    broker normalises (trim/dedup) so there is one validation path."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.PUBLIC_BROADCAST_CHAT_IDS),
+        json={"chat_ids": chat_ids},
       )
     )

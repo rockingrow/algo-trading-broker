@@ -130,9 +130,7 @@ async def test_all_strategy_market_gateway_flat_calls_broker_without_scope():
   call = FakeCall("aflat:confirm")
   await cb_aflat(call, state, broker)
 
-  assert broker.flat_calls == [
-    {"strategy": None, "market": None, "gateway": None}
-  ]
+  assert broker.flat_calls == [{"strategy": None, "market": None, "gateway": None}]
 
 
 async def test_scoped_pickers_forward_selected_values_to_broker():

@@ -7,8 +7,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from broker.helpers.uxid_helper import UXID_LENGTH, is_valid_uxid, new_uxid
 from broker.schemas.core import SignalActionEnum
 
 
@@ -97,6 +98,7 @@ class WebhookPayload(BaseModel):
         "symbol": "BTCUSDT",
         "timeframe": "15",
         "timestamp": "2026-06-02T10:15:00Z",
+        "signal_uxid": "9f2c4b7e18a3d605",
         "position": {
           "action": "LONG",
           "price": 68250.5,
@@ -115,7 +117,47 @@ class WebhookPayload(BaseModel):
   symbol: str
   timeframe: str
   timestamp: datetime
+  # Short id (exactly 16 lowercase-hex chars, i.e. what :func:`new_uxid`
+  # produces) shared by every alert of one trade cycle: the entry and each of
+  # its TP/SL/FLAT follow-ups. Together with ``strategy`` it keys the single
+  # Telegram broadcast message the cycle is rendered into, so a strategy that
+  # wants one grouped message must send the same value on every alert of that
+  # trade. Generated per payload when TradingView omits it, which degrades to
+  # the old behaviour: one message per signal.
+  signal_uxid: str = Field(default_factory=new_uxid)
   position: PositionSchema
   indicators: Optional[IndicatorsSchema] = None
   inputs: Optional[InputsSchema] = None
   token: str
+
+  @field_validator("signal_uxid", mode="before")
+  @classmethod
+  def _fill_or_validate_uxid(cls, value):
+    """Auto-generate when the payload has none; strictly validate what it has.
+
+    A blank (``null`` / ``""`` / whitespace) is treated as an omitted field:
+    TradingView alert templates commonly interpolate an empty placeholder
+    rather than dropping the key, and without this every such payload would
+    key its cycle to the same blank id and collapse unrelated trades into one
+    message.
+
+    Anything else is rejected unless it matches the exact uxid shape (16
+    lowercase-hex chars). Uppercase hex is accepted and normalised, so a
+    strategy that writes UUIDs in either case works either way. Rejecting at
+    the boundary is deliberate: a malformed id — a shortened one, a UUID with
+    dashes, a random string — could collide against a real cycle id and quietly
+    merge two unrelated trades. Failing fast with a 422 forces the strategy to
+    fix its alert instead.
+    """
+    if value is None:
+      return new_uxid()
+    text = str(value).strip()
+    if not text:
+      return new_uxid()
+    normalised = text.lower()
+    if not is_valid_uxid(normalised):
+      raise ValueError(
+        f"signal_uxid must be exactly {UXID_LENGTH} lowercase-hex characters, "
+        f"got {value!r}"
+      )
+    return normalised

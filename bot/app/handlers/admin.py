@@ -55,6 +55,7 @@ from app.states import (
   AdminCryptoAllowedSymbol,
   AdminCryptoMaxLeverage,
   AdminLinkAccount,
+  AdminPublicBroadcastChats,
   CreateAccount,
   SetStrategyMagicMap,
 )
@@ -198,7 +199,9 @@ def _aflat_scope_text(scope: dict) -> str:
   parts = []
   strat = scope.get("strategy")
   parts.append(
-    f"strategy=<code>{html.escape(str(strat))}</code>" if strat else "strategy=<b>ALL</b>"
+    f"strategy=<code>{html.escape(str(strat))}</code>"
+    if strat
+    else "strategy=<b>ALL</b>"
   )
   market = scope.get("market")
   parts.append(
@@ -323,7 +326,9 @@ async def cb_aflat_pick_strategy(call: CallbackQuery, state: FSMContext) -> None
       await call.answer()
       return
     if idx < 0 or idx >= len(strategies):
-      await call.answer(f"{emojis.WARNING} Expired — run /aflat again.", show_alert=True)
+      await call.answer(
+        f"{emojis.WARNING} Expired — run /aflat again.", show_alert=True
+      )
       return
     scope["strategy"] = strategies[idx]
 
@@ -860,6 +865,7 @@ async def receive_magic_map(
 async def prompt_magic_map_text(message: Message) -> None:
   await message.answer(f"{emojis.WARNING} Please send the magic map as JSON text.")
 
+
 # ── /admin_crypto_symbols ───────────────────────────────────────────
 # Show the current CRYPTO_ALLOWED_SYMBOL_KEY value and prompt for a new one as
 # a comma-separated list. Normalisation (trim/upper/dedup) lives on the broker
@@ -977,8 +983,7 @@ async def receive_admin_crypto_leverage(
     return
   if leverage <= 0:
     await message.answer(
-      f"{emojis.WARNING} Leverage must be a positive integer. "
-      "Send /cancel to abort."
+      f"{emojis.WARNING} Leverage must be a positive integer. Send /cancel to abort."
     )
     return
 
@@ -1000,4 +1005,72 @@ async def receive_admin_crypto_leverage(
 async def prompt_admin_crypto_leverage_text(message: Message) -> None:
   await message.answer(
     f"{emojis.WARNING} Please send the leverage as a numeric text value."
+  )
+
+
+# ── /admin_public_chats ─────────────────────────────────────────────
+# Show the chats the PUBLIC signal broadcast is delivered to and prompt for a
+# new comma-separated list. The private audience stays an env var (a deployment
+# concern); the public one is edited here because it changes with the audience,
+# not with the deployment. Sending "-" clears it, which turns the public
+# broadcast off.
+
+
+@router.message(Command("admin_public_chats", "public_chats"))
+async def cmd_admin_public_chats(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  await state.clear()
+  current = await broker_admin.get_public_broadcast_chat_ids()
+  if current is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch current chats.")
+    return
+  await state.set_state(AdminPublicBroadcastChats.waiting_for_chat_ids)
+  value = str(current.get("value") or "")
+  shown = html.escape(value) if value else "<i>(none — public broadcast off)</i>"
+  await message.answer(
+    f"{emojis.GEAR} <b>Public broadcast chats</b>\n\n"
+    f"Current: <code>{shown}</code>\n\n"
+    "Send the new list, comma-separated (e.g. "
+    "<code>-1001234567890, @my_channel</code>).\n"
+    "Send <code>-</code> to turn the public broadcast off, or /cancel to abort."
+  )
+
+
+@router.message(AdminPublicBroadcastChats.waiting_for_chat_ids, Command("cancel"))
+async def cancel_admin_public_chats(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await message.answer("Cancelled.")
+
+
+@router.message(
+  AdminPublicBroadcastChats.waiting_for_chat_ids, F.text & ~F.text.startswith("/")
+)
+async def receive_admin_public_chats(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  # "-" is the explicit "no public chats" answer; the broker drops it as a
+  # placeholder either way, so an empty list is what gets sent.
+  chat_ids = [] if raw == "-" else [c.strip() for c in raw.split(",") if c.strip()]
+
+  result = await broker_admin.set_public_broadcast_chat_ids(chat_ids)
+  await state.clear()
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update public chats. Run /admin_public_chats to retry."
+    )
+    return
+  value = str(result.get("value") or "")
+  shown = html.escape(value) if value else "<i>(none — public broadcast off)</i>"
+  await message.answer(
+    f"{emojis.CHECK} <b>Public broadcast chats updated</b>\n"
+    f"New value: <code>{shown}</code>"
+  )
+
+
+@router.message(AdminPublicBroadcastChats.waiting_for_chat_ids, ~F.text)
+async def prompt_admin_public_chats_text(message: Message) -> None:
+  await message.answer(
+    f"{emojis.WARNING} Please send the chat ids as text, comma-separated."
   )

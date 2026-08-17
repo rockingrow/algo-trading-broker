@@ -45,3 +45,10 @@ class AdminCryptoMaxLeverage(StatesGroup):
   integer."""
 
   waiting_for_leverage = State()
+
+
+class AdminPublicBroadcastChats(StatesGroup):
+  """Admin flow: after seeing the chats the public signal broadcast goes to,
+  type a new comma-separated list (or ``-`` to turn the public flow off)."""
+
+  waiting_for_chat_ids = State()
