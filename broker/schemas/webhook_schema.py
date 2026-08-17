@@ -142,7 +142,7 @@ class WebhookPayload(BaseModel):
     message.
 
     Anything else is rejected unless it matches the exact uxid shape (16
-    lowercase-hex chars). Uppercase hex is accepted and normalised, so a
+    uppercase alphanumeric characters). Uppercase is accepted and normalised, so a
     strategy that writes UUIDs in either case works either way. Rejecting at
     the boundary is deliberate: a malformed id — a shortened one, a UUID with
     dashes, a random string — could collide against a real cycle id and quietly
@@ -154,10 +154,10 @@ class WebhookPayload(BaseModel):
     text = str(value).strip()
     if not text:
       return new_uxid()
-    normalised = text.lower()
+    normalised = text.upper()
     if not is_valid_uxid(normalised):
       raise ValueError(
-        f"signal_uxid must be exactly {UXID_LENGTH} lowercase-hex characters, "
+        f"signal_uxid must be exactly {UXID_LENGTH} uppercase alphanumeric characters, "
         f"got {value!r}"
       )
     return normalised
