@@ -1,5 +1,6 @@
 {
-  "signal_id": "sig_123456789_short",
+  "signal_id": "sig_987654321_short",
+  "signal_uxid": "5c1e7a08b6d34f92",
   "timestamp": "2026-04-18T21:55:00Z",
   "strategy": "MT5_GOLD_M5_V1",
   "action": "SHORT",

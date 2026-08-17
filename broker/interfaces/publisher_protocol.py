@@ -29,6 +29,7 @@ class SignalPublisher(Protocol):
     symbol: str,
     timestamp: datetime,
     strategy: str,
+    signal_uxid: str | None = None,
   ) -> None: ...
 
   async def publish_admin_signal(self, **kwargs) -> None: ...

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage, StorageKey
 
@@ -58,11 +57,15 @@ class FakeAdminBroker:
   async def get_crypto_max_leverage(self) -> Optional[dict[str, Any]]:
     return self._leverage
 
-  async def set_crypto_allowed_symbol(self, symbols: list[str]) -> Optional[dict[str, Any]]:
+  async def set_crypto_allowed_symbol(
+    self, symbols: list[str]
+  ) -> Optional[dict[str, Any]]:
     self.set_symbols_calls.append(symbols)
     return self._set_symbols_result
 
-  async def set_crypto_max_leverage(self, default_leverage: int) -> Optional[dict[str, Any]]:
+  async def set_crypto_max_leverage(
+    self, default_leverage: int
+  ) -> Optional[dict[str, Any]]:
     self.set_leverage_calls.append(default_leverage)
     return self._set_leverage_result
 
@@ -79,7 +82,9 @@ def _make_state() -> FSMContext:
 async def test_cmd_crypto_symbols_shows_current_and_prompts():
   message = FakeMessage()
   state = _make_state()
-  broker = FakeAdminBroker(symbols={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"})
+  broker = FakeAdminBroker(
+    symbols={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"}
+  )
 
   await cmd_admin_crypto_symbols(message, state, broker)
 

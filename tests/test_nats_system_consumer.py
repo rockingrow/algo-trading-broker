@@ -681,10 +681,13 @@ async def test_stop_unsubscribes():
 # ── retry_signals replay inside the ACK ────────────────────────────────────
 
 
-def _webhook_envelope(strategy: str, signal_id: str = "sig-1") -> dict:
+def _webhook_envelope(
+  strategy: str, signal_id: str = "sig-1", signal_uxid: str = "0000111122223333"
+) -> dict:
   return {
     "signal_id": signal_id,
     "payload": {
+      "signal_uxid": signal_uxid,
       "strategy": strategy,
       "symbol": "OANDA:XAUUSD",
       "timeframe": "60",
@@ -840,7 +843,7 @@ async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
   signals = FakeSignalRepo(
     envelopes=[
       {"signal_id": "sig-bad", "payload": {"not": "a webhook"}},
-      _webhook_envelope("wt_cross_v1", signal_id="sig-good"),
+      _webhook_envelope("wt_cross_v1"),
     ]
   )
   consumer, _repo, publisher = _make_consumer(signals=signals)
@@ -850,7 +853,26 @@ async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
   assert len(publisher.acks) == 1
   retry = publisher.acks[0]["retry_signals"]
   assert len(retry) == 1
-  assert retry[0].signal_id == "sig-good"
+  assert retry[0].signal_id == "sig-1"
+
+
+async def test_replayed_signal_carries_both_ids():
+  """The replay repeats the id the signal was published with — that is what a
+  worker de-duplicates on — and the cycle id rides along from the payload."""
+  signals = FakeSignalRepo(
+    envelopes=[
+      _webhook_envelope(
+        "wt_cross_v1", signal_id="sig-7", signal_uxid="9f2c4b7e18a3d605"
+      )
+    ]
+  )
+  consumer, _repo, publisher = _make_consumer(signals=signals)
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
+  )
+  replayed = publisher.acks[0]["retry_signals"][0]
+  assert replayed.signal_id == "sig-7"
+  assert replayed.signal_uxid == "9f2c4b7e18a3d605"
 
 
 # ── strategy_magic_map inside the ACK ──────────────────────────────────────

@@ -1,5 +1,6 @@
 {
   "signal_id": "sig_123456789_r_sl",
+  "signal_uxid": "9f2c4b7e18a3d605",
   "timestamp": "2026-04-18T21:55:00Z",
   "strategy": "MT5_GOLD_M5_V1",
   "action": "R_SL",

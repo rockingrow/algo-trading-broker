@@ -86,7 +86,17 @@ class TradingSignal(BaseModel):
 
   model_config = ConfigDict(use_enum_values=True)
 
+  # Identity of THIS signal — the broker's ``signals`` row id, minted per
+  # persisted signal and therefore unique per action. This is the
+  # de-duplication key: a worker that sees a signal live and then again inside
+  # a ``retry_signals`` replay recognises it by this id alone.
   signal_id: str
+  # Identity of the trade **cycle** the signal belongs to — the ``signal_uxid``
+  # from the webhook payload, shared by the entry and every TP/SL/FLAT that
+  # follows it. It is for correlation, never for de-duplication: a worker uses
+  # it to tie a close back to the position it opened. Optional, because a
+  # payload that predates the field has none.
+  signal_uxid: Optional[str] = None
   timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
   strategy: str
@@ -306,6 +316,7 @@ class SystemWorkerConnectedAck(SystemSignal):
         "retry_signals": [
           {
             "signal_id": "sig_123",
+            "signal_uxid": "9f2c4b7e18a3d605",
             "timestamp": "2026-06-29T23:59:30+00:00",
             "strategy": "MT5_GOLD_M5_V1",
             "action": "LONG",

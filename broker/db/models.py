@@ -12,6 +12,7 @@ from datetime import datetime
 import uuid
 
 from sqlalchemy import (
+  BigInteger,
   Boolean,
   DateTime,
   Enum,
@@ -27,6 +28,10 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import (
   BotPlatformTypeEnum,
+  BroadcastAudienceEnum,
+  BroadcastLogKindEnum,
+  BroadcastLogStatusEnum,
+  BroadcastStatusEnum,
   SignalActionEnum,
   SignalStatusEnum,
 )
@@ -66,6 +71,9 @@ class Signal(Base):
   symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
   timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+  # Cycle id shared by every alert of one trade (see ``BroadcastMessage``).
+  # Nullable because rows written before the column existed have none.
+  signal_uxid: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
 
   # PositionSchema columns
   action: Mapped[SignalActionEnum] = mapped_column(
@@ -385,6 +393,263 @@ class TradeBroadcastSubscription(Base):
     return (
       f"<TradeBroadcastSubscription platform={self.platform} "
       f"platform_user_id={self.platform_user_id}>"
+    )
+
+
+class BroadcastMessage(Base):
+  """
+  One row per **signal cycle** broadcast to Telegram — not per signal.
+
+  A cycle is everything one trade emits: the LONG/SHORT entry, its TP1/TP2,
+  its SL/R_SL, a FLAT. All of them carry the same ``signal_uxid`` in the
+  webhook payload, so the pair ``(strategy, signal_uxid)`` identifies the
+  cycle and is the unique key. The first signal of a cycle inserts this row and
+  posts one Telegram message per broadcast chat; every later signal finds this
+  row and *edits* those messages instead of posting new ones, which is the
+  whole point — a channel shows one live message per trade rather than five.
+
+  The full history lives in ``events`` (JSONB, append-only) because the
+  message body is re-rendered from scratch on every update; ``actions``,
+  ``latest_action`` and ``status`` denormalise it for cheap querying and for
+  reading a cycle's state at a glance in SQL.
+  """
+
+  __tablename__ = "broadcast_messages"
+  __table_args__ = (
+    UniqueConstraint(
+      "strategy",
+      "signal_uxid",
+      name="uq_broadcast_messages_strategy_signal_uxid",
+    ),
+  )
+
+  strategy: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+  signal_uxid: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+
+  symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+  timeframe: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+  # Comma-separated action trail in arrival order, e.g. "LONG,TP1,SL". Kept as
+  # text (not an array) so it reads the same in psql, a CSV export and a log
+  # line; ``events`` is the structured source of truth.
+  actions: Mapped[str] = mapped_column(Text, nullable=False, default="")
+  latest_action: Mapped[SignalActionEnum] = mapped_column(
+    Enum(SignalActionEnum), nullable=False
+  )
+  status: Mapped[BroadcastStatusEnum] = mapped_column(
+    Enum(BroadcastStatusEnum),
+    nullable=False,
+    default=BroadcastStatusEnum.RUNNING,
+    server_default=BroadcastStatusEnum.RUNNING.value,
+    index=True,
+  )
+
+  # Every signal of the cycle, oldest first: action, prices, levels, the
+  # payload timestamp and (when the fan-out was retried) the attempt number.
+  # Re-rendering from this is what lets a later edit show the whole timeline.
+  events: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+  # Sequence counter of the cycle, bumped once per appended write-log entry.
+  # It is the cycle's version: every ``broadcast_message_logs`` row carries the
+  # value it produced, and each chat records the highest one it has rendered
+  # (``BroadcastMessageChat.delivered_seq``), which is what stops a slow
+  # delivery from overwriting a newer body with an older one.
+  last_seq: Mapped[int] = mapped_column(
+    BigInteger, nullable=False, default=0, server_default="0"
+  )
+
+  # When the cycle was last pushed to Telegram (sent or edited), regardless of
+  # whether any individual chat send succeeded.
+  last_broadcast_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
+
+  def __repr__(self) -> str:
+    return (
+      f"<BroadcastMessage id={self.id} strategy={self.strategy} "
+      f"signal_uxid={self.signal_uxid} latest_action={self.latest_action} "
+      f"status={self.status} last_seq={self.last_seq}>"
+    )
+
+
+class BroadcastMessageChat(Base):
+  """
+  One row per (cycle, chat): the Telegram message a single chat holds.
+
+  A cycle fans out to several chats — the private channel(s) and the public
+  one(s) — and each chat gets its **own** ``message_id``, because editing a
+  message is per-chat. ``message`` keeps the exact body last delivered to that
+  chat: today private and public render identically, and storing the text per
+  chat is what makes it cheap to diverge them later (a trimmed public body,
+  say) without a schema change.
+
+  ``message_id`` is NULL when the first send failed; the next signal of the
+  cycle retries it as a fresh send rather than an edit.
+  """
+
+  __tablename__ = "broadcast_message_chats"
+  __table_args__ = (
+    UniqueConstraint(
+      "broadcast_message_id",
+      "chat_id",
+      name="uq_broadcast_message_chats_message_chat",
+    ),
+  )
+
+  broadcast_message_id: Mapped[uuid.UUID] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("broadcast_messages.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+  )
+  audience: Mapped[BroadcastAudienceEnum] = mapped_column(
+    Enum(BroadcastAudienceEnum), nullable=False
+  )
+  # Telegram chat ids are 64-bit ints, but stored as text so a future platform
+  # with opaque ids needs no migration (same reasoning as AccountBotLink).
+  chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+  message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+  message: Mapped[str | None] = mapped_column(Text, nullable=True)
+  # Highest ``BroadcastMessage.last_seq`` this chat has been shown. A delivery
+  # carrying an older sequence is dropped rather than sent, so two dispatchers
+  # (or a slow retry racing a fresh change) can never replace a newer body with
+  # a stale one.
+  delivered_seq: Mapped[int] = mapped_column(
+    BigInteger, nullable=False, default=0, server_default="0"
+  )
+  # Last delivery error for this chat (e.g. "bot was kicked"), for debugging a
+  # channel that silently stopped updating. Cleared on the next success.
+  last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+  def __repr__(self) -> str:
+    return (
+      f"<BroadcastMessageChat broadcast_message_id={self.broadcast_message_id} "
+      f"audience={self.audience} chat_id={self.chat_id} "
+      f"message_id={self.message_id} delivered_seq={self.delivered_seq}>"
+    )
+
+
+class BroadcastMessageWorker(Base):
+  """
+  One row per worker that acted on a cycle, with the status it last reported.
+
+  Fed from the NATS ``TRADE`` events a worker publishes: the event carries the
+  ``signal_id`` the broker handed out, which resolves to the signal's
+  ``signal_uxid`` and therefore to its cycle. The public broadcast message
+  renders these rows as a worker/status table that keeps updating as the trade
+  runs, so a reader sees not just the signal but who actually executed it and
+  where each of them stands.
+
+  Rows are upserted, never appended: the table shows *current* state per
+  worker, and the full history of a trade already lives in ``trades``.
+  """
+
+  __tablename__ = "broadcast_message_workers"
+  __table_args__ = (
+    UniqueConstraint(
+      "broadcast_message_id",
+      "worker_id",
+      name="uq_broadcast_message_workers_message_worker",
+    ),
+  )
+
+  broadcast_message_id: Mapped[uuid.UUID] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("broadcast_messages.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+  )
+  # ``<market>-<gateway>-<account_id>`` (see ``compose_worker_id``) — the same
+  # addressing id the SYSTEM subject uses, so a row is traceable back to one
+  # worker. The parts are kept alongside it for display and querying.
+  worker_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+  account_id: Mapped[str] = mapped_column(String(50), nullable=False)
+  market: Mapped[MarketTypeEnum | None] = mapped_column(
+    Enum(MarketTypeEnum), nullable=True
+  )
+  gateway: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+  # Broker-side trade status (OPENED / PARTIALLY_CLOSED / CLOSED / REJECTED /
+  # FLAT) mapped from the worker's position status, plus the raw worker action
+  # for context. ``latest_status`` is what the public table shows.
+  latest_status: Mapped[TradeStatusEnum] = mapped_column(
+    Enum(TradeStatusEnum), nullable=False
+  )
+  latest_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
+  reject_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+  last_event_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
+
+  def __repr__(self) -> str:
+    return (
+      f"<BroadcastMessageWorker broadcast_message_id={self.broadcast_message_id} "
+      f"worker_id={self.worker_id} latest_status={self.latest_status}>"
+    )
+
+
+class BroadcastMessageLog(Base):
+  """
+  Append-only write log of everything that changed a cycle.
+
+  Nothing sends to Telegram at write time any more. A signal or a worker
+  execution updates the cycle **and appends a row here in the same
+  transaction**; a Postgres trigger then fires ``pg_notify`` and the
+  dispatcher (``BroadcastDispatcher``) picks the change up and edits the
+  Telegram messages. Three properties come out of that:
+
+  * **Sequential.** ``seq`` is the cycle's monotonically increasing version
+    (``BroadcastMessage.last_seq``), assigned under a row lock on the cycle, so
+    concurrent writers queue instead of interleaving.
+  * **Lossless.** The change is durable before any Telegram call is attempted.
+    A crash, a Telegram outage or a missed notification cannot lose it — the
+    row stays ``PENDING`` and the dispatcher's sweeper re-picks it.
+  * **No overwrite.** Each chat records the sequence it has rendered, so a late
+    delivery cannot replace a newer body with an older one.
+
+  ``payload`` keeps what the change was (the signal event, the worker report)
+  for audit; the message body itself is always re-rendered from the cycle's
+  current state rather than from this row.
+  """
+
+  __tablename__ = "broadcast_message_logs"
+  __table_args__ = (
+    UniqueConstraint(
+      "broadcast_message_id", "seq", name="uq_broadcast_message_logs_message_seq"
+    ),
+  )
+
+  broadcast_message_id: Mapped[uuid.UUID] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("broadcast_messages.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+  )
+  seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+  kind: Mapped[BroadcastLogKindEnum] = mapped_column(
+    Enum(BroadcastLogKindEnum), nullable=False
+  )
+  payload: Mapped[dict] = mapped_column(JSONB, nullable=True)
+
+  status: Mapped[BroadcastLogStatusEnum] = mapped_column(
+    Enum(BroadcastLogStatusEnum),
+    nullable=False,
+    default=BroadcastLogStatusEnum.PENDING,
+    server_default=BroadcastLogStatusEnum.PENDING.value,
+    index=True,
+  )
+  attempts: Mapped[int] = mapped_column(
+    Integer, nullable=False, default=0, server_default="0"
+  )
+  last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+  delivered_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
+
+  def __repr__(self) -> str:
+    return (
+      f"<BroadcastMessageLog broadcast_message_id={self.broadcast_message_id} "
+      f"seq={self.seq} kind={self.kind} status={self.status}>"
     )
 
 

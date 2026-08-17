@@ -15,6 +15,7 @@ http:
         "symbol": "OANDA:{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-10 22:55:00",
+        "signal_uxid": "9f2c4b7e18a3d605",
         "position": {
           "action": "SL",
           "price": 4564.50,

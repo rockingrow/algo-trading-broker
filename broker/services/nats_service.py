@@ -75,6 +75,7 @@ from datetime import datetime
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
+  from broker.services.broadcast_service import SignalBroadcastService
   from broker.services.trade_broadcast_service import TradeBroadcastService
 
 from nats.aio.subscription import Subscription
@@ -183,7 +184,10 @@ class TradeEventConsumer:
 
   When a ``TradeBroadcastService`` is injected, each persisted event is also
   handed to it so a completed (closed) trade is DM-ed to its subscribed
-  owners. The broadcast is best-effort and never blocks persistence.
+  owners. When a ``SignalBroadcastService`` is injected, the event is recorded
+  against the signal's broadcast cycle too, so the public channel message shows
+  which workers executed the signal and where each of them stands. Both are
+  best-effort and never block persistence.
   """
 
   def __init__(
@@ -191,10 +195,12 @@ class TradeEventConsumer:
     trade_repository: TradeRepository,
     connection: NatsClient | None = None,
     broadcast_service: "TradeBroadcastService | None" = None,
+    signal_broadcast_service: "SignalBroadcastService | None" = None,
   ) -> None:
     self._repo = trade_repository
     self._conn = connection or nats_client
     self._broadcast = broadcast_service
+    self._signal_broadcast = signal_broadcast_service
     self._sub: Optional[Subscription] = None
 
   async def start(self) -> None:
@@ -245,6 +251,13 @@ class TradeEventConsumer:
       except Exception as exc:
         # Broadcasting must never break TRADE consumption.
         log.exception("Failed to broadcast completed trade: %s", exc)
+
+    if self._signal_broadcast is not None:
+      try:
+        await self._signal_broadcast.record_execution(event, trade)
+      except Exception as exc:
+        # Same rule: the execution table is a nicety on top of the TRADE row.
+        log.exception("Failed to record execution on the broadcast cycle: %s", exc)
 
 
 class SystemEventConsumer:
@@ -507,6 +520,9 @@ class SystemEventConsumer:
         continue
       try:
         payload = WebhookPayload(**raw_payload)
+        # Replaying with the persisted row id is what makes the replay
+        # recognisable: the worker sees the same signal_id it saw live and
+        # drops the duplicate. The cycle id rides along from the payload.
         signals.append(parse_signal(payload, signal_id))
       except Exception as exc:
         # A single bad row must not derail the replay for the rest.
@@ -713,17 +729,20 @@ class NatsPublisher:
     symbol: str,
     timestamp: datetime,
     strategy: str,
+    signal_uxid: str | None = None,
   ) -> None:
     """Broadcast a FLAT (close-all) directive on the strategy subject.
 
-    Carries ``signal_id`` — same field the LONG/SHORT/TP payloads (a full
-    ``TradingSignal``) already do — so a worker seeing this signal live and
-    then again inside a WORKER_CONNECTED_ACK's ``retry_signals`` can de-duplicate by
-    id instead of by guessing on content.
+    Carries both ids the LONG/SHORT/TP payloads (a full ``TradingSignal``)
+    carry, and for the same reasons: ``signal_id`` is unique per signal, so a
+    worker seeing this directive live and then again inside a
+    WORKER_CONNECTED_ACK's ``retry_signals`` de-duplicates by id instead of
+    guessing on content; ``signal_uxid`` names the trade cycle being closed.
     """
     payload = json.dumps(
       {
         "signal_id": signal_id,
+        "signal_uxid": signal_uxid,
         "strategy": strategy,
         "timestamp": timestamp.isoformat(),
         "action": SignalActionEnum.FLAT.value,
@@ -732,9 +751,10 @@ class NatsPublisher:
     ).encode()
     await self._conn.nc.publish(strategy, payload)
     log.info(
-      "Published [%s] FLAT directive signal_id=%s symbol=%s",
+      "Published [%s] FLAT directive signal_id=%s signal_uxid=%s symbol=%s",
       strategy,
       signal_id,
+      signal_uxid,
       symbol,
     )
 

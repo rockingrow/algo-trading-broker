@@ -5,6 +5,14 @@ NOTIFICATION_TIMEZONE_KEY = "notification_timezone"
 CRYPTO_ALLOWED_SYMBOL_KEY = "crypto_allowed_symbol"
 CRYPTO_MAX_LEVERAGE_KEY = "crypto_max_leverage"
 
+# broker_settings key holding the PUBLIC signal-broadcast chat ids as a
+# comma-separated list (e.g. ``-1001234567890,@my_public_channel``). Unlike the
+# private broadcast chats (``TELEGRAM_CHAT_CHANNEL_ID`` env var, a deployment
+# concern), the public audience is edited at runtime — from the admin API or the
+# Telegram bot's /admin_public_chats — so it lives in the database, not .env.
+# Empty = the public broadcast is off.
+PUBLIC_BROADCAST_CHAT_IDS_KEY = "public_broadcast_chat_ids"
+
 # broker_settings key holding the strategy → magic-number map as a JSON text
 # blob (e.g. ``{"MT5_GOLD_M5_V1": 20260409, ...}``). Sent to every worker in the
 # ``strategy_magic_map`` block of its WORKER_CONNECTED_ACK, filtered down to the

@@ -29,15 +29,17 @@ There are three entry points, all built on the same fan-out helper:
   persisted), rebuilds the payload from ``row.raw`` and delegates to
   ``_fanout``. Second / third attempt on the same row.
 
-``_fanout`` publishes on the strategy subject and sends the Telegram
-notification. On success the row is flipped to ``PUBLISHED``; on failure the
-row's ``attempts`` counter is decremented (and turned into ``FAILED`` when it
-hits zero) so the retry job knows whether to pick it up again.
+``_fanout`` publishes on the strategy subject and hands the signal to the
+broadcaster, which folds it into the one Telegram message that represents its
+signal cycle (see ``broker/services/broadcast_service.py``). On success the row
+is flipped to ``PUBLISHED``; on failure the row's ``attempts`` counter is
+decremented (and turned into ``FAILED`` when it hits zero) so the retry job
+knows whether to pick it up again.
 
 The service depends only on abstractions (``SignalRepository``,
-``SettingRepository``, ``SignalPublisher``, ``Notifier``) so all three flows
-can be exercised with in-memory fakes. It raises ``SignalError`` for HTTP
-translation on the enqueue path only.
+``SettingRepository``, ``SignalPublisher``, ``Notifier``, ``SignalBroadcaster``)
+so all three flows can be exercised with in-memory fakes. It raises
+``SignalError`` for HTTP translation on the enqueue path only.
 
 ``SignalWorker`` pulls envelopes back off JetStream and hands them to
 ``handle_enqueued`` — the webhook route only persists the signal and enqueues
@@ -66,20 +68,13 @@ from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.errors import BadRequestError
 from pydantic import ValidationError
 
-from broker.constants import (
-  NOTIFICATION_INCLUDE_SIGNAL_RAW,
-  NOTIFICATION_TIMEZONE_KEY,
-  SIGNAL_BLOCKED,
-)
-from broker.helpers.message_formatter import (
-  format_blocked_message,
-  format_flat_message,
-  format_signal_message,
-)
+from broker.constants import SIGNAL_BLOCKED
+from broker.helpers.message_formatter import format_blocked_message
 from broker.helpers.signal_helper import parse_signal
 from broker.interfaces import (
   Notifier,
   SettingRepository,
+  SignalBroadcaster,
   SignalPublisher,
   SignalRepository,
 )
@@ -315,13 +310,19 @@ class SignalProcessingService:
     setting_repository: SettingRepository,
     publisher: SignalPublisher,
     notifier: Notifier,
+    broadcaster: SignalBroadcaster | None = None,
     webhook_secret: str,
     deferred_enqueuer: Optional[DeferredEnqueuer] = None,
   ) -> None:
     self._signals = signal_repository
     self._settings = setting_repository
     self._publisher = publisher
+    # Operational channel (broker-log chats): the blocked-signal warning and
+    # anything else an operator — not a signal subscriber — needs to see.
     self._notifier = notifier
+    # Subscriber-facing channel: one edited-in-place message per signal cycle.
+    # None disables signal broadcasts entirely (no chats configured, tests).
+    self._broadcaster = broadcaster
     self._webhook_secret = webhook_secret
     self._deferred = deferred_enqueuer
 
@@ -493,9 +494,9 @@ class SignalProcessingService:
         "attempts_before": attempts_before,
       }
 
-    # Notification and mark-published are best-effort — they must not roll
+    # Broadcast and mark-published are best-effort — they must not roll
     # back a successful worker publish.
-    await self._send_notification(payload, attempts_before=attempts_before)
+    await self._broadcast(payload, attempts_before=attempts_before)
     await self._signals.mark_published(signal_id)
 
     return {
@@ -524,9 +525,12 @@ class SignalProcessingService:
     return True
 
   async def _publish_flat(self, payload: WebhookPayload, signal_id: str) -> None:
+    """Publish the FLAT directive with both ids, like a full TradingSignal:
+    ``signal_id`` identifies this directive, ``signal_uxid`` the cycle."""
     flat_symbol = payload.symbol.split(":")[-1].upper().strip()
     await self._publisher.publish_flat(
       signal_id=signal_id,
+      signal_uxid=payload.signal_uxid,
       symbol=flat_symbol,
       timestamp=payload.timestamp,
       strategy=payload.strategy,
@@ -543,30 +547,23 @@ class SignalProcessingService:
 
     await self._publisher.publish(signal=signal)
 
-  async def _send_notification(
-    self, payload: WebhookPayload, *, attempts_before: int
-  ) -> None:
-    attempt_number = _attempt_number_for_notification(attempts_before)
+  async def _broadcast(self, payload: WebhookPayload, *, attempts_before: int) -> None:
+    """Fold the signal into its cycle's Telegram message.
+
+    The service no longer formats anything itself: the broadcaster owns the
+    cycle (``strategy`` + ``signal_uxid``), the message ids per chat and the
+    rendering, because a signal is a line inside a longer-lived message rather
+    than a message of its own.
+    """
+    if self._broadcaster is None:
+      return
     try:
-      if payload.position.action == SignalActionEnum.FLAT:
-        timezone_offset = await self._settings.get(NOTIFICATION_TIMEZONE_KEY)
-        message = format_flat_message(
-          payload,
-          timezone_offset=timezone_offset,
-          attempt_number=attempt_number,
-        )
-      else:
-        include_raw = await self._settings.get(NOTIFICATION_INCLUDE_SIGNAL_RAW) == "1"
-        timezone_offset = await self._settings.get(NOTIFICATION_TIMEZONE_KEY)
-        message = format_signal_message(
-          payload,
-          include_raw=include_raw,
-          timezone_offset=timezone_offset,
-          attempt_number=attempt_number,
-        )
-      await self._notifier.send_message(message)
+      await self._broadcaster.broadcast(
+        payload,
+        attempt_number=_attempt_number_for_notification(attempts_before),
+      )
     except Exception as exc:
-      log.warning("Signal notification failed: %s", exc)
+      log.warning("Signal broadcast failed: %s", exc)
 
 
 class SignalWorker:

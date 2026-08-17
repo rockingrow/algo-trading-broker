@@ -445,7 +445,9 @@ async def test_get_crypto_allowed_symbol_path():
   def handler(request: httpx.Request) -> httpx.Response:
     captured["path"] = request.url.path
     captured["method"] = request.method
-    return httpx.Response(200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"})
+    return httpx.Response(
+      200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"}
+    )
 
   client = _admin_client(handler)
   result = await client.get_crypto_allowed_symbol()
@@ -462,7 +464,9 @@ async def test_set_crypto_allowed_symbol_posts_symbols_list():
     captured["path"] = request.url.path
     captured["method"] = request.method
     captured["body"] = request.content.decode()
-    return httpx.Response(200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"})
+    return httpx.Response(
+      200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"}
+    )
 
   client = _admin_client(handler)
   result = await client.set_crypto_allowed_symbol(["btc", "eth"])

@@ -37,6 +37,13 @@ GEAR: str = emoji.emojize(":gear:")  # ⚙️
 ADMIN_FLAT: str = emoji.emojize(":shield:")  # 🛡️
 BLOCKED: str = emoji.emojize(":prohibited:")  # 🚫
 
+# ── Broadcast cycle status ────────────────────────────────────────────────────
+# One Telegram message per signal cycle: the header carries a status icon that
+# changes in place as the cycle progresses.
+CYCLE_RUNNING: str = emoji.emojize(":hourglass_not_done:")  # ⏳
+CYCLE_CLOSED: str = emoji.emojize(":chequered_flag:")  # 🏁
+CYCLE_RETRY: str = emoji.emojize(":counterclockwise_arrows_button:")  # 🔄
+
 # ── Position flags ────────────────────────────────────────────────────────────
 FLAG_ON: str = emoji.emojize(":green_circle:")  # 🟢
 FLAG_OFF: str = emoji.emojize(":red_circle:")  # 🔴

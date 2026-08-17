@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Signal-cycle broadcast: one Telegram message per trade, edited in place**
+  — Every action the broker sees for one trade (LONG entry, TP1, TP2, SL, or
+  FLAT close) now folds into a **single** Telegram message that is rewritten
+  as the trade progresses, instead of four unrelated messages that a reader
+  had to stitch together by eye. A cycle is keyed by
+  ``strategy`` + ``signal_uxid`` (a strict 16-character lowercase-hex short
+  uuid TradingView must send alongside the existing ``signal_id``): the
+  ``signal_uxid`` is stable across the whole trade so its ``LONG`` entry and
+  its ``TP2`` close land in the same message. The cycle carries a
+  ``RUNNING`` / ``CLOSED`` badge that flips once a closing action arrives, an
+  ``Attempt: N`` marker for any signal that reached workers on a retry, and
+  the full timeline of actions in the order they happened. New
+  ``broadcast_messages`` and ``broadcast_message_chats`` tables persist the
+  cycle text and the per-chat message id (so the same trade can address
+  several chats and keep editing each one) — see the new migration
+  ``a2c3d4e5f6b7_add_broadcast_messages``.
+- **CDC-driven delivery with an append-only write log** — Telegram sends never
+  happen on the signal path any more. A signal (and every worker's TRADE
+  event) commits its change **and** a new write-log entry
+  (``broadcast_message_logs``) in the same transaction; a Postgres trigger
+  fires ``pg_notify`` on the write log's ``broadcast_message_logs``
+  channel; ``BroadcastDispatcher`` LISTENs for it and edits the affected
+  chats. A per-cycle ``last_seq`` handed out under a row lock and a
+  per-chat ``delivered_seq`` guard mean a slow edit can never overwrite a
+  newer body with an older one, so a burst of signals for one trade always
+  renders in order. A 30-second sweeper re-drains the log on a timer as a
+  safety net — anything appended while the broker was down (``NOTIFY`` is
+  fire-and-forget) is still delivered on the next tick.
+- **Worker execution table on the public broadcast** — The public audience's
+  copy of the cycle carries a two-column ``worker | latest status`` table
+  that fills in as each worker acts on the signal. Backed by a new
+  ``broadcast_message_workers`` row (one per worker per cycle, with the
+  latest status the worker reported) written from the TRADE consumer via
+  ``SignalBroadcastService.record_execution``. Account ids are masked to
+  their last four characters (``MT5 ****5678``) so the public channel never
+  publishes anyone's full account number.
+- **Two audiences, one cycle: private (operator) and public (subscribers)** —
+  The **private** audience is the existing ``TELEGRAM_CHAT_CHANNEL_ID`` env
+  var (a deployment concern) and its body optionally carries the strategy's
+  raw indicator/input dump when ``notification_include_signal_raw`` is on.
+  The **public** audience is a new ``public_broadcast_chat_ids`` broker
+  setting, edited **at runtime** from ``POST /admin/settings/public-
+  broadcast-chat-ids`` or the bot's new ``/admin_public_chats`` command;
+  it gets the worker/status table in place of the raw dump. A chat listed
+  in both audiences is broadcast to once. Both settings use the same
+  comma-separated, topic-suffixed shape ``parse_chat_targets`` understands,
+  so either can address a specific topic inside a group with Topics
+  enabled.
+- **Bot ``/admin_public_chats`` command** — Read the current
+  ``public_broadcast_chat_ids`` list, replace it, or clear it, from
+  Telegram. Backed by the broker's new admin endpoint.
+- **``signal_uxid`` on every wire payload** — The webhook, JetStream
+  ``TradingSignal`` and FLAT publish all now carry ``signal_uxid`` alongside
+  ``signal_id``. ``signal_id`` still identifies each individual signal
+  (workers keep deduping on it); ``signal_uxid`` ties a whole trade
+  together. Enforced as strict 16-character lowercase hex — a payload with
+  any other shape is rejected with ``422``. Helper: ``broker/helpers/
+  uxid_helper.py`` (``new_uxid``, ``is_valid_uxid``).
 - **Bot: `/admin_flat` scope pickers (strategy · market · gateway)** —
   Running `/admin_flat` bare no longer jumps straight to the "confirm FLAT
   ALL" prompt. It now walks the admin through three sequential

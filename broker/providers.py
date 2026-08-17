@@ -12,6 +12,7 @@ from fastapi import Depends, Request
 
 from broker.db.repository import (
   SqlAlchemyAccountRepository,
+  SqlAlchemyBroadcastMessageRepository,
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
   SqlAlchemyTradeBroadcastRepository,
@@ -19,12 +20,18 @@ from broker.db.repository import (
 )
 from broker.interfaces import (
   AccountRepository,
+  BroadcastMessageRepository,
   Notifier,
   SettingRepository,
+  SignalBroadcaster,
   SignalPublisher,
   SignalRepository,
   TradeBroadcastRepository,
   TradeRepository,
+)
+from broker.services.broadcast_service import (
+  BroadcastDispatcher,
+  SignalBroadcastService,
 )
 from broker.services.notification_service import TelegramNotification
 from broker.services.signal_processing_service import (
@@ -52,6 +59,46 @@ def get_trade_repository() -> TradeRepository:
 
 def get_trade_broadcast_repository() -> TradeBroadcastRepository:
   return SqlAlchemyTradeBroadcastRepository()
+
+
+def get_broadcast_message_repository() -> BroadcastMessageRepository:
+  return SqlAlchemyBroadcastMessageRepository()
+
+
+def make_signal_broadcaster() -> SignalBroadcastService:
+  """Build the signal-cycle broadcast *writer* outside a FastAPI request.
+
+  The HTTP layer (via ``get_signal_broadcaster``), the JetStream signal worker
+  and the TRADE consumer all record onto the same cycles; a plain factory
+  keeps the wiring consistent and lets non-request contexts (app lifespan)
+  reuse it without going through ``Depends``.
+
+  It only writes — Telegram delivery is the :class:`BroadcastDispatcher`'s
+  job, driven off the write log this records into.
+  """
+  return SignalBroadcastService(
+    repository=get_broadcast_message_repository(),
+    signal_repository=get_signal_repository(),
+  )
+
+
+def get_signal_broadcaster() -> SignalBroadcaster:
+  """Broadcast recorder for trade signals (private + public chats)."""
+  return make_signal_broadcaster()
+
+
+def make_broadcast_dispatcher(
+  setting_repository: SettingRepository,
+) -> BroadcastDispatcher:
+  """CDC dispatcher that turns write-log entries into Telegram edits.
+
+  One per process, started and stopped with the app: it owns a Postgres
+  LISTEN connection plus a sweeper task that re-reads the log on a timer.
+  """
+  return BroadcastDispatcher(
+    repository=get_broadcast_message_repository(),
+    setting_repository=setting_repository,
+  )
 
 
 def make_signals_notifier(setting_repository: SettingRepository) -> Notifier:
@@ -102,6 +149,7 @@ def get_signal_service(
   setting_repository: SettingRepository = Depends(get_setting_repository),
   publisher: SignalPublisher = Depends(get_publisher),
   notifier: Notifier = Depends(get_signals_notifier),
+  broadcaster: SignalBroadcaster = Depends(get_signal_broadcaster),
   deferred_enqueuer: DeferredEnqueuer | None = Depends(get_deferred_enqueuer),
 ) -> SignalProcessingService:
   return SignalProcessingService(
@@ -109,6 +157,7 @@ def get_signal_service(
     setting_repository=setting_repository,
     publisher=publisher,
     notifier=notifier,
+    broadcaster=broadcaster,
     webhook_secret=settings.webhook.SECRET,
     deferred_enqueuer=deferred_enqueuer,
   )

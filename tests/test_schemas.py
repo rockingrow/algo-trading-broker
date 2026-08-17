@@ -46,6 +46,79 @@ def test_webhook_payload_minimal_valid():
   assert p.inputs is None
 
 
+def test_webhook_payload_generates_a_signal_uxid_when_absent():
+  """Alerts that don't send one still work — each simply becomes its own
+  broadcast cycle, which is the pre-cycle behaviour."""
+  p = WebhookPayload(**_payload_dict())
+  assert len(p.signal_uxid) == 16
+  assert p.signal_uxid != WebhookPayload(**_payload_dict()).signal_uxid
+
+
+def test_webhook_payload_keeps_the_signal_uxid_it_was_given():
+  p = WebhookPayload(**_payload_dict(signal_uxid="9f2c4b7e18a3d605"))
+  assert p.signal_uxid == "9f2c4b7e18a3d605"
+
+
+def test_webhook_payload_blank_signal_uxid_is_replaced():
+  """A TradingView template that interpolates an empty placeholder must not
+  key every cycle to the same blank id."""
+  blank = WebhookPayload(**_payload_dict(signal_uxid="   "))
+  null = WebhookPayload(**_payload_dict(signal_uxid=None))
+  assert len(blank.signal_uxid) == 16
+  assert len(null.signal_uxid) == 16
+  assert blank.signal_uxid != null.signal_uxid
+
+
+def test_webhook_payload_signal_uxid_survives_a_json_roundtrip():
+  """The retry job rebuilds the payload from ``signals.raw``; a regenerated id
+  there would split one cycle across two messages."""
+  original = WebhookPayload(**_payload_dict(signal_uxid="9f2c4b7e18a3d605"))
+  assert (
+    WebhookPayload(**json.loads(original.model_dump_json())).signal_uxid
+    == "9f2c4b7e18a3d605"
+  )
+
+
+def test_webhook_payload_generator_produces_a_valid_uxid():
+  """Whatever the generator emits must itself pass the validator — otherwise
+  the ``default_factory`` path could produce ids the ``mode=before`` validator
+  would reject."""
+  # A round-trip through the model exercises both the generator and the
+  # validator on that generator's output.
+  p1 = WebhookPayload(**_payload_dict())
+  p2 = WebhookPayload(**_payload_dict(signal_uxid=p1.signal_uxid))
+  assert p2.signal_uxid == p1.signal_uxid
+  assert len(p1.signal_uxid) == 16
+  assert p1.signal_uxid == p1.signal_uxid.lower()
+
+
+def test_webhook_payload_uxid_uppercase_hex_is_normalised():
+  """Different Pine templates uppercase UUID hex; that must not create a
+  second cycle for the same underlying id."""
+  p = WebhookPayload(**_payload_dict(signal_uxid="9F2C4B7E18A3D605"))
+  assert p.signal_uxid == "9f2c4b7e18a3d605"
+
+
+def test_webhook_payload_uxid_trims_surrounding_whitespace():
+  p = WebhookPayload(**_payload_dict(signal_uxid=" 9f2c4b7e18a3d605  "))
+  assert p.signal_uxid == "9f2c4b7e18a3d605"
+
+
+def test_webhook_payload_uxid_wrong_length_is_rejected():
+  """Rejecting at ingress is deliberate: a shortened id could collide with a
+  real cycle and quietly merge two unrelated trades."""
+  for bad in ("9f2c4b7e18a3d60", "9f2c4b7e18a3d6055", "abc", "a" * 32):
+    with pytest.raises(ValidationError):
+      WebhookPayload(**_payload_dict(signal_uxid=bad))
+
+
+def test_webhook_payload_uxid_non_hex_is_rejected():
+  """A UUID with dashes, or any other 16-char string that isn't hex."""
+  for bad in ("9f2c-4b7e-18a3d6", "not-a-hex-id-abc", "9f2c4b7e18a3d60Z"):
+    with pytest.raises(ValidationError):
+      WebhookPayload(**_payload_dict(signal_uxid=bad))
+
+
 def test_webhook_payload_invalid_action_rejected():
   with pytest.raises(ValidationError):
     WebhookPayload(**_payload_dict(position={"action": "BUY"}))

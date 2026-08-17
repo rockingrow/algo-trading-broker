@@ -23,7 +23,11 @@ from broker.helpers import emoji_constants as em
 from broker.logger import get_logger
 from broker.nats import nats_client
 from broker.openapi import fastapi_kwargs
-from broker.providers import make_signals_notifier
+from broker.providers import (
+  make_broadcast_dispatcher,
+  make_signal_broadcaster,
+  make_signals_notifier,
+)
 from broker.router import get_core_router
 from broker.services.nats_service import (
   NatsPublisher,
@@ -81,10 +85,17 @@ async def lifespan(app: FastAPI):
     setting_repository=setting_repo,
     notifier=owner_notifier,
   )
+  # Signal-cycle broadcaster writer + CDC dispatcher: signals and TRADE events
+  # only record cycle changes onto ``broadcast_messages``; a Postgres
+  # LISTEN/NOTIFY listener wakes the dispatcher which then edits the Telegram
+  # message. Keeping them separate takes Telegram off the signal path entirely.
+  signal_broadcaster = make_signal_broadcaster()
+  broadcast_dispatcher = make_broadcast_dispatcher(setting_repo)
   consumer = TradeEventConsumer(
     trade_repository=SqlAlchemyTradeRepository(),
     connection=nats_client,
     broadcast_service=trade_broadcast_service,
+    signal_broadcast_service=signal_broadcaster,
   )
   system_consumer = SystemEventConsumer(
     setting_repository=setting_repo,
@@ -106,6 +117,7 @@ async def lifespan(app: FastAPI):
     setting_repository=setting_repo,
     publisher=publisher,
     notifier=signals_notifier,
+    broadcaster=signal_broadcaster,
     webhook_secret=settings.webhook.SECRET,
     deferred_enqueuer=deferred_enqueuer,
   )
@@ -119,6 +131,7 @@ async def lifespan(app: FastAPI):
   await system_consumer.start()
   await signal_worker.start()
   await signal_retry_job.start()
+  await broadcast_dispatcher.start()
   app.state.publisher = publisher
   # The webhook route builds its own request-scoped service, but the deferred
   # queue must outlive the request that filled it.
@@ -146,6 +159,9 @@ async def lifespan(app: FastAPI):
 
   await signal_retry_job.stop()
   await signal_worker.stop()
+  # Broadcast dispatcher stops after the producers: the sweeper's last pass
+  # drains anything the JetStream handler queued on its way out.
+  await broadcast_dispatcher.stop()
   # Drained after the producers stop, so nothing is still being queued behind
   # the flush, and before NATS closes, so a pending enqueue can still land.
   await deferred_enqueuer.stop()
