@@ -22,12 +22,12 @@ import uuid
 UXID_LENGTH = 16
 
 #: The one shape a valid ``signal_uxid`` may take on the wire.
-UXID_PATTERN = re.compile(rf"^[0-9a-f]{{{UXID_LENGTH}}}$")
+UXID_PATTERN = re.compile(rf"^[0-9A-Z]{{{UXID_LENGTH}}}$")
 
 
 def new_uxid(length: int = UXID_LENGTH) -> str:
-  """Return a fresh short id, e.g. ``"9f2c4b7e18a3d605"``."""
-  return uuid.uuid4().hex[:length]
+  """Return a fresh short id, e.g. ``"9F2C4B7E18A3D605"``."""
+  return uuid.uuid4().hex[:length].upper()
 
 
 def is_valid_uxid(value: str) -> bool:
