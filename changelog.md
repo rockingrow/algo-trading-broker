@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their last four characters (``MT5 ****5678``) so the public channel never
   publishes anyone's full account number.
 - **Two audiences, one cycle: private (operator) and public (subscribers)** —
-  The **private** audience is the existing ``TELEGRAM_CHAT_CHANNEL_ID`` env
+  The **private** audience is the existing ``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` env
   var (a deployment concern) and its body optionally carries the strategy's
   raw indicator/input dump when ``notification_include_signal_raw`` is on.
   The **public** audience is a new ``public_broadcast_chat_ids`` broker
@@ -107,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covers `GET /admin/strategies` alongside the existing `FLAT.yml`.
 - **Telegram notifications reach several chats, and land in the right group
   topic** — Every chat-id setting takes a comma-separated list — the signals
-  channel `TELEGRAM_CHAT_CHANNEL_ID`, the management chat `TELEGRAM_CHAT_ID`
+  channel `TELEGRAM_BROKER_CHANNEL_CHAT_IDS`, the management chat `TELEGRAM_BROKER_LOG_CHAT_IDS`
   and the error-log chat `TELEGRAM_LOG_CHAT_ID` alike, plus the per-call chat
   ids used for completed-trade owner DMs; none of them is special-cased, since
   they all resolve through one parser. So one channel can fan out to several

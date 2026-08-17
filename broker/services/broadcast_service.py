@@ -28,7 +28,7 @@ has been shown (``delivered_seq``), so a slow delivery cannot overwrite a newer
 body with an older one.
 
 Two audiences run the same flow off the same cycle row: ``PRIVATE``
-(``TELEGRAM_CHAT_CHANNEL_ID`` env var) and ``PUBLIC`` (the
+(``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` env var) and ``PUBLIC`` (the
 ``public_broadcast_chat_ids`` broker setting, editable from the admin API and
 the bot). The public body additionally carries the worker/status table; each
 chat stores the exact text it holds, so the two can diverge further without a
@@ -423,7 +423,7 @@ class BroadcastDispatcher:
   ) -> list[tuple[BroadcastAudienceEnum, ChatTarget]]:
     """(audience, chat) pairs to broadcast into, private first.
 
-    Private comes from ``TELEGRAM_CHAT_CHANNEL_ID`` (a deployment concern),
+    Private comes from ``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` (a deployment concern),
     public from the ``public_broadcast_chat_ids`` broker setting (edited at
     runtime). Both settings share the same shape — the comma-separated,
     topic-suffixed format ``parse_chat_targets`` understands — so a group with
@@ -440,7 +440,7 @@ class BroadcastDispatcher:
     private_raw = (
       self._private_chat_ids
       if self._private_chat_ids is not None
-      else settings.telegram.CHAT_CHANNEL_ID
+      else settings.telegram.BROKER_CHANNEL_CHAT_IDS
     )
     private = _parse(private_raw)
     public = _parse(public_raw)

@@ -125,14 +125,15 @@ class TelegramSettings(BaseSettings):
 
   ENABLED: bool = False
   BOT_TOKEN: str = ""
-  # Every chat id in this group — CHAT_ID, CHAT_CHANNEL_ID and LOG_CHAT_ID
-  # below — is resolved through ``notification_service.parse_chat_targets``, so
-  # each accepts a comma-separated list of chats, and any entry may address a
-  # topic inside a supergroup that has Topics enabled by suffixing the topic
-  # id: ``-1002173777783_924584`` sends with ``message_thread_id`` so the
-  # message lands in that topic instead of General.
-  CHAT_ID: str = ""  # management: NATS events, service start/stop
-  CHAT_CHANNEL_ID: str = ""  # signals: NATS published trades
+  # Every chat id in this group — BROKER_LOG_CHAT_IDS, BROKER_CHANNEL_CHAT_IDS
+  # and LOG_CHAT_ID below — is resolved through
+  # ``notification_service.parse_chat_targets``, so each accepts a
+  # comma-separated list of chats, and any entry may address a topic inside a
+  # supergroup that has Topics enabled by suffixing the topic id:
+  # ``-1002173777783_924584`` sends with ``message_thread_id`` so the message
+  # lands in that topic instead of General.
+  BROKER_LOG_CHAT_IDS: str = ""  # management: NATS events, service start/stop
+  BROKER_CHANNEL_CHAT_IDS: str = ""  # signals: NATS published trades
 
   # Per-request timeout (seconds) on api.telegram.org. On networks where
   # Telegram is throttled or filtered the TCP connection is accepted and then
@@ -152,12 +153,12 @@ class TelegramSettings(BaseSettings):
   SERVICE_BOT_TOKEN: str = Field(default="", validation_alias="BOT_TELEGRAM_TOKEN")
 
   # Error-log hook: when enabled (and ENABLED is true), log records at ERROR
-  # level or above are forwarded to the management chat (CHAT_ID).
+  # level or above are forwarded to the management chat (BROKER_LOG_CHAT_IDS).
   LOG_ERRORS_ENABLED: bool = False
   LOG_DEDUP_WINDOW: int = 60  # seconds — suppress identical messages
   # Dedicated bot/chat that receives forwarded ERROR logs, kept separate from
   # the main bot so a Telegram outage/ban on one never affects the other.
-  # Both fall back to BOT_TOKEN / CHAT_ID when left empty.
+  # Both fall back to BOT_TOKEN / BROKER_LOG_CHAT_IDS when left empty.
   LOG_CHAT_ID: str = ""
   LOG_BOT_TOKEN: str = ""
 

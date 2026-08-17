@@ -212,10 +212,12 @@ def _targets_of(sent):
 
 
 async def test_management_chat_id_setting_takes_a_list(monkeypatch):
-  """TELEGRAM_CHAT_ID — broker lifecycle + admin notifications."""
+  """TELEGRAM_BROKER_LOG_CHAT_IDS — broker lifecycle + admin notifications."""
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
-  monkeypatch.setattr(ns.settings.telegram, "CHAT_ID", "-100111,-1002173777783_924584")
+  monkeypatch.setattr(
+    ns.settings.telegram, "BROKER_LOG_CHAT_IDS", "-100111,-1002173777783_924584"
+  )
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
 
@@ -226,13 +228,13 @@ async def test_management_chat_id_setting_takes_a_list(monkeypatch):
 
 
 async def test_signals_channel_setting_takes_a_list(monkeypatch):
-  """TELEGRAM_CHAT_CHANNEL_ID — published trade alerts, via the provider."""
+  """TELEGRAM_BROKER_CHANNEL_CHAT_IDS — published trade alerts, via the provider."""
   from broker.providers import make_signals_notifier
 
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
   monkeypatch.setattr(
-    ns.settings.telegram, "CHAT_CHANNEL_ID", "-100111,-1002173777783_924584"
+    ns.settings.telegram, "BROKER_CHANNEL_CHAT_IDS", "-100111,-1002173777783_924584"
   )
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
@@ -260,12 +262,12 @@ async def test_log_chat_id_setting_takes_a_list(monkeypatch):
 
 
 async def test_log_chat_id_falls_back_to_the_management_list(monkeypatch):
-  """An unset TELEGRAM_LOG_CHAT_ID inherits TELEGRAM_CHAT_ID — list included."""
+  """An unset TELEGRAM_LOG_CHAT_ID inherits TELEGRAM_BROKER_LOG_CHAT_IDS — list included."""
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
   monkeypatch.setattr(ns.settings.telegram, "LOG_BOT_TOKEN", "")
   monkeypatch.setattr(ns.settings.telegram, "LOG_CHAT_ID", "")
-  monkeypatch.setattr(ns.settings.telegram, "CHAT_ID", "-100111,-100222_7")
+  monkeypatch.setattr(ns.settings.telegram, "BROKER_LOG_CHAT_IDS", "-100111,-100222_7")
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
 

@@ -6,7 +6,7 @@ Telegram message never blocks the event loop (previously a synchronous
 ``requests.post`` stalled the whole webhook handler for up to its timeout).
 
 Every channel resolves its chat-id setting through :func:`parse_chat_targets`,
-so any of them — ``TELEGRAM_CHAT_CHANNEL_ID`` above all — may name several
+so any of them — ``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` above all — may name several
 chats at once and may address a single topic inside a supergroup that has the
 Topics feature enabled (``-1002173777783_924584``).
 
@@ -244,7 +244,7 @@ class TelegramNotification(Notification):
     setting_repository: SettingRepository | None = None,
   ):
     super().__init__(
-      chat_id=chat_id if chat_id is not None else settings.telegram.CHAT_ID,
+      chat_id=chat_id if chat_id is not None else settings.telegram.BROKER_LOG_CHAT_IDS,
       bot_token=bot_token if bot_token is not None else settings.telegram.BOT_TOKEN,
     )
     self._setting_repository = setting_repository
@@ -529,7 +529,7 @@ class TelegramLogNotification(TelegramNotification):
 
   def __init__(self) -> None:
     super().__init__(
-      chat_id=settings.telegram.LOG_CHAT_ID or settings.telegram.CHAT_ID,
+      chat_id=settings.telegram.LOG_CHAT_ID or settings.telegram.BROKER_LOG_CHAT_IDS,
       bot_token=settings.telegram.LOG_BOT_TOKEN or settings.telegram.BOT_TOKEN,
     )
 
