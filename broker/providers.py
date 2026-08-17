@@ -110,7 +110,7 @@ def make_signals_notifier(setting_repository: SettingRepository) -> Notifier:
   ``Depends``.
   """
   return TelegramNotification(
-    chat_id=settings.telegram.BROKER_CHANNEL_CHAT_IDS or settings.telegram.BROKER_LOG_CHAT_IDS,
+    chat_id=settings.telegram.PRIVATE_BROADCAST_CHAT_IDS or settings.telegram.BROKER_LOG_CHAT_IDS,
     setting_repository=setting_repository,
   )
 

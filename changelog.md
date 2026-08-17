@@ -37,26 +37,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renders in order. A 30-second sweeper re-drains the log on a timer as a
   safety net — anything appended while the broker was down (``NOTIFY`` is
   fire-and-forget) is still delivered on the next tick.
-- **Worker execution table on the public broadcast** — The public audience's
-  copy of the cycle carries a two-column ``worker | latest status`` table
-  that fills in as each worker acts on the signal. Backed by a new
-  ``broadcast_message_workers`` row (one per worker per cycle, with the
-  latest status the worker reported) written from the TRADE consumer via
-  ``SignalBroadcastService.record_execution``. Account ids are masked to
-  their last four characters (``MT5 ****5678``) so the public channel never
-  publishes anyone's full account number.
+- **Worker execution table on the private broadcast** — The private
+  audience's copy of the cycle carries a two-column ``worker | latest
+  status`` table that fills in as each worker acts on the signal. Backed by
+  a new ``broadcast_message_workers`` row (one per worker per cycle, with
+  the latest status the worker reported) written from the TRADE consumer
+  via ``SignalBroadcastService.record_execution``. Account ids are masked
+  to their last four characters (``MT5 ****5678``).
 - **Two audiences, one cycle: private (operator) and public (subscribers)** —
-  The **private** audience is the existing ``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` env
-  var (a deployment concern) and its body optionally carries the strategy's
-  raw indicator/input dump when ``notification_include_signal_raw`` is on.
-  The **public** audience is a new ``public_broadcast_chat_ids`` broker
-  setting, edited **at runtime** from ``POST /admin/settings/public-
-  broadcast-chat-ids`` or the bot's new ``/admin_public_chats`` command;
-  it gets the worker/status table in place of the raw dump. A chat listed
-  in both audiences is broadcast to once. Both settings use the same
-  comma-separated, topic-suffixed shape ``parse_chat_targets`` understands,
-  so either can address a specific topic inside a group with Topics
-  enabled.
+  The **private** audience is the ``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` env
+  var (a deployment concern) and its body carries the strategy name, the
+  signal id, the worker/status table, and — when
+  ``notification_include_signal_raw`` is on — the strategy's raw
+  indicator/input dump. The **public** audience is a new
+  ``public_broadcast_chat_ids`` broker setting, edited **at runtime** from
+  ``POST /admin/settings/public-broadcast-chat-ids`` or the bot's new
+  ``/admin_public_chats`` command; it gets only the bare
+  price/level/timeline body — no strategy internals, no worker table. A
+  chat listed in both audiences is broadcast to once. Both settings use the
+  same comma-separated, topic-suffixed shape ``parse_chat_targets``
+  understands, so either can address a specific topic inside a group with
+  Topics enabled.
 - **Bot ``/admin_public_chats`` command** — Read the current
   ``public_broadcast_chat_ids`` list, replace it, or clear it, from
   Telegram. Backed by the broker's new admin endpoint.
@@ -107,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covers `GET /admin/strategies` alongside the existing `FLAT.yml`.
 - **Telegram notifications reach several chats, and land in the right group
   topic** — Every chat-id setting takes a comma-separated list — the signals
-  channel `TELEGRAM_BROKER_CHANNEL_CHAT_IDS`, the management chat `TELEGRAM_BROKER_LOG_CHAT_IDS`
+  channel `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`, the management chat `TELEGRAM_BROKER_LOG_CHAT_IDS`
   and the error-log chat `TELEGRAM_LOG_CHAT_ID` alike, plus the per-call chat
   ids used for completed-trade owner DMs; none of them is special-cased, since
   they all resolve through one parser. So one channel can fan out to several
@@ -239,6 +240,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line 1 column 230 — near: …"bar_index": 16,222}…` for a Pine
   `str.tostring` that emitted a thousands separator. Ordinary field-level
   validation errors are reported unchanged.
+- **Signal-cycle broadcasts now render in the same ``<pre>`` box as every
+  other Telegram notification** — `BroadcastNotifier` had started sending the
+  cycle body as plain text, so the message rendered as floating text instead
+  of the monospace box `TelegramNotification` wraps every other send in.
+  Both the `PRIVATE` and `PUBLIC` audiences are boxed again. The public
+  audience's worker/status table no longer opens its own nested `<pre>` (the
+  outer box now covers it, and Telegram's HTML parser rejects a `<pre>`
+  nested inside another).
 
 ## [1.1.2] - 2026-08-10
 

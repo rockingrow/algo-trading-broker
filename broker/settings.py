@@ -125,7 +125,7 @@ class TelegramSettings(BaseSettings):
 
   ENABLED: bool = False
   BOT_TOKEN: str = ""
-  # Every chat id in this group — BROKER_LOG_CHAT_IDS, BROKER_CHANNEL_CHAT_IDS
+  # Every chat id in this group — BROKER_LOG_CHAT_IDS, PRIVATE_BROADCAST_CHAT_IDS
   # and LOG_CHAT_ID below — is resolved through
   # ``notification_service.parse_chat_targets``, so each accepts a
   # comma-separated list of chats, and any entry may address a topic inside a
@@ -133,7 +133,7 @@ class TelegramSettings(BaseSettings):
   # ``-1002173777783_924584`` sends with ``message_thread_id`` so the message
   # lands in that topic instead of General.
   BROKER_LOG_CHAT_IDS: str = ""  # management: NATS events, service start/stop
-  BROKER_CHANNEL_CHAT_IDS: str = ""  # signals: NATS published trades
+  PRIVATE_BROADCAST_CHAT_IDS: str = ""  # signals: private/operator signal-cycle broadcast
 
   # Per-request timeout (seconds) on api.telegram.org. On networks where
   # Telegram is throttled or filtered the TCP connection is accepted and then

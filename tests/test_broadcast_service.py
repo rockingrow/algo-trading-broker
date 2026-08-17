@@ -638,10 +638,10 @@ async def test_tp1_keeps_the_cycle_running():
   assert _cycle_of(repo).status == BroadcastStatusEnum.RUNNING
 
 
-# ── Dispatcher: the public execution table ──────────────────────────
+# ── Dispatcher: the private execution table ─────────────────────────
 
 
-async def test_public_body_carries_the_worker_table():
+async def test_private_body_carries_the_worker_table():
   writer, repo = _writer()
   await writer.broadcast(_payload())
   await writer.record_execution(_trade_event())
@@ -650,16 +650,20 @@ async def test_public_body_carries_the_worker_table():
   await dispatcher.dispatch(_cycle_of(repo).id)
 
   bodies = {chat_id: text for chat_id, text in channel.sent}
-  assert "Executions (1)" in bodies["-300"]
-  assert "MT5 ****5678" in bodies["-300"]
-  assert "OPENED" in bodies["-300"]
-  # The private copy stays the plain cycle.
-  assert "Executions" not in bodies["-100"]
+  assert "Executions (1)" in bodies["-100"]
+  assert "MT5 ****5678" in bodies["-100"]
+  assert "OPENED" in bodies["-100"]
+  assert "Strategy:" in bodies["-100"]
+  # The public copy stays the bare cycle body.
+  assert "Executions" not in bodies["-300"]
+  assert "Strategy:" not in bodies["-300"]
 
 
-async def test_worker_status_change_edits_the_public_message():
+async def test_worker_status_change_edits_the_private_message():
+  """The worker table only lives in the private copy, so that is what a
+  worker-status-only change (no new signal) needs to re-edit."""
   writer, repo = _writer()
-  dispatcher, channel = _dispatcher(repo, private=(), public="-300")
+  dispatcher, channel = _dispatcher(repo, private=("-100",), public="")
 
   await writer.broadcast(_payload())
   cycle = _cycle_of(repo)
@@ -674,7 +678,7 @@ async def test_worker_status_change_edits_the_public_message():
 
 async def test_repeated_worker_status_does_not_touch_telegram():
   writer, repo = _writer()
-  dispatcher, channel = _dispatcher(repo, private=(), public="-300")
+  dispatcher, channel = _dispatcher(repo, private=("-100",), public="")
 
   await writer.broadcast(_payload())
   cycle = _cycle_of(repo)

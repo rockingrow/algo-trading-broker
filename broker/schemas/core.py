@@ -41,10 +41,13 @@ class BroadcastAudienceEnum(str, Enum):
   """Who a signal-cycle broadcast message is aimed at.
 
   ``PRIVATE`` — operator-facing channel, sourced from the
-  ``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` env var (a deployment concern).
+  ``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` env var (a deployment concern). Gets
+  the strategy name, signal id and worker execution table on top of the base
+  body.
   ``PUBLIC`` — subscriber-facing channel, sourced from the
   ``public_broadcast_chat_ids`` broker setting (edited at runtime from the
-  admin API or the bot's ``/admin_public_chats`` command).
+  admin API or the bot's ``/admin_public_chats`` command). Gets only the bare
+  price/level/timeline body.
 
   Stored per chat row rather than per message so the two audiences can be
   rendered differently later without touching the schema.

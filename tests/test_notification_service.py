@@ -4,6 +4,7 @@ import httpx
 
 from broker.services import notification_service as ns
 from broker.services.notification_service import (
+  BroadcastNotifier,
   ChatTarget,
   QueuedNotifier,
   TelegramNotification,
@@ -228,13 +229,13 @@ async def test_management_chat_id_setting_takes_a_list(monkeypatch):
 
 
 async def test_signals_channel_setting_takes_a_list(monkeypatch):
-  """TELEGRAM_BROKER_CHANNEL_CHAT_IDS — published trade alerts, via the provider."""
+  """TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS — published trade alerts, via the provider."""
   from broker.providers import make_signals_notifier
 
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
   monkeypatch.setattr(
-    ns.settings.telegram, "BROKER_CHANNEL_CHAT_IDS", "-100111,-1002173777783_924584"
+    ns.settings.telegram, "PRIVATE_BROADCAST_CHAT_IDS", "-100111,-1002173777783_924584"
   )
   sent = []
   monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
@@ -322,6 +323,35 @@ async def test_network_exception_is_swallowed(monkeypatch):
   notifier = TelegramNotification(chat_id="c")
   # Exception must be caught inside send_message.
   await notifier.send_message("hi")
+
+
+# ── BroadcastNotifier ────────────────────────────────────────────────
+
+
+async def test_broadcast_send_wraps_body_in_a_box(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = BroadcastNotifier()
+  await notifier.send_and_get_message_id(ChatTarget("-100111"), "LONG @ 63100.5")
+
+  _, payload = sent[0]
+  assert payload["text"] == "<pre>LONG @ 63100.5</pre>"
+
+
+async def test_broadcast_edit_wraps_body_in_a_box(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = BroadcastNotifier()
+  await notifier.edit_message(ChatTarget("-100111"), "42", "TP1 hit")
+
+  _, payload = sent[0]
+  assert payload["text"] == "<pre>TP1 hit</pre>"
 
 
 # ── QueuedNotifier ──────────────────────────────────────────────────

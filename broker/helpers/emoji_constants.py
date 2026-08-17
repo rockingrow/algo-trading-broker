@@ -8,14 +8,15 @@ and easy to swap out without hunting through multiple files.
 import emoji
 
 # ── Trading signal actions ────────────────────────────────────────────────────
-LONG: str = emoji.emojize(":green_circle:")  # 🟢
-SHORT: str = emoji.emojize(":red_circle:")  # 🔴
+LONG: str = emoji.emojize(":chart_increasing:")  # 📈
+SHORT: str = emoji.emojize(":chart_decreasing:")  # 📉
 TP1: str = emoji.emojize(":bullseye:")  # 🎯
 TP2: str = emoji.emojize(":rocket:")  # 🚀
 R_SL: str = emoji.emojize(":shield:")  # 🛡️
-SL: str = emoji.emojize(":cross_mark:")  # ❌
+SL: str = emoji.emojize(":hollow_red_circle:")  # ⭕
 FLAT: str = emoji.emojize(":white_flag:")  # 🏳️
 DEFAULT_SIGNAL: str = emoji.emojize(":satellite_antenna:")  # 📡
+BAR_CHART: str = emoji.emojize(":bar_chart:")  # 📊
 
 # ── Broker lifecycle ──────────────────────────────────────────────────────────
 BROKER_STARTED: str = emoji.emojize(":green_circle:")  # 🟢

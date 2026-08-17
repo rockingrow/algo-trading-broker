@@ -7,7 +7,7 @@ CRYPTO_MAX_LEVERAGE_KEY = "crypto_max_leverage"
 
 # broker_settings key holding the PUBLIC signal-broadcast chat ids as a
 # comma-separated list (e.g. ``-1001234567890,@my_public_channel``). Unlike the
-# private broadcast chats (``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` env var, a deployment
+# private broadcast chats (``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` env var, a deployment
 # concern), the public audience is edited at runtime — from the admin API or the
 # Telegram bot's /admin_public_chats — so it lives in the database, not .env.
 # Empty = the public broadcast is off.

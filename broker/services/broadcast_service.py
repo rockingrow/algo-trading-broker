@@ -28,11 +28,12 @@ has been shown (``delivered_seq``), so a slow delivery cannot overwrite a newer
 body with an older one.
 
 Two audiences run the same flow off the same cycle row: ``PRIVATE``
-(``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` env var) and ``PUBLIC`` (the
+(``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` env var) and ``PUBLIC`` (the
 ``public_broadcast_chat_ids`` broker setting, editable from the admin API and
-the bot). The public body additionally carries the worker/status table; each
-chat stores the exact text it holds, so the two can diverge further without a
-schema change.
+the bot). ``PUBLIC`` gets the bare price/level/timeline body; ``PRIVATE``
+additionally carries the strategy name, signal id, the worker/status table and
+(when enabled) the raw indicator/input dump — each chat stores the exact text
+it holds, so the two can diverge further without a schema change.
 """
 
 from __future__ import annotations
@@ -423,7 +424,7 @@ class BroadcastDispatcher:
   ) -> list[tuple[BroadcastAudienceEnum, ChatTarget]]:
     """(audience, chat) pairs to broadcast into, private first.
 
-    Private comes from ``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` (a deployment concern),
+    Private comes from ``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` (a deployment concern),
     public from the ``public_broadcast_chat_ids`` broker setting (edited at
     runtime). Both settings share the same shape — the comma-separated,
     topic-suffixed format ``parse_chat_targets`` understands — so a group with
@@ -440,7 +441,7 @@ class BroadcastDispatcher:
     private_raw = (
       self._private_chat_ids
       if self._private_chat_ids is not None
-      else settings.telegram.BROKER_CHANNEL_CHAT_IDS
+      else settings.telegram.PRIVATE_BROADCAST_CHAT_IDS
     )
     private = _parse(private_raw)
     public = _parse(public_raw)
@@ -467,15 +468,20 @@ class BroadcastDispatcher:
     seq = view.message.last_seq or 0
 
     bodies = {
-      # Private is the operator-facing copy: it may carry the raw indicator /
-      # input dump when the setting asks for it.
+      # Private is the operator-facing copy: strategy name, signal id, the
+      # worker/status table, and (when the setting asks for it) the raw
+      # indicator/input dump.
       BroadcastAudienceEnum.PRIVATE: format_broadcast_message(
-        view.message, timezone_offset=timezone_offset, include_raw=include_raw
+        view.message,
+        workers=view.workers,
+        timezone_offset=timezone_offset,
+        include_raw=include_raw,
+        include_meta=True,
       ),
-      # Public gets the execution table instead — who took the signal and where
-      # they stand — and never the strategy's internals.
+      # Public gets the bare price/level/timeline body — no strategy internals,
+      # no worker execution table.
       BroadcastAudienceEnum.PUBLIC: format_broadcast_message(
-        view.message, workers=view.workers, timezone_offset=timezone_offset
+        view.message, timezone_offset=timezone_offset
       ),
     }
     chats = {chat.chat_id: chat for chat in view.chats}

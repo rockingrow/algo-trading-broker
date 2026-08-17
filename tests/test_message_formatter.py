@@ -74,9 +74,16 @@ def test_header_carries_entry_emoji_symbol_and_timeframe():
 
 
 def test_header_shows_strategy_and_cycle_id():
-  msg = format_broadcast_message(_record())
+  msg = format_broadcast_message(_record(), include_meta=True)
   assert "Strategy: <b>strat</b>" in msg
   assert "Signal: <code>9f2c4b7e18a3d605</code>" in msg
+
+
+def test_header_omits_strategy_and_cycle_id_without_include_meta():
+  """The public audience gets the bare body — no strategy internals."""
+  msg = format_broadcast_message(_record())
+  assert "Strategy:" not in msg
+  assert "Signal:" not in msg
 
 
 def test_running_cycle_shows_the_running_icon():
@@ -221,15 +228,27 @@ def test_raw_section_included_when_flag_on():
   msg = format_broadcast_message(
     _record(events=[_event(indicators={"wt1": 1.23}, inputs={"bb_len": 20})]),
     include_raw=True,
+    include_meta=True,
   )
   assert "wt1: 1.23" in msg
   assert "bb_len: 20" in msg
+
+
+def test_raw_section_needs_include_meta_too():
+  """The raw dump is operator-facing; the public body never carries it,
+  ``include_raw`` alone is not enough."""
+  msg = format_broadcast_message(
+    _record(events=[_event(indicators={"wt1": 1.23}, inputs={"bb_len": 20})]),
+    include_raw=True,
+  )
+  assert "wt1: 1.23" not in msg
 
 
 def test_raw_section_skips_none_values():
   msg = format_broadcast_message(
     _record(events=[_event(indicators={"wt1": 1.0, "wt2": None})]),
     include_raw=True,
+    include_meta=True,
   )
   assert "wt1: 1.0" in msg
   assert "wt2" not in msg
@@ -245,6 +264,7 @@ def test_raw_section_uses_only_the_latest_event():
       ]
     ),
     include_raw=True,
+    include_meta=True,
   )
   assert "wt1: 99.0" in msg
   assert "wt1: 1.0" not in msg
@@ -267,18 +287,29 @@ def test_no_execution_table_without_workers():
   assert "Executions" not in format_broadcast_message(_record())
 
 
+def test_no_execution_table_without_include_meta():
+  """Passing workers alone is not enough — the public body never shows them."""
+  msg = format_broadcast_message(
+    _record(), workers=[_worker(), _worker("87654321", status=TradeStatusEnum.CLOSED)]
+  )
+  assert "Executions" not in msg
+
+
 def test_execution_table_lists_worker_and_status():
   msg = format_broadcast_message(
     _record(),
     workers=[_worker(), _worker("87654321", status=TradeStatusEnum.CLOSED)],
+    include_meta=True,
   )
   assert "Executions (2)" in msg
   assert "MT5 ****5678" in msg
   assert "MT5 ****4321" in msg
   assert "OPENED" in msg
   assert "CLOSED" in msg
-  # Rendered as a monospace block so the two columns line up in Telegram.
-  assert "<pre>Worker" in msg
+  # No inner <pre> here — the whole broadcast body is boxed once at send
+  # time (BroadcastNotifier), and Telegram disallows nesting <pre> tags.
+  assert "<pre>" not in msg
+  assert "Worker".ljust(len("MT5 ****5678")) + "  Status" in msg
 
 
 def test_worker_label_masks_the_account_id():

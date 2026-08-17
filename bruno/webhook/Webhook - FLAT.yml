@@ -1,7 +1,7 @@
 info:
   name: Webhook - FLAT
   type: http
-  seq: 7
+  seq: 6
 
 http:
   method: POST
@@ -15,7 +15,7 @@ http:
         "symbol": "OANDA:{{process.env.symbol}}",
         "timeframe": "5",
         "timestamp": "2026-04-25 20:03:00",
-        "signal_uxid": "9f2c4b7e18a3d605",
+        "signal_uxid": "9f2c4b7e18a3d008",
         "position": {
           "action": "FLAT"
         }

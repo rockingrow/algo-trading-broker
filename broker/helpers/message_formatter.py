@@ -160,42 +160,54 @@ def _broadcast_flags_line(event: dict) -> str:
   return " | ".join(parts)
 
 
-def _broadcast_event_block(event: dict, *, timezone_offset: str | None) -> str:
-  """One entry of the cycle timeline: what happened, at what price, when."""
+def _format_entry_block(event: dict) -> str:
+  lines = []
+  if event.get("price") is not None:
+    lines.append(f"Price: {_num(event.get('price'))}")
+    
+  qty_risk = []
+  if event.get("quantity") is not None:
+    qty_risk.append(f"Quantity: {_num(event.get('quantity'))}")
+  if event.get("risk_percent") is not None:
+    qty_risk.append(f"Risk: {_num(event.get('risk_percent'))}%")
+  if qty_risk:
+    lines.append(" | ".join(qty_risk))
+    
+  levels = []
+  for name, key in (("SL", "sl"), ("TP1", "tp1"), ("TP2", "tp2")):
+    if event.get(key) is not None:
+      levels.append(f"{name}: {_num(event.get(key))}")
+  if levels:
+    lines.append(" | ".join(levels))
+    
+  return "\n".join(lines)
+
+
+def _format_action_block(event: dict, *, timezone_offset: str | None) -> str:
   action = _event_action(event)
   label = _enum_value(event.get("action"))
   icon = action_to_emoji(action) if action is not None else em.DEFAULT_SIGNAL
-
-  head = f"{icon} <b>{label}</b>"
+  
+  lines = [f"{icon} {label}"]
+  
+  qty_risk = []
   if event.get("price") is not None:
-    head += f" @ <code>{_num(event.get('price'))}</code>"
+    qty_risk.append(f"Price: {_num(event.get('price'))}")
   if event.get("quantity") is not None:
-    head += f" × <code>{_num(event.get('quantity'))}</code>"
+    qty_risk.append(f"Quantity: {_num(event.get('quantity'))}")
   if event.get("risk_percent") is not None:
-    head += f" | Risk: <code>{_num(event.get('risk_percent'))}%</code>"
-
-  lines = [head]
-
-  # Levels and position flags belong to the entry that set them; repeating them
-  # under every TP/SL line would just be noise.
-  if action in _ENTRY_ACTIONS:
-    levels = [
-      f"{name}: <code>{_num(event.get(key))}</code>"
-      for name, key in (("SL", "sl"), ("TP1", "tp1"), ("TP2", "tp2"))
-      if event.get(key) is not None
-    ]
-    if levels:
-      lines.append(" | ".join(levels))
-    flags = _broadcast_flags_line(event)
-    if flags:
-      lines.append(flags)
-
+    qty_risk.append(f"Risk: {_num(event.get('risk_percent'))}%")
+  if qty_risk:
+    lines.append(" | ".join(qty_risk))
+    
   stamp = _event_time(event.get("timestamp"), timezone_offset)
   attempt = event.get("attempt")
   if stamp:
-    lines.append(
-      f"<i>{stamp}</i>" + (f" {em.CYCLE_RETRY} attempt {attempt}" if attempt else "")
-    )
+    time_line = stamp
+    if attempt:
+      time_line += f" {em.CYCLE_RETRY} attempt {attempt}"
+    lines.append(time_line)
+    
   return "\n".join(lines)
 
 
@@ -208,7 +220,13 @@ def worker_label(worker) -> str:
   number to a channel.
   """
   account_id = str(getattr(worker, "account_id", "") or "")
-  masked = f"****{account_id[-4:]}" if len(account_id) > 4 else (account_id or "?")
+  if len(account_id) > 10:
+    masked = f"{account_id[:4]}****{account_id[-4:]}"
+  elif len(account_id) > 4:
+    masked = f"****{account_id[-4:]}"
+  else:
+    masked = account_id or "?"
+    
   gateway = getattr(worker, "gateway", None)
   if not gateway:
     market = getattr(worker, "market", None)
@@ -219,18 +237,20 @@ def worker_label(worker) -> str:
 def _format_worker_table(workers) -> str:
   """Two-column ``worker | latest status`` table of who executed the cycle.
 
-  Rendered inside a ``<pre>`` block so Telegram's monospace font lines the
-  columns up — the same table re-rendered on every update, which is what makes
-  the message readable as it fills in.
+  Columns line up because the whole broadcast body is sent inside a single
+  ``<pre>`` box (see ``BroadcastNotifier``) — this does not open its own, since
+  Telegram's HTML parser does not allow a ``<pre>`` nested inside another. The
+  same table is re-rendered on every update, which is what makes the message
+  readable as it fills in.
   """
   rows = [(worker_label(w), _enum_value(w.latest_status)) for w in workers or []]
   if not rows:
     return ""
   width = max(len(name) for name, _ in rows)
-  width = max(width, len("Worker"))
-  header = f"{'Worker'.ljust(width)}  Status"
+  width = max(width, len("ID"))
+  header = f"{'Name'.ljust(width)}  Status"
   lines = "\n".join(f"{name.ljust(width)}  {status}" for name, status in rows)
-  return f"\nExecutions ({len(rows)})\n<pre>{header}\n{lines}</pre>"
+  return f"Workers ({len(rows)})\n{header}\n{lines}"
 
 
 def format_broadcast_message(
@@ -239,23 +259,8 @@ def format_broadcast_message(
   workers=None,
   timezone_offset: str | None = None,
   include_raw: bool = False,
+  include_meta: bool = False,
 ) -> str:
-  """Telegram body for a whole signal cycle (``broadcast_messages`` row).
-
-  *record* is duck-typed on the ORM model — ``symbol``, ``timeframe``,
-  ``strategy``, ``signal_uxid``, ``status`` and the ``events`` list — so the
-  service can render a row it just wrote without a round trip.
-
-  The header carries the cycle's live state (⏳ running / 🏁 closed) and the
-  body is the timeline of every signal received so far.
-
-  *workers* (``broadcast_message_workers`` rows) appends the execution table —
-  who took the signal and their latest status — which is what the **public**
-  audience gets in place of the operator-facing raw dump. ``include_raw``
-  mirrors the ``notification_include_signal_raw`` setting and appends the
-  indicators / inputs of the most recent signal only, since the cycle would
-  otherwise repeat a full raw dump per action.
-  """
   events = [event for event in (record.events or []) if isinstance(event, dict)]
   status = record.status
   try:
@@ -263,33 +268,72 @@ def format_broadcast_message(
   except ValueError:
     status = BroadcastStatusEnum.RUNNING
 
-  entry_action = _event_action(events[0]) if events else None
-  entry_icon = (
-    action_to_emoji(entry_action) if entry_action is not None else em.DEFAULT_SIGNAL
-  )
+  status_icon = _STATUS_ICONS.get(status, em.CYCLE_RUNNING)
   timeframe = f" ({format_timeframe(record.timeframe)})" if record.timeframe else ""
 
-  header = (
-    f"{entry_icon} <b>{record.symbol}</b>{timeframe} "
-    f"{_STATUS_ICONS.get(status, em.CYCLE_RUNNING)} <b>{status.value}</b>\n"
-    f"Strategy: <b>{record.strategy}</b>\n"
-    f"Signal: <code>{record.signal_uxid}</code>\n"
-  )
+  entry_event = events[0] if events else {}
+  entry_action = _event_action(entry_event) if entry_event else None
+  entry_icon = action_to_emoji(entry_action) if entry_action is not None else em.DEFAULT_SIGNAL
+  entry_label = _enum_value(entry_event.get("action")) if entry_event else ""
 
-  timeline = "\n".join(
-    _broadcast_event_block(event, timezone_offset=timezone_offset) for event in events
-  )
+  # Box 1: Position
+  position_lines = []
+  position_lines.append(f"[{status_icon}{status.value}]")
+  if entry_label:
+    position_lines.append(f"{entry_icon} {entry_label} {record.symbol}{timeframe}")
+  else:
+    position_lines.append(f"{entry_icon} {record.symbol}{timeframe}")
+  position_lines.append(_BROADCAST_DIVIDER)
+  if entry_event:
+    entry_block = _format_entry_block(entry_event)
+    if entry_block:
+      position_lines.append(entry_block)
+  position_lines.append(_BROADCAST_DIVIDER)
+  position_box = "\n".join(position_lines)
 
-  raw = ""
-  if include_raw and events:
-    raw = _format_raw_dicts(events[-1].get("indicators"), events[-1].get("inputs"))
+  # Box 2: Actions
+  action_events = events[1:]
+  actions_box = ""
+  if action_events:
+    actions_lines = ["Actions:", _BROADCAST_DIVIDER]
+    action_blocks = []
+    for event in action_events:
+      action_blocks.append(_format_action_block(event, timezone_offset=timezone_offset))
+    actions_lines.append("\n\n".join(action_blocks))
+    actions_lines.append(_BROADCAST_DIVIDER)
+    actions_box = "\n</pre>\n<pre>" + "\n".join(actions_lines)
 
-  executions = _format_worker_table(workers)
+  # Box 3: Settings (Private)
+  settings_box = ""
+  if include_meta:
+    settings_lines = ["Signal info:", _BROADCAST_DIVIDER]
+    settings_lines.append(f"Strategy: {record.strategy}")
+    settings_lines.append(f"Signal: {record.signal_uxid}")
+    settings_lines.append(_BROADCAST_DIVIDER)
 
-  return (
-    f"{header}{_BROADCAST_DIVIDER}\n{timeline}\n{_BROADCAST_DIVIDER}{executions}{raw}"
-  )
+    flags = _broadcast_flags_line(entry_event) if entry_event else ""
+    if flags:
+      settings_lines.append(f"{em.BAR_CHART}Settings:")
+      settings_lines.append(_BROADCAST_DIVIDER)
+      settings_lines.append(flags)
+      settings_lines.append(_BROADCAST_DIVIDER)
 
+    if include_raw and events:
+      raw = _format_raw_dicts(events[-1].get("indicators"), events[-1].get("inputs"))
+      if raw:
+        settings_lines.append(raw.lstrip("\n"))
+        settings_lines.append(_BROADCAST_DIVIDER)
+
+    settings_box = "\n</pre>\n<pre>" + "\n".join(settings_lines)
+
+  # Box 4: Workers (Private)
+  workers_box = ""
+  if include_meta:
+    executions = _format_worker_table(workers)
+    if executions:
+      workers_box = "\n</pre>\n<pre>" + executions
+
+  return f"{position_box}{actions_box}{settings_box}{workers_box}"
 
 def _format_raw_dicts(indicators, inputs) -> str:
   """Indicators / inputs blocks for a broadcast, from plain dicts."""

@@ -6,7 +6,7 @@ Telegram message never blocks the event loop (previously a synchronous
 ``requests.post`` stalled the whole webhook handler for up to its timeout).
 
 Every channel resolves its chat-id setting through :func:`parse_chat_targets`,
-so any of them — ``TELEGRAM_BROKER_CHANNEL_CHAT_IDS`` above all — may name several
+so any of them — ``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` above all — may name several
 chats at once and may address a single topic inside a supergroup that has the
 Topics feature enabled (``-1002173777783_924584``).
 
@@ -317,8 +317,9 @@ class BroadcastNotifier:
   stateful from the message's point of view: one trade cycle owns a single
   message per chat, so the send has to hand back the ``message_id`` for later
   edits, and every subsequent update rewrites that same message in place.
-  The body is sent as-is — broadcast bodies carry their own HTML markup rather
-  than the ``<pre>`` box :class:`TelegramNotification` wraps every send in.
+  Like :class:`TelegramNotification`, the body is wrapped in the same
+  ``<pre>`` box (see :func:`_box`) so a cycle reads the same way in the chat
+  as every other broker notification.
   """
 
   def __init__(self, bot_token: str | None = None) -> None:
@@ -340,7 +341,7 @@ class BroadcastNotifier:
   def _payload(self, target: ChatTarget, text: str) -> dict:
     payload: dict[str, Any] = {
       "chat_id": target.chat_id,
-      "text": text,
+      "text": _box(text),
       "parse_mode": "HTML",
       "disable_web_page_preview": True,
     }

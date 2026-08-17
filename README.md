@@ -396,8 +396,8 @@ DOCS_ENABLED=false
 # ── Telegram notifier (broker → chat, send-only) ─────
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
-TELEGRAM_BROKER_LOG_CHAT_IDS=       # management chat: broker lifecycle events
-TELEGRAM_BROKER_CHANNEL_CHAT_IDS=   # signals channel: published trade alerts
+TELEGRAM_BROKER_LOG_CHAT_IDS=          # management chat: broker lifecycle events
+TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS=   # private signal-cycle broadcast: strategy, signal id + worker table
 # Every chat id (incl. TELEGRAM_LOG_CHAT_ID) accepts a comma-separated list,
 # and an entry may address one topic of a group with Topics enabled:
 # -1002173777783_924584 (see below).
@@ -421,14 +421,14 @@ BOT_REQUEST_TIMEOUT=10.0
 
 ### Telegram chat ids: many chats, and group topics
 
-`TELEGRAM_BROKER_LOG_CHAT_IDS`, `TELEGRAM_BROKER_CHANNEL_CHAT_IDS` and `TELEGRAM_LOG_CHAT_ID` are
+`TELEGRAM_BROKER_LOG_CHAT_IDS`, `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS` and `TELEGRAM_LOG_CHAT_ID` are
 all parsed the same way — none of them is special — so each can reach several
 chats and can address a **topic** inside a group that has the Topics feature
 switched on:
 
 ```bash
 # Two groups + one topic inside a third, all from one setting
-TELEGRAM_BROKER_CHANNEL_CHAT_IDS="-1001111111111,@public_channel,-1002173777783_924584"
+TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS="-1001111111111,@public_channel,-1002173777783_924584"
 # The same syntax works for the management chat and the error-log chat
 TELEGRAM_BROKER_LOG_CHAT_IDS="-1001111111111,-1002173777783_100"
 TELEGRAM_LOG_CHAT_ID="-1002173777783_555"
@@ -1231,7 +1231,7 @@ therefore reads `Status: FLAT`, not `FLAT (FLAT)`.
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `strategy_magic_map` | `'{"MT5_GOLD_M5_V1": 20260409, …}'` | `POST` / `GET /admin/settings/strategy-magic-map` | JSON-text strategy → magic-number map sent to every worker in its `WORKER_CONNECTED_ACK` on connect, filtered to the strategies it announces |
 | `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
-| `public_broadcast_chat_ids` | `""` | `POST` / `GET /admin/settings/public-broadcast-chat-ids` | Comma-separated chat ids (with the same topic suffix syntax as `TELEGRAM_BROKER_CHANNEL_CHAT_IDS`) that receive the **public** signal-cycle broadcast — the copy carrying the worker execution table. Editable at runtime from the admin API and the bot's `/admin_public_chats` command; empty turns the public broadcast off. |
+| `public_broadcast_chat_ids` | `""` | `POST` / `GET /admin/settings/public-broadcast-chat-ids` | Comma-separated chat ids (with the same topic suffix syntax as `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`) that receive the **public** signal-cycle broadcast — the bare price/level/timeline copy, without strategy internals or the worker execution table. Editable at runtime from the admin API and the bot's `/admin_public_chats` command; empty turns the public broadcast off. |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
 
 ### `broadcast_messages` table
@@ -1261,11 +1261,12 @@ one message per action.
 ### `broadcast_message_chats` table
 
 Per-chat delivery state for a cycle. Every chat the cycle addressed (private
-audience from `TELEGRAM_BROKER_CHANNEL_CHAT_IDS`, public audience from the
+audience from `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`, public audience from the
 `public_broadcast_chat_ids` broker setting) has its own row here, so the
 same cycle can carry a different Telegram `message_id` in each chat and can
-render a slightly different body per audience (the public copy carries the
-worker execution table, the private copy the operator raw dump).
+render a slightly different body per audience (the private copy carries the
+strategy name, signal id, the worker execution table and the raw dump; the
+public copy is the bare price/level/timeline body only).
 
 | Column | Type | Description |
 | ------- | ------------ | --------------------------------------- |
