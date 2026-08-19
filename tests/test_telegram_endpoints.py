@@ -101,15 +101,19 @@ class FakeTgAccountRepo:
 
 
 class FakeTradeRepo:
-  def __init__(self, trades, total):
+  def __init__(self, trades, total, open_trades=None):
     self._trades = trades
     self._total = total
+    self._open_trades = open_trades if open_trades is not None else trades
 
   async def list_by_account(self, account_id, *, limit, offset, order, order_by):
     return self._trades
 
   async def count_by_account(self, account_id):
     return self._total
+
+  async def list_open_by_account(self, account_id):
+    return self._open_trades
 
 
 class FakePublisher:
@@ -258,6 +262,51 @@ def test_trades_after_link(ctx):
   body = resp.json()
   assert body["page"]["total"] == 1
   assert body["data"][0]["symbol"] == "XAUUSD"
+
+
+# ── positions ───────────────────────────────────────────────────────
+
+
+def test_positions_requires_link(ctx):
+  resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/positions", headers=_headers())
+  assert resp.status_code == 404
+
+
+def test_positions_after_link(ctx):
+  ctx["client"].post(
+    "/v1/telegram/link",
+    json={"token": str(TOKEN), "telegram_user_id": TG_ID},
+    headers=_headers(),
+  )
+  resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/positions", headers=_headers())
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["count"] == 1
+  assert body["data"][0]["symbol"] == "XAUUSD"
+
+
+def test_positions_empty_when_none_open():
+  app = FastAPI()
+  app.include_router(get_core_router())
+  account_repo = FakeTgAccountRepo(_make_account())
+  app.dependency_overrides[get_account_repository] = lambda: account_repo
+  app.dependency_overrides[get_trade_repository] = lambda: FakeTradeRepo(
+    [_make_trade()], total=1, open_trades=[]
+  )
+  app.dependency_overrides[get_publisher] = lambda: FakePublisher()
+  app.dependency_overrides[ensure_api_key] = lambda: None
+  client = TestClient(app)
+
+  client.post(
+    "/v1/telegram/link",
+    json={"token": str(TOKEN), "telegram_user_id": TG_ID},
+    headers=_headers(),
+  )
+  resp = client.get(f"/v1/telegram/{TG_ID}/positions", headers=_headers())
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["count"] == 0
+  assert body["data"] == []
 
 
 # ── commands ────────────────────────────────────────────────────────

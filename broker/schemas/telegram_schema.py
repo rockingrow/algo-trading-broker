@@ -16,6 +16,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from broker.schemas.account_schema import MarketTypeEnum
+from broker.schemas.trade_schema import TradeResponse
 
 
 class LinkRequest(BaseModel):
@@ -83,3 +84,15 @@ class BroadcastSubscriptionResponse(BaseModel):
   """Whether the caller is opted in to completed-trade broadcast DMs."""
 
   subscribed: bool
+
+
+class OpenPositionsResponse(BaseModel):
+  """Currently running (open) trades for the caller's linked account.
+
+  Unpaginated — ``data`` always carries every open position, and ``count``
+  is simply its length, spelled out so a caller that only needs the number
+  (the ``/status`` line) doesn't have to parse the list.
+  """
+
+  count: int
+  data: list[TradeResponse]

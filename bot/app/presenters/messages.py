@@ -86,6 +86,17 @@ def _trade_row(trade: dict[str, Any], tz_offset_hours: float) -> tuple[str, ...]
   )
 
 
+def _trades_table(data: list[dict[str, Any]], tz_offset_hours: float) -> str:
+  """The monospace trade table shared by ``/trades`` and the ``/status``
+  open-positions section."""
+  return render_table(
+    headers=("SYMBOL", "ACTION", "STATUS", "PRICE", "QTY", "BALANCE", "PNL", "TIME"),
+    rows=[_trade_row(t, tz_offset_hours) for t in data],
+    aligns=("l", "l", "l", "r", "r", "r", "r", "l"),
+    max_widths=(12, 6, 7, None, None, None, None, None),
+  )
+
+
 def format_command_result(result: dict[str, Any]) -> str:
   # Unknown actions fall through escaped, so a new broker enum still displays.
   action = _ACTION_LABEL.get(str(result.get("action")), _esc(result.get("action")))
@@ -106,7 +117,7 @@ class UserMessages:
     "/flat — Close all positions\n"
     "/prevent — Block new orders\n"
     "/allow — Allow new orders\n"
-    "/status — Account info\n"
+    "/status — Account info + open positions\n"
     "/myaccounts — List linked accounts\n"
     "/link — Add another account\n"
     "/switch — Change active account\n"
@@ -202,13 +213,35 @@ class UserMessages:
       f"<b>{emojis.CHART} Trades</b> ({_page_range(page, len(data))}) · "
       f"times in {format_utc_label(tz_offset_hours)}"
     )
-    table = render_table(
-      headers=("SYMBOL", "ACTION", "STATUS", "PRICE", "QTY", "BALANCE", "PNL", "TIME"),
-      rows=[_trade_row(t, tz_offset_hours) for t in data],
-      aligns=("l", "l", "l", "r", "r", "r", "r", "l"),
-      max_widths=(12, 6, 7, None, None, None, None, None),
-    )
-    return header + "\n\n" + table
+    return header + "\n\n" + _trades_table(data, tz_offset_hours)
+
+  @staticmethod
+  def format_status(
+    account: dict[str, Any],
+    positions: Optional[dict[str, Any]],
+    tz_offset_hours: float,
+  ) -> str:
+    """``/status``: the account block plus an open-positions count line, and —
+    when at least one position is open — the same table ``/trades`` renders,
+    filtered to positions that are still running.
+
+    ``positions`` is None when the broker call failed; the count line then
+    says so instead of showing a wrong number.
+    """
+    if positions is None:
+      count_line = f"• Open positions: {emojis.WARNING} failed to load"
+      data: list[dict[str, Any]] = []
+    else:
+      data = positions.get("data") or []
+      count_line = f"• Open positions: <b>{positions.get('count', len(data))}</b>"
+
+    blocks = [UserMessages.format_account(account) + "\n" + count_line]
+    if data:
+      blocks.append(
+        f"<b>{emojis.CHART} Open positions</b> · times in "
+        f"{format_utc_label(tz_offset_hours)}\n\n" + _trades_table(data, tz_offset_hours)
+      )
+    return "\n\n".join(blocks)
 
 
 class AdminMessages:

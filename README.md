@@ -597,6 +597,7 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `GET /v1/telegram/{telegram_user_id}/accounts` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/active-account` | `X-API-KEY` |
 | `GET /v1/telegram/{telegram_user_id}/trades` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/positions` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/flat` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/prevent` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/unlink` | `X-API-KEY` |
@@ -1020,6 +1021,12 @@ timestamp is rendered in the `notification_timezone` broker setting (read over
 HTTP from `GET /admin/settings/notification-timezone`, since the bot has no DB
 access, falling back to UTC+7). Details in
 [`bot/README.md` → Rendering](bot/README.md#rendering).
+
+`/status` additionally shows an **Open positions** count for the active
+account (backed by `GET /v1/telegram/{telegram_user_id}/positions`, which
+returns the account's currently running — `is_running` — trades), and when
+that count is above zero, the same trade table below it, filtered to just
+those open positions.
 
 Run it with the stack: `docker compose up -d bot`. See
 [`bot/README.md`](bot/README.md) for the full command reference, configuration

@@ -40,6 +40,7 @@ from broker.schemas.telegram_schema import (
   FlatCommandRequest,
   LinkedAccountResponse,
   LinkRequest,
+  OpenPositionsResponse,
   PreventCommandRequest,
   SwitchAccountRequest,
 )
@@ -208,6 +209,21 @@ def get_telegram_router() -> APIRouter:
       page=PageMeta(
         total=total, limit=limit, offset=offset, order=order, order_by=order_by
       ),
+    )
+
+  @router.get(
+    "/{telegram_user_id}/positions",
+    summary="List currently open positions for the caller's linked account",
+    response_model=OpenPositionsResponse,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
+  )
+  async def list_open_positions(
+    account: Account = Depends(get_linked_account),
+    trades_repo: TradeRepository = Depends(get_trade_repository),
+  ) -> OpenPositionsResponse:
+    trades = await trades_repo.list_open_by_account(account.account_id)
+    return OpenPositionsResponse(
+      count=len(trades), data=[TradeResponse.model_validate(t) for t in trades]
     )
 
   @router.post(

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bot `/status`: open-positions count + table** — The command now shows an
+  **Open positions** line (the number of currently running trades on the
+  active account) beneath the existing account summary, and — whenever that
+  count is above zero — the same monospace trade table `/trades` renders,
+  filtered to just those open positions. Backed by a new broker endpoint,
+  `GET /v1/telegram/{telegram_user_id}/positions`, which returns the
+  account's `is_running` trades (`TradeRepository.list_open_by_account`).
 - **Signal-cycle broadcast: one Telegram message per trade, edited in place**
   — Every action the broker sees for one trade (LONG entry, TP1, TP2, SL, or
   FLAT close) now folds into a **single** Telegram message that is rewritten

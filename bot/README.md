@@ -65,6 +65,12 @@ One linked account is **active** at a time; `/status`, `/trades`, `/flat`,
 accounts, `/link` adds one, and `/switch` lists them with a button per account
 to change the active one.
 
+`/status` also shows an **Open positions** line — the number of trades
+currently running (``is_running``) on the active account — and, whenever
+that count is above zero, the same trade table `/trades` renders, filtered
+to just those open positions. Backed by `GET
+/v1/telegram/{telegram_user_id}/positions`.
+
 `/subscribe` opts you in to a DM whenever one of your linked accounts **completes
 a trade**; `/unsubscribe` turns it off. The DM is sent by this same bot, so it
 lands in your existing chat. This is a per-user preference spanning every account
@@ -146,7 +152,7 @@ convenience, not a second security model, so share it as privately as the token.
 
 Every list command replies with a monospace table (a Telegram `<pre>` block)
 built by `render_table` in `app/utils/table.py` — `/myaccounts`, `/switch`,
-`/trades`, `/atrades`:
+`/trades`, `/atrades`, and `/status` (when there are open positions to show):
 
 ```text
 📊 Trades (1–3 / 20) · times in UTC+7
