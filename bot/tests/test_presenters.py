@@ -34,6 +34,46 @@ def test_format_account_escapes_html():
   assert "&lt;b&gt;x&lt;/b&gt;" in out
 
 
+def test_format_status_shows_zero_open_positions():
+  out = messages.UserMessages.format_status(
+    {"account_id": "acc-1", "account_name": "Main", "market": "FOREX"},
+    {"count": 0, "data": []},
+    7.0,
+  )
+  assert "Open positions: <b>0</b>" in out
+  assert "SYMBOL" not in out
+
+
+def test_format_status_renders_open_positions_table():
+  positions = {
+    "count": 1,
+    "data": [
+      {
+        "symbol": "XAUUSD",
+        "action": "LONG",
+        "status": "OPENED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 1010.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      }
+    ],
+  }
+  out = messages.UserMessages.format_status(
+    {"account_id": "acc-1", "account_name": "Main", "market": "FOREX"}, positions, 7.0
+  )
+  assert "Open positions: <b>1</b>" in out
+  assert "XAUUSD" in out
+  assert "<pre>" in out
+
+
+def test_format_status_handles_failed_positions_fetch():
+  out = messages.UserMessages.format_status(
+    {"account_id": "acc-1", "account_name": "Main", "market": "FOREX"}, None, 7.0
+  )
+  assert "failed to load" in out
+
+
 def test_format_trades_empty():
   assert "No trades yet" in messages.UserMessages.format_trades(
     {"data": [], "page": {}}, 7.0

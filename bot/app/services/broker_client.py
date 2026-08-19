@@ -115,6 +115,7 @@ class BrokerClientUser(BrokerClient):
     ACCOUNTS = "{telegram_id}/accounts"
     SWITCH = "{telegram_id}/active-account"
     TRADES = "{telegram_id}/trades"
+    POSITIONS = "{telegram_id}/positions"
     FLAT = "{telegram_id}/commands/flat"
     PREVENT = "{telegram_id}/commands/prevent"
     UNLINK = "{telegram_id}/unlink"
@@ -189,6 +190,17 @@ class BrokerClientUser(BrokerClient):
         "GET",
         self._path(self.ENDPOINTS.TRADES, telegram_id=telegram_user_id),
         params={"limit": limit, "offset": offset},
+      )
+    )
+
+  async def list_open_positions(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Return the user's currently open positions
+    (``{"count": int, "data": [...]}``), or None on failure."""
+    return self._json_or_none(
+      await self._request(
+        "GET", self._path(self.ENDPOINTS.POSITIONS, telegram_id=telegram_user_id)
       )
     )
 

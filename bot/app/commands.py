@@ -23,11 +23,11 @@ START_ONLY_COMMANDS = [START_COMMAND]
 
 USER_COMMANDS = [
   START_COMMAND,
+  BotCommand(command="status", description="Account info + open positions"),
   BotCommand(command="trades", description="Recent trades"),
   BotCommand(command="flat", description="Close all positions"),
   BotCommand(command="prevent", description="Block new orders"),
   BotCommand(command="allow", description="Allow new orders"),
-  BotCommand(command="status", description="Account info"),
   BotCommand(command="myaccounts", description="List linked accounts"),
   BotCommand(command="link", description="Add another account"),
   BotCommand(command="switch", description="Change active account"),

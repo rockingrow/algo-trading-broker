@@ -104,6 +104,29 @@ async def test_list_trades_passes_pagination_params():
   await client.aclose()
 
 
+async def test_list_open_positions_returns_json():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    return httpx.Response(200, json={"count": 1, "data": [{"symbol": "XAUUSD"}]})
+
+  client = _client(handler)
+  result = await client.list_open_positions(7)
+  assert result == {"count": 1, "data": [{"symbol": "XAUUSD"}]}
+  assert captured["path"] == "/v1/telegram/7/positions"
+  await client.aclose()
+
+
+async def test_list_open_positions_404_returns_none():
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(404)
+
+  client = _client(handler)
+  assert await client.list_open_positions(7) is None
+  await client.aclose()
+
+
 async def test_flat_and_prevent_post_expected_bodies():
   bodies = []
 

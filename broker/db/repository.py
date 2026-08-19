@@ -1959,6 +1959,29 @@ class SqlAlchemyTradeRepository:
       log.exception("Failed to count trades for account_id=%s: %s", account_id, exc)
       return 0
 
+  async def list_open_by_account(self, account_id: str) -> list[Trade]:
+    """Return currently running (``is_running``) trades for an account, most
+    recently updated first. Unpaginated — the number of positions a single
+    account can have open at once is small by construction (one per
+    symbol/strategy the worker allows).
+
+    Same bare-``account_id`` limitation as ``list_by_account``.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Trade)
+          .where(Trade.account_id == account_id)
+          .where(Trade.is_running.is_(True))
+          .order_by(Trade.updatedAt.desc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception(
+        "Failed to fetch open trades for account_id=%s: %s", account_id, exc
+      )
+      return []
+
   async def list_distinct_strategies(self) -> list[str]:
     """Distinct non-empty ``strategy`` values seen on the ``trades`` table,
     alphabetically. Backs the admin FLAT strategy picker — a FLAT scoped to a

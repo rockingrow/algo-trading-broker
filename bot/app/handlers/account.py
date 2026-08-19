@@ -21,8 +21,9 @@ from app.constants import ACCOUNTS_PER_PAGE
 from app.presenters import messages
 from app.utils.pagination import paginate
 from app.utils.telegram import safe_edit_text
+from app.utils.timezone import offset_hours_from_payload
 from app.keyboards import inline
-from app.services.broker_client import BrokerClientUser
+from app.services.broker_client import BrokerClientAdmin, BrokerClientUser
 from app.services.menu import CommandMenu
 
 router = Router(name="account")
@@ -36,8 +37,15 @@ def _offset_from(data: str) -> Optional[int]:
 
 
 @router.message(Command("status"))
-async def cmd_status(message: Message, account: dict[str, Any]) -> None:
-  await message.answer(messages.UserMessages.format_account(account))
+async def cmd_status(
+  message: Message,
+  account: dict[str, Any],
+  broker: BrokerClientUser,
+  broker_admin: BrokerClientAdmin,
+) -> None:
+  positions = await broker.list_open_positions(message.from_user.id)
+  tz_offset = offset_hours_from_payload(await broker_admin.get_notification_timezone())
+  await message.answer(messages.UserMessages.format_status(account, positions, tz_offset))
 
 
 # ── /myaccounts — list all accounts linked to this Telegram user ──────
