@@ -49,7 +49,7 @@ refreshed.
 
 ### Enduser commands
 
-`/start` (link), `/trades`, `/flat`, `/prevent`, `/allow`, `/status`,
+`/start` (link), `/status`, `/trades`, `/flat`, `/prevent`, `/allow`,
 `/myaccounts`, `/link`, `/switch`, `/unlink`, `/subscribe`, `/unsubscribe`,
 `/help` — all but `/start` require a linked account, and are hidden until
 there is one.

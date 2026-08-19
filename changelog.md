@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filtered to just those open positions. Backed by a new broker endpoint,
   `GET /v1/telegram/{telegram_user_id}/positions`, which returns the
   account's `is_running` trades (`TradeRepository.list_open_by_account`).
+  `/status` also moved up to the 2nd slot in the command menu, right below
+  `/start`, so the account/positions overview is the first thing a linked
+  user sees.
 - **Signal-cycle broadcast: one Telegram message per trade, edited in place**
   — Every action the broker sees for one trade (LONG entry, TP1, TP2, SL, or
   FLAT close) now folds into a **single** Telegram message that is rewritten
