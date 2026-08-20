@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from broker.schemas.account_schema import MarketTypeEnum
+from broker.schemas.account_schema import AccountSettings, MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminActionEnum,
@@ -191,10 +191,11 @@ async def test_publish_system_ack():
   assert subject == "_INBOX.ack"
   assert body["action"] == "WORKER_CONNECTED_ACK"
   assert body["account_id"] == "FOREX-MT5-1"
-  # The three configuration blocks are always present, empty when there is
+  # The configuration blocks are always present, empty/defaulted when there is
   # nothing to send, so a worker can parse them unconditionally.
   assert body["strategy_magic_map"] == {}
   assert body["retry_signals"] == []
+  assert body["settings"] == {"signal_blocked": False}
   assert body["crypto_leverage_init"] is None
 
 
@@ -206,6 +207,7 @@ async def test_publish_system_ack_carries_the_whole_handshake_config():
     account_id="CRYPTO-BINANCE-7654321",
     strategy_magic_map={"MT5_GOLD_M5_V1": 20260409},
     retry_signals=[_signal(strategy="MT5_GOLD_M5_V1")],
+    settings=AccountSettings(signal_blocked=True),
     crypto_leverage_init=CryptoLeverageConfig(
       symbols=["BTC", "ETH"], default_leverage=10
     ),
@@ -220,6 +222,7 @@ async def test_publish_system_ack_carries_the_whole_handshake_config():
   assert body["strategy_magic_map"] == {"MT5_GOLD_M5_V1": 20260409}
   assert len(body["retry_signals"]) == 1
   assert body["retry_signals"][0]["signal_id"] == "sig-1"
+  assert body["settings"] == {"signal_blocked": True}
   assert body["crypto_leverage_init"] == {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10,

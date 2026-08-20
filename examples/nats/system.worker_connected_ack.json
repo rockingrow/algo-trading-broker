@@ -22,5 +22,8 @@
       "risk_percent": 1.0
     }
   ],
+  "settings": {
+    "signal_blocked": false
+  },
   "crypto_leverage_init": null
 }

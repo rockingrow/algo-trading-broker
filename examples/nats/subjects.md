@@ -115,6 +115,13 @@ travels inside one `WORKER_CONNECTED_ACK`:
   the `{strategy}` subject so the worker can replay them through the same
   handler and de-duplicate by `signal_id`. Always present; `[]` means nothing
   to replay.
+- `settings` — the worker's own `accounts.settings` blob: what its owner set
+  from the bot, today `signal_blocked` (`/prevent` → `true`, `/allow` →
+  `false`). Always present and always complete — an account that has never run
+  a command gets the defaults — so a worker connecting after a restart, or
+  reconnecting after being offline, honours what was set while it was away
+  instead of coming up unblocked. The `BLOCK_SIGNAL`/`ALLOW_SIGNAL` ADMIN
+  message stays the *live* push; this is the durable copy.
 - `crypto_leverage_init` — allowed `symbols` + `default_leverage`, **only** for
   a crypto worker; `null` for every other market.
 

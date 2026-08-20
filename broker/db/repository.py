@@ -17,7 +17,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, cast, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -765,6 +766,88 @@ class SqlAlchemyAccountRepository:
     except Exception as exc:
       log.exception(
         "Failed to rotate link token for account_id=%s: %s", account_id, exc
+      )
+      return None
+
+  # ── accounts.settings (per-account command state) ──────────────────
+
+  async def get_settings(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> dict:
+    """Return the ``settings`` blob of a worker's account row.
+
+    Read on every ``WORKER_CONNECTED`` handshake to fill the ``settings`` block
+    of the ACK. Scoped by ``account_id`` + ``market`` + ``gateway`` — the same
+    (gateway or legacy NULL) match ``upsert_gateway`` uses, since that call runs
+    first on the handshake and may just have inserted the row.
+
+    Returns ``{}`` for an unknown account or a failed read: a worker gets the
+    schema defaults rather than no configuration at all.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account.settings).where(
+            Account.account_id == account_id,
+            Account.market == market,
+            or_(Account.gateway == gateway, Account.gateway.is_(None)),
+          )
+        )
+        raw = result.scalars().first()
+        return raw if isinstance(raw, dict) else {}
+    except Exception as exc:
+      log.exception(
+        "Failed to read settings for account_id=%s market=%s gateway=%s: %s",
+        account_id,
+        market,
+        gateway,
+        exc,
+      )
+      return {}
+
+  async def update_settings(self, account_uuid: uuid.UUID, patch: dict) -> dict | None:
+    """Merge *patch* into an account's ``settings`` and return the new blob.
+
+    Keyed by the row's UUID, not the bare ``account_id``, because the caller
+    (the Telegram command endpoints) has already resolved the exact account and
+    a bare id is not unique across market/gateway pairs.
+
+    The merge happens in Postgres (``settings || patch``), not in Python: two
+    commands landing at the same time would otherwise read the same blob and
+    the second write would drop the first one's key. Only the keys in *patch*
+    are touched — anything else in the blob, including a key written by a newer
+    broker version, is preserved.
+
+    Returns ``None`` when the account doesn't exist or the write failed, so the
+    caller can report the command as failed instead of silently losing the
+    setting.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          update(Account)
+          .where(Account.id == account_uuid)
+          .values(
+            settings=func.coalesce(Account.settings, cast({}, JSONB)).op("||")(
+              cast(patch, JSONB)
+            )
+          )
+          .returning(Account.settings)
+        )
+        merged = result.scalars().first()
+        if merged is None:
+          log.warning("No account row to update settings for id=%s", account_uuid)
+          return None
+        log.info(
+          "Account settings updated id=%s patch=%s result=%s",
+          account_uuid,
+          patch,
+          merged,
+        )
+        return merged
+    except Exception as exc:
+      log.exception(
+        "Failed to update settings for account id=%s: %s", account_uuid, exc
       )
       return None
 

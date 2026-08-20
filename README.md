@@ -62,6 +62,7 @@ and uv project. It reads the same root `.env`. See
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
 - **Signal replay on reconnect**: Every `WORKER_CONNECTED` handshake is answered with a `retry_signals` list holding every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
 - **Strategy magic map**: The same handshake reply carries a `strategy_magic_map` (both markets) — the strategy → magic-number map from the `strategy_magic_map` setting, filtered to the strategies the worker announced. Editable via `POST /admin/settings/strategy-magic-map` or the Telegram bot's `/admin_magicmap`.
+- **Per-account settings that survive a reconnect**: What an owner sets from the bot (today `/prevent` and `/allow`) is stored on the account as a JSONB `settings` blob and replayed to the worker in the `settings` block of every handshake reply — so a worker that restarts comes back blocked if that is how it was left, instead of silently accepting signals again.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
@@ -230,7 +231,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
 
 | Situation | Reply action | Payload |
 | --------- | ------------ | ------- |
-| Settings loaded | `WORKER_CONNECTED_ACK` | `strategy_magic_map`, `retry_signals`, and `crypto_leverage_init` (crypto only) |
+| Config loaded | `WORKER_CONNECTED_ACK` | `strategy_magic_map`, `retry_signals`, `settings`, and `crypto_leverage_init` (crypto only) |
 | Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
 
 ```json
@@ -240,6 +241,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
   "timestamp": "2026-06-30T00:00:00+00:00",
   "strategy_magic_map": { "wt_cross_v1": 20260617 },
   "retry_signals": [],
+  "settings": { "signal_blocked": true },
   "crypto_leverage_init": {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10
@@ -247,10 +249,11 @@ Because the reply is worker-driven, a worker that connects while the broker is *
 }
 ```
 
-The three blocks are always present, so a worker can parse them unconditionally:
+The four blocks are always present, so a worker can parse them unconditionally:
 
 - **`strategy_magic_map`** — the strategy → magic-number map, see [Strategy magic map](#strategy-magic-map) below. `{}` when nothing matched.
 - **`retry_signals`** — the catch-up replay, see [Signal replay on reconnect](#signal-replay-on-reconnect) below. `[]` when there is nothing to replay.
+- **`settings`** — the account's own settings, see [Account settings](#account-settings) below. Always complete: an account that has never run a command gets the defaults.
 - **`crypto_leverage_init`** — `symbols` + `default_leverage` from the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows, for a crypto worker. `null` for every other market.
 
 Examples: `examples/nats/system.worker_connected_ack.json` (forex) and `examples/nats/system.worker_connected_ack.crypto.json`.
@@ -280,6 +283,30 @@ The `strategy_magic_map` block of the ACK carries the strategy → magic-number 
 ```
 
 Edit the map with `POST /admin/settings/strategy-magic-map` (or the Telegram bot's `/admin_magicmap`); workers pick up the new map on their next connect (within the ~30s settings cache).
+
+#### Account settings
+
+The `settings` block of the ACK carries what the account's **owner** set from the bot — as opposed to the broker-wide `BrokerSetting` rows behind `strategy_magic_map` and `crypto_leverage_init`. It is the `accounts.settings` JSONB column of that one account, so each worker only ever sees its own.
+
+```json
+{
+  "settings": {
+    "signal_blocked": true
+  }
+}
+```
+
+| Key | Type | Set by | Meaning |
+| --- | ---- | ------ | ------- |
+| `signal_blocked` | bool (default `false`) | bot `/prevent` → `true`, `/allow` → `false` | The owner has blocked new entries for this account. Same state the `BLOCK_SIGNAL` / `ALLOW_SIGNAL` ADMIN messages push live |
+
+**Why it is in the handshake at all.** A command like `/prevent` publishes an ADMIN message, which only reaches a worker that is connected *right now*. Before this block existed, a worker that restarted came back **unblocked** — it had no way to learn that its owner had stopped it while it was away. `POST /v1/telegram/{id}/commands/prevent` now writes `signal_blocked` to the account **before** publishing, and every handshake replays it: the ADMIN message is the live push, the column is the durable state, and a worker reconciles to it on every connect.
+
+Enforcement lives in the worker — the broker records and reports the setting, it does not filter signals per account on its behalf.
+
+The block is read fresh from the row on every handshake (deliberately **not** cached like the broker-wide settings, which are per-broker and shared by every worker): a command run between two connects must reach the second one. Unknown keys in the column are dropped from the payload, so a worker only ever receives keys this broker version knows — they are not erased from the row, since writes merge (`settings || patch`) rather than replace.
+
+Adding a setting is a field on `AccountSettings` (`broker/schemas/account_schema.py`) plus its key in `broker/constants.py`, written from the command's endpoint — no migration, the column is a blob.
 
 #### Fire-and-forget (backward compatible)
 
@@ -1006,15 +1033,23 @@ repairs the row.
 
 **Control commands** publish `ADMIN`-subject directives via the broker:
 
-| Command | Admin action | Notes |
-| ------- | ------------ | ----- |
-| `/flat` | `FLAT` | Close positions for the **active** account. |
-| `/prevent` | `BLOCK_SIGNAL` | Block new signals (worker must honor it). |
-| `/allow` | `ALLOW_SIGNAL` | Re-enable new signals. |
+| Command | Admin action | Persisted on the account | Notes |
+| ------- | ------------ | ------------------------ | ----- |
+| `/flat` | `FLAT` | — (an action, not a state) | Close positions for the **active** account. |
+| `/prevent` | `BLOCK_SIGNAL` | `settings.signal_blocked = true` | Block new signals (worker must honor it). |
+| `/allow` | `ALLOW_SIGNAL` | `settings.signal_blocked = false` | Re-enable new signals. |
 
 > `BLOCK_SIGNAL` / `ALLOW_SIGNAL` are scoped by `account_id` in the `AdminSignal`
 > payload. Enforcement is the **worker's** responsibility — worker code lives
 > outside this repo, so the bot/broker only publish the directive.
+
+> A command that changes state writes it to `accounts.settings` **before**
+> publishing, and the endpoint answers `500` (publishing nothing) if that write
+> fails — a command whose intent was not recorded has not taken effect, since
+> the ADMIN publish only reaches a worker that is connected right now. The
+> stored blob is replayed to the worker in the `settings` block of every
+> `WORKER_CONNECTED_ACK` (see [Account settings](#account-settings)) and echoed
+> back to the bot in the command response's `settings` field.
 
 **Presentation** — list commands reply with monospace tables, and every
 timestamp is rendered in the `notification_timezone` broker setting (read over
@@ -1101,8 +1136,11 @@ and local development.
 | `market` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
+| `settings` | JSONB | What the owner set from the bot, e.g. `{"signal_blocked": true}` from `/prevent`. `NOT NULL`, defaults to `{}`; sent to the worker in the `settings` block of every `WORKER_CONNECTED_ACK` — see [Account settings](#account-settings) |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
+
+**Why JSONB and not a column per toggle:** the set of bot commands grows, and each new toggle would otherwise cost a migration — while the whole thing travels to the worker as one object anyway. It also beats JSON-in-`TEXT` (what `broker_settings.value` uses) on two counts: Postgres can merge a single key server-side (`settings || '{"signal_blocked": true}'`), so two commands landing together can't drop each other's key the way a read-modify-write would, and the column stays queryable (`WHERE settings @> '{"signal_blocked": true}'`, GIN-indexable) if an admin view ever needs it.
 
 **Unique constraint:** `(market, gateway, account_id)` — a bare `account_id` can exist under more than one market/gateway (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). Endpoints and repository methods that take only `account_id` (`POST /admin/accounts/{account_id}/link-token/rotate`, `GET /v1/{account_id}/trades`, the `account_id` scope on `POST /admin/flat`) resolve/match on that bare id and can be ambiguous if it's reused across gateways — avoid deliberately reusing an `account_id` across gateways until those callers are updated to also pass `market`/`gateway`.
 

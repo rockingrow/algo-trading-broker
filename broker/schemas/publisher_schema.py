@@ -4,7 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from broker.schemas.account_schema import MarketTypeEnum
+from broker.schemas.account_schema import AccountSettings, MarketTypeEnum
 from broker.schemas.core import MarketEnum, SignalActionEnum
 
 
@@ -292,6 +292,11 @@ class SystemWorkerConnectedAck(SystemSignal):
     the strategy subject so the worker can replay them through the same handler
     and de-duplicate by ``signal_id``. Always present; ``[]`` means nothing to
     replay.
+  * ``settings`` — the worker's own ``accounts.settings`` blob: what its owner
+    set from the bot (e.g. ``signal_blocked`` via /prevent). Always present and
+    always complete — an account that has never run a command gets the schema
+    defaults — so a worker starting up, or reconnecting after being offline,
+    applies the owner's current state instead of its own defaults.
   * ``crypto_leverage_init`` — allowed symbols + default leverage, **only** for
     a crypto worker; ``None`` for every other market.
 
@@ -329,6 +334,7 @@ class SystemWorkerConnectedAck(SystemSignal):
             "risk_percent": 1.0,
           }
         ],
+        "settings": {"signal_blocked": False},
         "crypto_leverage_init": None,
       }
     },
@@ -347,6 +353,14 @@ class SystemWorkerConnectedAck(SystemSignal):
     description=(
       "Signals persisted in the last ``max_retry_timeout`` seconds whose "
       "strategy the worker announced. Same shape as the SIGNAL payload."
+    ),
+  )
+  settings: AccountSettings = Field(
+    default_factory=AccountSettings,
+    description=(
+      "The worker's per-account settings, as set from the bot (e.g. "
+      "``signal_blocked`` from /prevent). Always complete: an account that "
+      "has never run a command gets the defaults."
     ),
   )
   crypto_leverage_init: Optional[CryptoLeverageConfig] = Field(

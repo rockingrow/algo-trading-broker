@@ -198,6 +198,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to each chat is remembered in-process, so a linked user chatting
   away costs no extra Telegram calls, and the account resolved for the menu is
   handed to `AuthMiddleware`, so the check costs no extra broker calls either.
+- **Per-account settings, stored on the account and replayed to the worker on
+  connect** — New `accounts.settings` JSONB column (`NOT NULL`, default `{}`)
+  holding what an owner set from the bot. It is sent to the worker in a new
+  `settings` block of every `WORKER_CONNECTED_ACK`, alongside
+  `strategy_magic_map`, `retry_signals` and `crypto_leverage_init`. Always
+  present and always complete — an account that has never run a command gets
+  the schema defaults (`{"signal_blocked": false}`) — so a worker can read
+  `settings.signal_blocked` unconditionally.
+
+  The first setting is `signal_blocked`, written by
+  `POST /v1/telegram/{id}/commands/prevent` (the bot's `/prevent` and
+  `/allow`). Until now that command only published a `BLOCK_SIGNAL` /
+  `ALLOW_SIGNAL` ADMIN message, which reaches **only a worker that is
+  connected at that moment**: a worker that restarted afterwards came back
+  unblocked, with nothing to tell it its owner had stopped it. The ADMIN
+  publish stays the live push; the column is the durable state the handshake
+  reconciles the worker to on every connect. Enforcement remains the worker's
+  responsibility — the broker records and reports the setting, it does not
+  filter per account on the worker's behalf.
+
+  The endpoint persists **before** publishing and answers `500` (publishing
+  nothing) when the write fails: a command whose intent was not recorded has
+  not taken effect. The response now echoes the stored blob in a `settings`
+  field. The write is a server-side JSONB merge (`settings || patch`), not a
+  read-modify-write, so two commands landing together cannot drop each other's
+  key, and a key written by a newer broker version survives a round trip
+  through an older one (unknown keys are dropped from the ACK payload, not
+  from the row). The per-account read is deliberately **not** cached the way
+  the broker-wide settings are — a command run between two connects has to
+  reach the second one.
+
+  JSONB rather than a column per toggle so a new command costs no migration;
+  adding a setting is a field on `AccountSettings` plus its key in
+  `broker/constants.py`, written from that command's endpoint. Migration
+  `a7b8c9d0e1f2` adds the column, and both
+  [`examples/nats/system.worker_connected_ack.json`](examples/nats/system.worker_connected_ack.json)
+  and its crypto counterpart document the new block.
 
 ### Fixed
 

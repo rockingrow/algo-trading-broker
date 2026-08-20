@@ -25,3 +25,14 @@ STRATEGY_MAGIC_MAP_KEY = "strategy_magic_map"
 # last MAX_RETRY_TIMEOUT seconds whose strategy the worker announced.
 MAX_RETRY_TIMEOUT_KEY = "max_retry_timeout"
 DEFAULT_MAX_RETRY_TIMEOUT_SECONDS = 60
+
+# ── accounts.settings keys ────────────────────────────────────────────────
+# Keys inside the per-account ``accounts.settings`` JSONB blob — a different
+# scope from everything above, which are broker-wide ``broker_settings`` rows.
+# Each one must match a field name on
+# ``broker.schemas.account_schema.AccountSettings`` (pinned by a test), which
+# is what shapes the ``settings`` block of the WORKER_CONNECTED_ACK.
+#
+# Written by POST /v1/telegram/{id}/commands/prevent — /prevent stores True,
+# /allow stores False — alongside the BLOCK_SIGNAL/ALLOW_SIGNAL admin push.
+ACCOUNT_SETTING_SIGNAL_BLOCKED = "signal_blocked"
