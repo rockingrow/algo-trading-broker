@@ -1421,14 +1421,17 @@ class SqlAlchemyBroadcastMessageRepository:
     message_id: str | None,
     message: str | None,
     delivered_seq: int | None = None,
+    notified_event_count: int | None = None,
     last_error: str | None = None,
   ) -> bool:
     """Record what a single chat currently holds for this cycle.
 
     ``message_id`` is only overwritten when a new one is supplied, so a failed
     edit (which passes None) never loses the id needed to edit that message
-    again later. ``delivered_seq`` only ever moves forward, which is what makes
-    a late delivery harmless: it cannot pull the chat back to an older body.
+    again later. ``delivered_seq`` and ``notified_event_count`` only ever move
+    forward, which is what makes a late delivery harmless: it cannot pull the
+    chat back to an older body, nor make it repeat a reply notice it has
+    already posted.
     """
     try:
       async with get_session() as session:
@@ -1449,6 +1452,7 @@ class SqlAlchemyBroadcastMessageRepository:
               message_id=message_id,
               message=message,
               delivered_seq=delivered_seq or 0,
+              notified_event_count=notified_event_count,
               last_error=last_error,
             )
           )
@@ -1461,6 +1465,10 @@ class SqlAlchemyBroadcastMessageRepository:
           row.message = message
         if delivered_seq is not None and delivered_seq > (row.delivered_seq or 0):
           row.delivered_seq = delivered_seq
+        if notified_event_count is not None and notified_event_count > (
+          row.notified_event_count or 0
+        ):
+          row.notified_event_count = notified_event_count
         row.last_error = last_error
       return True
     except Exception as exc:

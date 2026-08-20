@@ -15,6 +15,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from broker.constants import SIGNAL_BLOCKED
+from broker.domain.broadcast_status import merge_status, status_for_action
 from broker.helpers import emoji_constants as em
 from broker.helpers.signal_helper import action_to_emoji
 from broker.helpers.timeframe_helper import format_timeframe
@@ -334,6 +335,60 @@ def format_broadcast_message(
       workers_box = "\n</pre>\n<pre>" + executions
 
   return f"{position_box}{actions_box}{settings_box}{workers_box}"
+
+
+def _status_through(events, index: int, fallback: BroadcastStatusEnum):
+  """The cycle's status as of ``events[index]``.
+
+  Folded from the events themselves rather than read off the row, because a
+  notice is written *for one event*: when two events are delivered together
+  (the dispatcher coalesces everything pending on a cycle), the row's status is
+  already the final one and would mark an intermediate TP1 as CLOSED.
+  """
+  status = None
+  for event in events[: index + 1]:
+    action = _event_action(event)
+    if action is None:
+      continue
+    incoming = status_for_action(action)
+    status = incoming if status is None else merge_status(status, incoming)
+  return status or fallback
+
+
+def format_broadcast_update_notice(record, event_index: int) -> str | None:
+  """The two-line reply posted under a cycle's message when it changes.
+
+  The message itself is *edited* in place, so anyone who read it earlier never
+  learns that the trade moved on — Telegram shows no notification for an edit.
+  A reply does notify, and being a reply it points straight back at the full
+  body, so it stays deliberately minimal: the cycle's status at that point and
+  the action that produced it.
+
+      [🏁CLOSED]
+      🎯 TP1
+
+  ``None`` when *event_index* names no event, so a caller can walk a range
+  without first checking how many events the cycle holds.
+  """
+  events = [event for event in (record.events or []) if isinstance(event, dict)]
+  if event_index < 0 or event_index >= len(events):
+    return None
+
+  row_status = record.status
+  try:
+    row_status = BroadcastStatusEnum(_enum_value(row_status))
+  except ValueError:
+    row_status = BroadcastStatusEnum.RUNNING
+
+  status = _status_through(events, event_index, row_status)
+  status_icon = _STATUS_ICONS.get(status, em.CYCLE_RUNNING)
+
+  event = events[event_index]
+  action = _event_action(event)
+  label = _enum_value(event.get("action"))
+  icon = action_to_emoji(action) if action is not None else em.DEFAULT_SIGNAL
+  return f"[{status_icon}{status.value}]\n{icon} {label}".rstrip()
+
 
 def _format_raw_dicts(indicators, inputs) -> str:
   """Indicators / inputs blocks for a broadcast, from plain dicts."""

@@ -385,6 +385,48 @@ class BroadcastNotifier:
       )
       return None
 
+  async def reply_message(
+    self, target: ChatTarget, reply_to_message_id: str, text: str
+  ) -> bool:
+    """Post *text* as a reply to an existing broadcast message.
+
+    Editing a message notifies nobody: a reader who already opened the cycle
+    sees the new body only if they scroll back to it. A reply does raise a
+    notification and threads under the message it belongs to, which is why a
+    cycle update sends both — the full body is edited in place, and a two-line
+    notice points at it.
+
+    ``allow_sending_without_reply`` keeps the notice from being lost when the
+    message it answers has been deleted: it then lands as a plain message
+    rather than a 400. Best-effort, like every other Telegram call here — the
+    boolean is for logging and bookkeeping, failures never raise.
+    """
+    if not self._ready(target):
+      return False
+    payload = self._payload(target, text)
+    payload["reply_to_message_id"] = reply_to_message_id
+    payload["allow_sending_without_reply"] = True
+    try:
+      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
+        response = await client.post(self._api_url("sendMessage"), json=payload)
+      if response.status_code == 200:
+        return True
+      logger.error(
+        "Telegram reply failed chat_id=%s reply_to=%s: %s",
+        target.label,
+        reply_to_message_id,
+        response.text,
+      )
+      return False
+    except Exception as exc:
+      logger.exception(
+        "Exception on Telegram reply chat_id=%s reply_to=%s: %s",
+        target.label,
+        reply_to_message_id,
+        exc,
+      )
+      return False
+
   async def edit_message(
     self, target: ChatTarget, message_id: str, text: str
   ) -> EditOutcome:

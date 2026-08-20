@@ -19,6 +19,11 @@ The module has two halves, and they never call each other directly:
   re-renders the whole cycle from its current state and edits each chat's
   message. A sweeper re-reads the log on a timer so anything appended while
   the process was down (``NOTIFY`` is fire-and-forget) is still delivered.
+  Because an edit is silent — Telegram notifies nobody when a message is
+  rewritten — each new event of the cycle *also* gets a two-line reply under
+  that same message, so a reader who saw the trade open finds out that it hit
+  TP1 or closed. ``broadcast_message_chats.notified_event_count`` records how
+  many events a chat has been told about, so a redelivery never repeats one.
 
 What ties a cycle together is the pair ``strategy`` + ``signal_uxid`` (see
 ``WebhookPayload``): the unique key of a ``broadcast_messages`` row. Ordering
@@ -51,7 +56,10 @@ from broker.constants import (
 from broker.db.listener import BROADCAST_LOG_CHANNEL, PostgresChangeListener
 from broker.db.models import Trade
 from broker.domain.trade_status import TradeStatusPolicy
-from broker.helpers.message_formatter import format_broadcast_message
+from broker.helpers.message_formatter import (
+  format_broadcast_message,
+  format_broadcast_update_notice,
+)
 from broker.interfaces import (
   BroadcastCycleView,
   BroadcastMessageRepository,
@@ -486,6 +494,15 @@ class BroadcastDispatcher:
     }
     chats = {chat.chat_id: chat for chat in view.chats}
 
+    # One notice per event of the cycle, same for both audiences: an edit is
+    # silent, so every event a chat has not been told about yet also gets a
+    # two-line reply under that chat's message (see ``_notify_updates``).
+    events = [event for event in (view.message.events or []) if isinstance(event, dict)]
+    notices = [
+      format_broadcast_update_notice(view.message, index)
+      for index in range(len(events))
+    ]
+
     results = []
     for audience, chat in targets:
       results.append(
@@ -495,6 +512,7 @@ class BroadcastDispatcher:
           chat=chat,
           text=bodies[audience],
           seq=seq,
+          notices=notices,
           existing=chats.get(_raw_id(chat)),
         )
       )
@@ -508,6 +526,7 @@ class BroadcastDispatcher:
     chat: ChatTarget,
     text: str,
     seq: int,
+    notices: list[str | None],
     existing,
   ) -> bool:
     """Edit this chat's message, or send it a new one when there is none.
@@ -518,6 +537,11 @@ class BroadcastDispatcher:
     transient failure keeps the stored id and retries on the next pass instead,
     which is what stops a rate limit from littering the chat with duplicate
     copies of the cycle.
+
+    An edit that lands also posts a reply notice for every event this chat has
+    not been told about yet: the edit alone changes the message silently, so a
+    reader who saw the trade open would otherwise never learn that it hit TP1
+    or closed.
     """
     if existing is not None and (existing.delivered_seq or 0) >= seq:
       # Another dispatcher (or an earlier pass) already showed this chat a body
@@ -531,6 +555,12 @@ class BroadcastDispatcher:
     if message_id:
       outcome = await self._notifier.edit_message(chat, message_id, text)
       if outcome is EditOutcome.OK:
+        notified = await self._notify_updates(
+          chat=chat,
+          message_id=message_id,
+          notices=notices,
+          already_notified=getattr(existing, "notified_event_count", None),
+        )
         await self._repository.upsert_chat(
           record_id,
           audience=audience,
@@ -538,6 +568,7 @@ class BroadcastDispatcher:
           message_id=message_id,
           message=text,
           delivered_seq=seq,
+          notified_event_count=notified,
         )
         return True
       if outcome is EditOutcome.FAILED:
@@ -583,8 +614,48 @@ class BroadcastDispatcher:
       message_id=new_message_id,
       message=text,
       delivered_seq=seq,
+      # The message that just went out already shows the whole cycle, so
+      # nothing about it is owed a notice.
+      notified_event_count=len(notices),
     )
     return True
+
+  async def _notify_updates(
+    self,
+    *,
+    chat: ChatTarget,
+    message_id: str,
+    notices: list[str | None],
+    already_notified: int | None,
+  ) -> int:
+    """Reply to *message_id* once per event this chat has not seen announced.
+
+    Returns the new ``notified_event_count`` for the chat — only ever the count
+    of notices actually delivered, so a reply that failed is retried on the
+    next pass instead of being silently skipped.
+
+    ``already_notified`` is None for a chat row written before notices existed:
+    what it announced is unknowable, so it is caught up silently rather than
+    replaying the trade's whole history into the channel at once.
+    """
+    if already_notified is None:
+      return len(notices)
+
+    sent = already_notified
+    for index in range(already_notified, len(notices)):
+      notice = notices[index]
+      if notice is None:
+        sent = index + 1
+        continue
+      if not await self._notifier.reply_message(chat, message_id, notice):
+        log.warning(
+          "Broadcast notice failed chat_id=%s message_id=%s — retrying next pass",
+          chat.label,
+          message_id,
+        )
+        break
+      sent = index + 1
+    return sent
 
   # ── internals ──────────────────────────────────────────────────────
 

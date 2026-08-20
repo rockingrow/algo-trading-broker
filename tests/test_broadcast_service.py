@@ -29,6 +29,7 @@ from broker.constants import (
   SILENT_SIGNAL,
 )
 from broker.domain.broadcast_status import merge_status, status_for_action
+from broker.helpers import emoji_constants as em
 from broker.interfaces import BroadcastCycleView
 from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import (
@@ -239,6 +240,7 @@ class FakeBroadcastRepository:
     message_id,
     message,
     delivered_seq=None,
+    notified_event_count=None,
     last_error=None,
   ):
     rows = self.chats.setdefault(broadcast_message_id, {})
@@ -250,6 +252,7 @@ class FakeBroadcastRepository:
         message_id=message_id,
         message=message,
         delivered_seq=delivered_seq or 0,
+        notified_event_count=notified_event_count,
         last_error=last_error,
       )
       return True
@@ -260,6 +263,10 @@ class FakeBroadcastRepository:
       row.message = message
     if delivered_seq is not None and delivered_seq > row.delivered_seq:
       row.delivered_seq = delivered_seq
+    if notified_event_count is not None and notified_event_count > (
+      row.notified_event_count or 0
+    ):
+      row.notified_event_count = notified_event_count
     row.last_error = last_error
     return True
 
@@ -276,12 +283,16 @@ class FakeTelegram:
     edit_outcome: EditOutcome = EditOutcome.OK,
     send_ok: bool = True,
     enabled: bool = True,
+    reply_ok: bool = True,
   ):
     self.sent: list[tuple[str, str]] = []
     self.edited: list[tuple[str, str, str]] = []
+    # (chat id, message replied to, body) of every update notice.
+    self.replied: list[tuple[str, str, str]] = []
     self.edit_outcome = edit_outcome
     self.send_ok = send_ok
     self.enabled = enabled
+    self.reply_ok = reply_ok
     self._next_id = 100
 
   async def send_and_get_message_id(self, chat, text):
@@ -297,6 +308,10 @@ class FakeTelegram:
   async def edit_message(self, chat, message_id, text):
     self.edited.append((chat.chat_id, message_id, text))
     return self.edit_outcome
+
+  async def reply_message(self, chat, reply_to_message_id, text):
+    self.replied.append((chat.chat_id, reply_to_message_id, text))
+    return self.reply_ok
 
 
 class FakeListener:
@@ -422,6 +437,11 @@ async def _run(payload, repo=None, **dispatcher_kwargs):
 
 def _cycle_of(repo, strategy="strat", uxid="9f2c4b7e18a3d605"):
   return repo.cycles[(strategy, uxid)]
+
+
+def _only_cycle(repo):
+  """The single cycle a test recorded, without spelling out its key."""
+  return next(iter(repo.cycles.values()))
 
 
 # ── Writer: signals ─────────────────────────────────────────────────
@@ -600,6 +620,164 @@ async def test_follow_up_actions_edit_instead_of_sending():
     "-100",
     "-300",
   ]
+
+
+# ── Dispatcher: update notices ──────────────────────────────────────
+
+
+def _notice_writer(repo=None):
+  """Writer whose signal row resolves to the cycle ``_payload()`` opens.
+
+  The worker path finds a cycle through the signal row's ``signal_uxid``, and
+  these tests mix signals and worker executions on one trade.
+  """
+  return _writer(
+    repo,
+    signals=FakeSignalRepository({"sig-1": _signal_row(uxid=_payload().signal_uxid)}),
+  )
+
+
+async def test_the_first_message_carries_no_notice():
+  """Nothing to announce yet — the message that just went out *is* the news."""
+  repo, channel, cycle = await _run(_payload(), private=("-100",), public="-300")
+
+  assert channel.replied == []
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 1
+
+
+async def test_a_follow_up_replies_to_the_edited_message_in_every_audience():
+  """An edit is silent, so each new action also gets a two-line reply."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo, private=("-100",), public="-300")
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+
+  private_message_id = repo.chats[cycle.id]["-100"].message_id
+  public_message_id = repo.chats[cycle.id]["-300"].message_id
+  assert channel.replied == [
+    ("-100", private_message_id, f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"),
+    ("-300", public_message_id, f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"),
+  ]
+
+
+async def test_a_closing_action_is_announced_as_closed():
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP2))
+  await dispatcher.dispatch(cycle.id)
+
+  assert channel.replied[-1][2] == f"[{em.CYCLE_CLOSED}CLOSED]\n{em.TP2} TP2"
+
+
+async def test_events_delivered_together_get_one_notice_each():
+  """A dispatch coalescing two actions still tells the chat about both, and
+  the intermediate one is not back-dated to the cycle's final status."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await writer.broadcast(_payload(action=SignalActionEnum.TP2))
+  await dispatcher.dispatch(cycle.id)
+
+  assert [text for _, _, text in channel.replied] == [
+    f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1",
+    f"[{em.CYCLE_CLOSED}CLOSED]\n{em.TP2} TP2",
+  ]
+
+
+async def test_a_worker_execution_alone_announces_nothing():
+  """The worker table changes the body, but no new action happened."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.record_execution(_trade_event())
+  await dispatcher.dispatch(cycle.id)
+
+  assert channel.edited  # the body did change
+  assert channel.replied == []
+
+
+async def test_a_redelivery_does_not_repeat_a_notice():
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+  # A sweep finding nothing new must not announce TP1 a second time.
+  await writer.record_execution(_trade_event())
+  await dispatcher.dispatch(cycle.id)
+
+  assert len(channel.replied) == 1
+
+
+async def test_a_failed_notice_is_retried_on_the_next_pass():
+  writer, repo = _notice_writer()
+  channel = FakeTelegram(reply_ok=False)
+  dispatcher, _ = _dispatcher(repo, telegram=channel)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 1
+  channel.reply_ok = True
+  await writer.record_execution(_trade_event())
+  await dispatcher.dispatch(cycle.id)
+  assert [text for _, _, text in channel.replied][-1].endswith(f"{em.TP1} TP1")
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 2
+
+
+async def test_a_chat_from_before_notices_existed_is_caught_up_silently():
+  """A row with no count cannot know what it announced; replaying the whole
+  trade into the channel would be worse than staying quiet once."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  repo.chats[cycle.id]["-100"].notified_event_count = None
+
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+
+  assert channel.replied == []
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 2
+
+
+async def test_a_failed_edit_announces_nothing():
+  """The message the notice points at was not updated — do not advertise it."""
+  writer, repo = _notice_writer()
+  channel = FakeTelegram()
+  dispatcher, _ = _dispatcher(repo, telegram=channel)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  channel.edit_outcome = EditOutcome.FAILED
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+
+  assert channel.replied == []
 
 
 async def test_edited_body_accumulates_the_whole_cycle():

@@ -5,6 +5,7 @@ from broker.helpers import emoji_constants as em
 from broker.helpers.message_formatter import (
   format_blocked_message,
   format_broadcast_message,
+  format_broadcast_update_notice,
   worker_label,
 )
 from broker.schemas.account_schema import MarketTypeEnum
@@ -325,6 +326,47 @@ def test_worker_label_falls_back_to_the_market_without_a_gateway():
 
 def test_worker_label_keeps_a_short_account_id_as_is():
   assert worker_label(_worker(account_id="42")) == "MT5 42"
+
+
+# ── Update notice ──────────────────────────────────────────────────
+
+
+def test_notice_is_exactly_the_status_and_the_action():
+  record = _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.RUNNING)
+  notice = format_broadcast_update_notice(record, 1)
+  assert notice == f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"
+  assert len(notice.splitlines()) == 2
+
+
+def test_notice_of_a_closing_action_says_closed():
+  record = _record(events=[_event(), _event("SL")], status=BroadcastStatusEnum.CLOSED)
+  expected = f"[{em.CYCLE_CLOSED}CLOSED]\n{em.SL} SL"
+  assert format_broadcast_update_notice(record, 1) == expected
+
+
+def test_notice_of_an_earlier_action_is_not_back_dated_to_closed():
+  """The row's status is already CLOSED once the trade is out; an intermediate
+  TP1 was still announced while the position was running."""
+  record = _record(
+    events=[_event(), _event("TP1"), _event("TP2")],
+    status=BroadcastStatusEnum.CLOSED,
+  )
+  assert format_broadcast_update_notice(record, 1).startswith(f"[{em.CYCLE_RUNNING}")
+  assert format_broadcast_update_notice(record, 2).startswith(f"[{em.CYCLE_CLOSED}")
+
+
+def test_notice_of_an_unknown_event_index_is_none():
+  record = _record(events=[_event()])
+  assert format_broadcast_update_notice(record, 1) is None
+  assert format_broadcast_update_notice(record, -1) is None
+
+
+def test_notice_of_an_unknown_action_still_renders():
+  record = _record(events=[_event(), _event("MYSTERY")])
+  assert (
+    format_broadcast_update_notice(record, 1)
+    == f"[{em.CYCLE_RUNNING}RUNNING]\n{em.DEFAULT_SIGNAL} MYSTERY"
+  )
 
 
 # ── Blocked message ────────────────────────────────────────────────

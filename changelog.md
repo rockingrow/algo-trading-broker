@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Broadcast update notices: a two-line reply on every new action** — A
+  cycle's message is edited in place, and Telegram notifies nobody when a
+  message is rewritten: a reader who saw the trade open never learned that it
+  hit TP1 or closed. Every new action of a cycle now *also* posts a short
+  reply under that same message, in **both** audiences (private and public):
+
+  ```
+  [🏁CLOSED]
+  🚀 TP2
+  ```
+
+  The reply carries only the cycle's status at that point and the action that
+  produced it — the full body is one tap away, threaded above it. Notices are
+  per event, so a dispatch that coalesces two actions posts one reply each and
+  an intermediate TP1 is not back-dated to `CLOSED`. Worker executions change
+  the body but announce nothing (no new action happened), and a new
+  `broadcast_message_chats.notified_event_count` column (migration
+  `c4e5f6a7b8d9_broadcast_chat_notified_event_count`) records what each chat
+  has already been told, so a redelivery or a sweeper pass never repeats a
+  notice and a failed reply is retried on the next pass. Rows written before
+  the column existed are caught up silently rather than replaying a running
+  trade's whole history into the channel.
 - **Bot `/status`: open-positions count + table** — The command now shows an
   **Open positions** line (the number of currently running trades on the
   active account) beneath the existing account summary, and — whenever that

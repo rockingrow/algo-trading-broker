@@ -252,6 +252,7 @@ class BroadcastMessageRepository(Protocol):
     message_id: str | None,
     message: str | None,
     delivered_seq: int | None = None,
+    notified_event_count: int | None = None,
     last_error: str | None = None,
   ) -> bool: ...
 
