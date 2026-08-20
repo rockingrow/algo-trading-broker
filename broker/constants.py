@@ -13,6 +13,17 @@ CRYPTO_MAX_LEVERAGE_KEY = "crypto_max_leverage"
 # Empty = the public broadcast is off.
 PUBLIC_BROADCAST_CHAT_IDS_KEY = "public_broadcast_chat_ids"
 
+# broker_settings keys toggling whether the dispatcher posts a reply notice
+# under a cycle's message when a new event (TP1, SL, FLAT, ...) arrives — see
+# BroadcastDispatcher._notify_updates in broker/services/broadcast_service.py.
+# An edit alone never notifies Telegram users, so this reply is the only thing
+# that does; unset (or "1") means enabled, "0" turns it off for that audience
+# only — the message itself keeps being edited in place either way. Editable
+# from the admin API and the bot's /admin_private_reply_notify and
+# /admin_public_reply_notify commands.
+PRIVATE_REPLY_NOTIFY_KEY = "private_broadcast_reply_notify"
+PUBLIC_REPLY_NOTIFY_KEY = "public_broadcast_reply_notify"
+
 # broker_settings key holding the strategy → magic-number map as a JSON text
 # blob (e.g. ``{"MT5_GOLD_M5_V1": 20260409, ...}``). Sent to every worker in the
 # ``strategy_magic_map`` block of its WORKER_CONNECTED_ACK, filtered down to the

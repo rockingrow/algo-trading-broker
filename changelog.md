@@ -45,6 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Telegram reporting a message as permanently unreachable (deleted, or the bot
   blocked) drops the row; transient failures keep it for the next event.
 
+- **Broadcast reply notify toggle, per audience** — The two-line reply notice
+  under a cycle's message (see "Broadcast update notices" below) can now be
+  switched off independently for the private and the public audience, via two
+  new broker settings (`private_broadcast_reply_notify`,
+  `public_broadcast_reply_notify`; both default to **enabled**). Disabling one
+  only silences its reply — the cycle's message keeps being edited in place as
+  before. Editable from the admin API
+  (`GET`/`POST /admin/settings/private-reply-notify` and
+  `.../public-reply-notify`) and from the bot's new
+  `/admin_private_reply_notify` and `/admin_public_reply_notify` commands,
+  each taking `enable` or `disable` as its argument.
 - **Broadcast update notices: a two-line reply on every new action** — A
   cycle's message is edited in place, and Telegram notifies nobody when a
   message is rewritten: a reader who saw the trade open never learned that it

@@ -22,8 +22,8 @@ def _names(commands):
 
 def test_command_list_sizes():
   assert len(USER_COMMANDS) == 13
-  # 12 admin commands + 1 divider/header row.
-  assert len(ADMIN_EXTRA_COMMANDS) == 13
+  # 14 admin commands + 1 divider/header row.
+  assert len(ADMIN_EXTRA_COMMANDS) == 15
   # Admin sees user commands plus the extras.
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)
   user_names = set(_names(USER_COMMANDS))
@@ -43,6 +43,8 @@ def test_command_list_sizes():
     "admin_crypto_symbols",
     "admin_crypto_leverage",
     "admin_public_chats",
+    "admin_private_reply_notify",
+    "admin_public_reply_notify",
     "admin_linkaccount",
     "admin_invite_url",
   } <= admin_names

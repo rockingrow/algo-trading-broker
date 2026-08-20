@@ -68,6 +68,14 @@ ADMIN_EXTRA_COMMANDS = [
   BotCommand(
     command="admin_public_chats", description="[ADMIN] Public broadcast chats"
   ),
+  BotCommand(
+    command="admin_private_reply_notify",
+    description="[ADMIN] Private broadcast reply notify",
+  ),
+  BotCommand(
+    command="admin_public_reply_notify",
+    description="[ADMIN] Public broadcast reply notify",
+  ),
   BotCommand(command="admin_linkaccount", description="[ADMIN] Link a Telegram user"),
   BotCommand(command="admin_invite_url", description="[ADMIN] One-tap invite link"),
 ]

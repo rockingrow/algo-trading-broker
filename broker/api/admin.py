@@ -9,7 +9,9 @@ from broker.constants import (
   CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_INCLUDE_SIGNAL_RAW,
   NOTIFICATION_TIMEZONE_KEY,
+  PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_REPLY_NOTIFY_KEY,
   SIGNAL_BLOCKED,
   SILENT_SIGNAL,
   STRATEGY_MAGIC_MAP_KEY,
@@ -48,6 +50,7 @@ from broker.schemas.admin_schema import (
   CryptoMaxLeverageRequest,
   NotificationTimezoneRequest,
   PublicBroadcastChatIdsRequest,
+  ReplyNotifyRequest,
   RotateTokenResponse,
   SettingToggleResponse,
   SettingValueResponse,
@@ -78,6 +81,45 @@ def _normalise_chat_ids(raw: str | None) -> list[str]:
     return []
   ids = [part.strip() for part in raw.split(",")]
   return list(dict.fromkeys(i for i in ids if i and i != "-"))
+
+
+async def _reply_notify_state(
+  setting_repo: SettingRepository, key: str
+) -> SettingToggleResponse:
+  """Current enabled/disabled state of a reply-notify setting.
+
+  Unlike the toggles above (unset = disabled), these default to *enabled* —
+  the reply notice is on unless an admin has explicitly turned it off.
+  """
+  enabled = await setting_repo.get(key) != "0"
+  state_label = "ENABLED" if enabled else "DISABLED"
+  return SettingToggleResponse(
+    setting=key, value="1" if enabled else "0", state=state_label
+  )
+
+
+async def _set_reply_notify(
+  setting_repo: SettingRepository,
+  notifier: Notifier,
+  key: str,
+  enabled: bool,
+) -> SettingToggleResponse:
+  value = "1" if enabled else "0"
+  ok = await setting_repo.set(key, value)
+  if not ok:
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="Failed to update broker setting",
+    )
+
+  state_label = "ENABLED" if enabled else "DISABLED"
+  log.info("%s set -> %s", key, value)
+  await notifier.send_message(
+    f"{em.GEAR} <b>Broker setting changed</b>\n"
+    f"Setting: <code>{key}</code>\n"
+    f"Reply notify: <b>{state_label}</b>\n"
+  )
+  return SettingToggleResponse(setting=key, value=value, state=state_label)
 
 
 async def _push_crypto_leverage_init(
@@ -409,6 +451,74 @@ def get_admin_router() -> APIRouter:
     )
 
     return SettingValueResponse(setting=PUBLIC_BROADCAST_CHAT_IDS_KEY, value=value)
+
+  @router.get(
+    "/settings/private-reply-notify",
+    tags=["settings"],
+    summary="Get whether private broadcast events get a reply notice",
+    response_model=SettingToggleResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_private_reply_notify(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingToggleResponse:
+    """Current PRIVATE_REPLY_NOTIFY_KEY state (unset = ENABLED)."""
+    return await _reply_notify_state(setting_repo, PRIVATE_REPLY_NOTIFY_KEY)
+
+  @router.post(
+    "/settings/private-reply-notify",
+    tags=["settings"],
+    summary="Set whether private broadcast events get a reply notice",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_private_reply_notify(
+    body: ReplyNotifyRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingToggleResponse:
+    """Set PRIVATE_REPLY_NOTIFY_KEY. When disabled, the private broadcast
+    message keeps being edited in place — only the reply notice under it, the
+    thing that actually notifies a reader, is silenced."""
+    return await _set_reply_notify(
+      setting_repo, notifier, PRIVATE_REPLY_NOTIFY_KEY, body.enabled
+    )
+
+  @router.get(
+    "/settings/public-reply-notify",
+    tags=["settings"],
+    summary="Get whether public broadcast events get a reply notice",
+    response_model=SettingToggleResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_public_reply_notify(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingToggleResponse:
+    """Current PUBLIC_REPLY_NOTIFY_KEY state (unset = ENABLED)."""
+    return await _reply_notify_state(setting_repo, PUBLIC_REPLY_NOTIFY_KEY)
+
+  @router.post(
+    "/settings/public-reply-notify",
+    tags=["settings"],
+    summary="Set whether public broadcast events get a reply notice",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_public_reply_notify(
+    body: ReplyNotifyRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingToggleResponse:
+    """Set PUBLIC_REPLY_NOTIFY_KEY. When disabled, the public broadcast
+    message keeps being edited in place — only the reply notice under it, the
+    thing that actually notifies a reader, is silenced."""
+    return await _set_reply_notify(
+      setting_repo, notifier, PUBLIC_REPLY_NOTIFY_KEY, body.enabled
+    )
 
   @router.get(
     "/settings/crypto-max-leverage",

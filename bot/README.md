@@ -125,6 +125,8 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
 | `/admin_magicmap [json]` | View + replace the strategy → magic-number map (paste JSON, or pass it inline) | `GET` + `POST /admin/settings/strategy-magic-map` |
 | `/admin_public_chats` | View + replace the chats the **public** signal broadcast goes to (comma-separated; `-` turns it off) | `GET` + `POST /admin/settings/public-broadcast-chat-ids` |
+| `/admin_private_reply_notify [enable\|disable]` | View, or set whether the **private** broadcast posts a reply notice on each new action (default enabled) | `GET` + `POST /admin/settings/private-reply-notify` |
+| `/admin_public_reply_notify [enable\|disable]` | View, or set whether the **public** broadcast posts a reply notice on each new action (default enabled) | `GET` + `POST /admin/settings/public-reply-notify` |
 
 ### Link-token semantics
 
