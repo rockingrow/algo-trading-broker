@@ -492,6 +492,44 @@ Notes:
   from `.env`, but run through the same parsing, so nothing has to special-case
   a plain user id.
 
+### Broadcast update notices: the reply under an edited message
+
+A trade's broadcast message is **edited in place** as the trade progresses, and
+Telegram sends no notification for an edit: a reader who saw the entry would
+never find out that it hit TP1 or closed unless they happened to scroll back.
+So every new action of a cycle does two things in **both** audiences (private
+and public):
+
+1. the cycle's message is rewritten with the full body (levels, timeline,
+   worker table);
+2. a two-line notice is posted as a **reply** to that same message:
+
+```
+[🏁CLOSED]
+🚀 TP2
+```
+
+That is the whole notice — the cycle's status at that point (`RUNNING` /
+`CLOSED`) and the action that produced it (`TP1`, `TP2`, `SL`, `R_SL`,
+`FLAT`, …). It notifies, and being a reply it points straight back at the full
+body, so nothing is duplicated.
+
+Notes:
+
+- The **first** message of a cycle carries no notice — the message that just
+  arrived is the news.
+- One notice per *action*, not per delivery: a dispatch that coalesces two
+  actions posts one reply each, and the intermediate one keeps the status it
+  had at the time (a TP1 announced before the close is not back-dated to
+  `CLOSED`).
+- A worker execution updates the body (the execution table) but announces
+  nothing — no new action happened.
+- `broadcast_message_chats.notified_event_count` records how many actions each
+  chat has been told about, so a redelivery, a sweeper pass or a retried edit
+  never repeats a notice. A reply that fails is simply retried on the next
+  pass, and a notice whose message was meanwhile deleted is sent as a plain
+  message (`allow_sending_without_reply`) rather than lost.
+
 ### Not in `.env`
 
 A few knobs live in [`broker/settings.py`](broker/settings.py) only, because they
@@ -689,7 +727,10 @@ The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the respon
 TradingView strategy generates once per *trade cycle* and reuses across
 every action of that cycle — the `LONG` entry, its `TP1`, `TP2`, `SL`, and
 the closing `FLAT` all carry the same `signal_uxid`. That is what ties the
-whole trade to one edited-in-place Telegram broadcast message. A payload
+whole trade to one edited-in-place Telegram broadcast message (each new
+action also replying a two-line notice under it — see
+[Broadcast update notices](#broadcast-update-notices-the-reply-under-an-edited-message)).
+A payload
 that omits it or sends any other shape is rejected with `422`. The
 per-signal `signal_id` the broker mints on persist is still unique per
 alert (workers keep deduping on it) — the two ids serve different jobs and
@@ -1322,6 +1363,7 @@ public copy is the bare price/level/timeline body only).
 | `message_id` | String(64) (Nullable) | Telegram `message_id` of the chat's cycle message; `NULL` until the first send succeeds |
 | `message` | Text (Nullable) | Last body actually delivered to this chat — kept so the dispatcher can skip a no-op edit |
 | `delivered_seq` | Integer | Highest `last_seq` this chat has been shown; a delivery whose seq is not greater is dropped so a slow edit cannot overwrite a newer body |
+| `notified_event_count` | Integer (Nullable) | How many of the cycle's actions this chat has been told about with a reply notice under its message; `NULL` on rows written before notices existed (caught up silently on the next delivery) |
 | `last_error` | String(500) (Nullable) | Last transient error seen when editing/sending, or `NULL` on success |
 | `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
 

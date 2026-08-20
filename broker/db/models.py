@@ -512,6 +512,10 @@ class BroadcastMessageChat(Base):
 
   ``message_id`` is NULL when the first send failed; the next signal of the
   cycle retries it as a fresh send rather than an edit.
+
+  ``notified_event_count`` is the other half of the update story: editing a
+  message notifies nobody, so every new event also gets a short reply under
+  that chat's message, and this counts how many of them have been announced.
   """
 
   __tablename__ = "broadcast_message_chats"
@@ -544,6 +548,14 @@ class BroadcastMessageChat(Base):
   delivered_seq: Mapped[int] = mapped_column(
     BigInteger, nullable=False, default=0, server_default="0"
   )
+  # How many of the cycle's events this chat has already been *told about* with
+  # a reply notice under its message. The message itself is edited in place, so
+  # a reader who saw it earlier learns nothing from a silent rewrite; every new
+  # event therefore also gets a short two-line reply pointing at the same
+  # message. NULL means the row predates the notices — it is backfilled to the
+  # current event count on the next delivery so an in-flight cycle does not
+  # suddenly announce its whole history at once.
+  notified_event_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
   # Last delivery error for this chat (e.g. "bot was kicked"), for debugging a
   # channel that silently stopped updating. Cleared on the next success.
   last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)

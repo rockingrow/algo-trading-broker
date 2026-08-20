@@ -354,6 +354,51 @@ async def test_broadcast_edit_wraps_body_in_a_box(monkeypatch):
   assert payload["text"] == "<pre>TP1 hit</pre>"
 
 
+async def test_broadcast_reply_threads_under_the_cycle_message(monkeypatch):
+  """The notice is a reply, which is what makes Telegram notify readers of a
+  message that was otherwise edited silently."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = BroadcastNotifier()
+  ok = await notifier.reply_message(ChatTarget("-100111"), "42", "[CLOSED]\nTP2")
+
+  url, payload = sent[0]
+  assert ok is True
+  assert url.endswith("/sendMessage")
+  assert payload["reply_to_message_id"] == "42"
+  # A deleted cycle message must not swallow the notice with it.
+  assert payload["allow_sending_without_reply"] is True
+  assert payload["text"] == "<pre>[CLOSED]\nTP2</pre>"
+
+
+async def test_broadcast_reply_carries_the_topic_id(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  notifier = BroadcastNotifier()
+  await notifier.reply_message(ChatTarget("-100111", 924584), "42", "TP1")
+
+  _, payload = sent[0]
+  assert payload["message_thread_id"] == 924584
+
+
+async def test_broadcast_reply_reports_a_failure(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  sent = []
+  monkeypatch.setattr(
+    httpx, "AsyncClient", _client_recorder(sent, status_code=429)
+  )
+
+  notifier = BroadcastNotifier()
+  assert await notifier.reply_message(ChatTarget("-100111"), "42", "TP1") is False
+
+
 # ── QueuedNotifier ──────────────────────────────────────────────────
 
 
