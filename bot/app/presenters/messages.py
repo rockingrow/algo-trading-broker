@@ -122,8 +122,8 @@ class UserMessages:
     "/link — Add another account\n"
     "/switch — Change active account\n"
     "/unlink — Unlink active account\n"
-    "/subscribe — Receive trade broadcasts\n"
-    "/unsubscribe — Stop trade broadcasts"
+    "/subscribe — Live trade alerts\n"
+    "/unsubscribe — Stop trade alerts"
   )
 
   @staticmethod
@@ -131,13 +131,17 @@ class UserMessages:
     if subscribed:
       return (
         f"{emojis.CHECK} <b>Subscribed.</b>\n\n"
-        "You'll now get a DM here whenever one of your linked accounts "
-        "completes (closes) a trade. Use /unsubscribe to stop."
+        "You'll now get a message here the moment one of your linked accounts "
+        "opens a trade. Each message updates itself as the trade moves — "
+        "partial close, close, flat — and carries "
+        f"{emojis.DETAIL} <b>Detail</b> and {emojis.CYCLE_CLOSED} <b>Close</b> buttons "
+        "while the trade is still running.\n\n"
+        "Use /unsubscribe to stop."
       )
     return (
       f"{emojis.CHECK} <b>Unsubscribed.</b>\n\n"
-      "You'll no longer get completed-trade alerts. Use /subscribe to turn "
-      "them back on."
+      "You'll no longer get trade alerts. Trades already showing in this chat "
+      "keep updating until they close. Use /subscribe to turn them back on."
     )
 
   HELP_TEXT = (

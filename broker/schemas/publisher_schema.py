@@ -133,6 +133,14 @@ class AdminSignal(BaseModel):
   * **Broadcast** (no ``account_id``) — published to the shared ``ADMIN``
     subject and fanned out to every connected worker, which filters for itself
     (e.g. a strategy/symbol-scoped or flat-everything directive).
+
+  ``ref_id``, when known, narrows a FLAT to the exact position it belongs to
+  — strategy+symbol alone is ambiguous once the same strategy holds two
+  positions on one symbol (e.g. the Telegram trade card's Close button, which
+  has the specific trade in hand). This is the worker's own unique column, so
+  it also stays correct for a position the worker opened by hand rather than
+  through the broker. Optional because it isn't always resolvable: a manual
+  FLAT typed by a user names no single trade.
   """
 
   model_config = ConfigDict(
@@ -147,6 +155,7 @@ class AdminSignal(BaseModel):
         "account_id": "123456",
         "market": "FOREX",
         "gateway": "MT5",
+        "ref_id": "987654321",
       }
     },
   )
@@ -158,6 +167,7 @@ class AdminSignal(BaseModel):
   account_id: Optional[str] = None
   market: Optional[MarketTypeEnum] = None
   gateway: Optional[str] = None
+  ref_id: Optional[str] = None
 
   @model_validator(mode="after")
   def _require_market_gateway_with_account_id(self) -> "AdminSignal":

@@ -5,6 +5,7 @@ from broker.interfaces.db_protocol import (
   SettingRepository,
   SignalRepository,
   TradeBroadcastRepository,
+  TradeNotificationRepository,
   TradeRepository,
 )
 from broker.interfaces.notifier_protocol import Notifier, SignalBroadcaster
@@ -20,5 +21,6 @@ __all__ = [
   "SignalPublisher",
   "SignalRepository",
   "TradeBroadcastRepository",
+  "TradeNotificationRepository",
   "TradeRepository",
 ]

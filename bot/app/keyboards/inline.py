@@ -12,7 +12,15 @@ from typing import Any, Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app import emojis
-from app.constants import GATEWAYS_BY_MARKET, MARKETS
+from app.constants import (
+  CB_TRADE_DETAIL,
+  CB_TRADE_EXIT,
+  CB_TRADE_EXIT_CANCEL,
+  CB_TRADE_EXIT_CONFIRM,
+  CB_TRADE_SUMMARY,
+  GATEWAYS_BY_MARKET,
+  MARKETS,
+)
 from app.presenters.messages import AdminMessages
 from app.utils.pagination import build_pagination_keyboard, build_pagination_row
 
@@ -68,6 +76,58 @@ def trades_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
 def accounts_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
   """Prev/Next for /myaccounts → callback ``myacc:{offset}``."""
   return build_pagination_keyboard(page, lambda offset: f"myacc:{offset}")
+
+
+# ── Live trade card ─────────────────────────────────────────────────
+# The broker builds the same two keyboards as raw Bot API dicts when it posts
+# and refreshes a card (``broker/helpers/trade_card.py``); these rebuild them
+# with aiogram types when the bot re-renders the card after a button tap.
+
+
+def trade_card(trade_id: str, *, detailed: bool, closed: bool) -> Optional[InlineKeyboardMarkup]:
+  """Detail/Summary + Exit for a live card, or None once the trade is over.
+
+  Returning None is what strips the buttons: aiogram sends no ``reply_markup``,
+  and the Bot API drops a message's keyboard when the field is absent."""
+  if closed:
+    return None
+  toggle = (
+    InlineKeyboardButton(
+      text=f"{emojis.COLLAPSE} Summary", callback_data=f"{CB_TRADE_SUMMARY}:{trade_id}"
+    )
+    if detailed
+    else InlineKeyboardButton(
+      text=f"{emojis.DETAIL} Detail", callback_data=f"{CB_TRADE_DETAIL}:{trade_id}"
+    )
+  )
+  return InlineKeyboardMarkup(
+    inline_keyboard=[
+      [
+        toggle,
+        InlineKeyboardButton(
+          text=f"{emojis.CYCLE_CLOSED} Close", callback_data=f"{CB_TRADE_EXIT}:{trade_id}"
+        ),
+      ]
+    ]
+  )
+
+
+def trade_exit_confirm(trade_id: str) -> InlineKeyboardMarkup:
+  """Confirm/Cancel pair shown in place of a card's buttons before closing."""
+  return InlineKeyboardMarkup(
+    inline_keyboard=[
+      [
+        InlineKeyboardButton(
+          text=f"{emojis.CHECK} Close it",
+          callback_data=f"{CB_TRADE_EXIT_CONFIRM}:{trade_id}",
+        ),
+        InlineKeyboardButton(
+          text=f"{emojis.CANCEL} Cancel",
+          callback_data=f"{CB_TRADE_EXIT_CANCEL}:{trade_id}",
+        ),
+      ]
+    ]
+  )
 
 
 # ── Admin keyboards ─────────────────────────────────────────────────

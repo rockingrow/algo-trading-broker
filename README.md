@@ -662,6 +662,8 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `GET /v1/telegram/{telegram_user_id}/accounts` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/active-account` | `X-API-KEY` |
 | `GET /v1/telegram/{telegram_user_id}/trades` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/trades/{trade_id}` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/trades/{trade_id}/exit` | `X-API-KEY` |
 | `GET /v1/telegram/{telegram_user_id}/positions` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/flat` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/prevent` | `X-API-KEY` |
@@ -1260,43 +1262,117 @@ the row on the next read.
 ### `trade_broadcast_subscriptions` table
 
 One row per `(platform, bot user)` who has opted in — via the bot's `/subscribe`
-— to a Telegram DM whenever one of their linked accounts **completes (closes) a
-trade**. Unsubscribing (`/unsubscribe`) deletes the row. When a worker's `TRADE`
-event ends a trade, the broker resolves the account's owners as the
-intersection of `account_bot_links` (who is linked) and this table (who opted
-in), then DMs each via the bot-service bot token (`BOT_TELEGRAM_TOKEN`) — the
-bot the user actually started, since a bot can only message users who started
-it. The opt-in spans every account the user holds, which is why it is a per-user
-row here rather than a column on a link.
-
-"Ends a trade" means the event's own status maps to a **terminal** trade status —
-`CLOSED` (TP2 / SL / R_SL / TERMINAL_CLOSED / FORCED_CLOSED) or `FLAT` (an admin
-`POST /admin/flat`). An admin FLAT counts because the position is over and the
-owner did not close it themselves. Gating on the event's status rather than the
-persisted row's keys the DM to the one discrete close event the worker emits, so
-a later touch of an already-closed row does not fire a second one.
-
-A `FLATTED` event reports `closed_price=0` when the worker has no close price to
-give. No instrument closes at 0, so the broker treats it as missing and keeps the
-open price rather than persisting — and DM-ing — a bogus `0`.
-
-The DM's status line names the event that ended the trade in brackets —
-`Status: CLOSED (TP2)`, `CLOSED (SL)`, `CLOSED (R_SL)`,
-`CLOSED (TERMINAL_CLOSED)`, `CLOSED (FORCED_CLOSED)` — since five worker events
-collapse onto the one `CLOSED`, while the DM's `Action` line stays the entry
-direction (`LONG` / `SHORT`) the trade was opened with. The label is the `TRADE`
-event's own status, with `FLATTED` shown as the `FLAT` it is; an admin FLAT
-therefore reads `Status: FLAT`, not `FLAT (FLAT)`.
+— to **live trade cards**. Unsubscribing (`/unsubscribe`) deletes the row. The
+opt-in spans every account the user holds, which is why it is a per-user row
+here rather than a column on a link.
 
 | Column | Type | Description |
 | ------- | ------------ | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `platform` | Enum | `TELEGRAM` |
-| `platform_user_id` | String(64) | The bot user opted in to broadcasts |
+| `platform_user_id` | String(64) | The bot user opted in to trade cards |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
 **Unique constraint:** `(platform, platform_user_id)`.
+
+### `trade_notifications` table
+
+One row per **live trade card**: the Telegram message a subscriber was sent for
+one trade, remembered so later status changes edit that same message instead of
+posting a new one.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `trade_id` | UUID (FK) | `trades.id`, `ON DELETE CASCADE` |
+| `platform` | Enum | `TELEGRAM` |
+| `chat_id` | String(64) | Recipient's platform user id (their DM chat) |
+| `message_id` | Integer | The Telegram message to edit |
+| `status` | Enum | The trade status the card currently shows |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+**Unique constraint:** `(trade_id, platform, chat_id)` — one card per trade per
+recipient.
+
+The card's status line names the event that moved the trade, in brackets —
+`Status: Closed (TP2)`, `Closed (SL)`, `Closed (R_SL)`,
+`Closed (TERMINAL_CLOSED)`, `Closed (FORCED_CLOSED)` — since five worker events
+collapse onto the one `CLOSED`, while the card's direction stays the entry
+(`LONG` / `SHORT`) the trade was opened with. It comes from `trades.last_action`
+(`TradeStatusPolicy.to_last_action`, which renames only `FLATTED` → `FLAT`), so
+an admin FLAT reads `Status: Flatted`, not `Flatted (FLAT)`. It lives on the
+trade row rather than being passed with the event because the card is
+re-rendered later — by the bot, on a Detail tap — with only the row to go on.
+
+#### How a card lives
+
+Every `TRADE` event, after the `trades` upsert, goes to `TradeCardService`:
+
+1. **First sighting** — the broker posts the card to every subscribed owner of
+   that account (the intersection of `account_bot_links` and
+   `trade_broadcast_subscriptions`), via the bot-service bot token
+   (`BOT_TELEGRAM_TOKEN`) — the bot the user actually started, since a bot can
+   only message users who started it. Below the body sit a **Detail** and an
+   **Exit** button.
+2. **Status change** — `OPENED` → `PARTIALLY_CLOSED` (TP1) → `CLOSED` (TP2 /
+   SL / R_SL / TERMINAL_CLOSED / FORCED_CLOSED) / `FLAT` (an admin
+   `POST /admin/flat`) / `REJECTED` — the broker calls `editMessageText` on the
+   stored `message_id`, so the owner's chat keeps **one** message per trade
+   rather than a stream of them.
+3. **Terminal status** — the card is edited one last time and its buttons are
+   dropped, since there is nothing left to act on. That final state *is* the
+   completed-trade notification.
+
+Nothing Telegram-shaped happens on the `TRADE` path. nats-py awaits the
+consumer's callback before pulling the next message, so `handle_event` only
+*queues* the trade and a single background drain task does the lookups and the
+Bot API calls — the same reason the signal path hides behind `QueuedNotifier`,
+which cannot serve here because a card needs the `message_id` its send returns.
+One drain task means two events for the same trade are never applied out of
+order, and a full queue drops the update with a warning rather than blocking
+the bookkeeping it was meant to stay out of.
+
+Two rules keep the Bot API traffic proportional to what a human would notice:
+
+- **Only status transitions edit.** Workers re-emit `TRADE` events for changes a
+  card doesn't show (an SL nudge, a sync tick); `status` here records what the
+  message currently displays, so those are skipped.
+- **Existing cards are refreshed even after unsubscribing.** The opt-in decides
+  who gets a *new* card; once a card exists it keeps telling the truth, rather
+  than freezing on `OPENED` with a live Exit button.
+
+The *persisted* trade drives the card, not the event — the repository already
+refuses a status downgrade, so a late or out-of-order event cannot reopen a card
+that has closed. A subscriber who opts in mid-trade still gets a card on the next
+event; if that event is the close, the card simply arrives final and buttonless.
+
+When Telegram reports a message as permanently unreachable (the user deleted it,
+or blocked the bot) the row is dropped so later events stop retrying. Transient
+failures keep the row, and the next status change tries again.
+
+A `FLATTED` event reports `closed_price=0` when the worker has no close price to
+give. No instrument closes at 0, so the broker treats it as missing and keeps the
+open price rather than persisting — and showing — a bogus `0`.
+
+#### The buttons
+
+The card is sent with the bot service's token (`TradeCardNotifier`, which
+reuses `BroadcastNotifier`'s send/edit machinery and only overrides the token,
+the body formatting and which errors are unrecoverable), so taps arrive as
+ordinary callback queries on the bot's existing long poll — no webhook, no
+second connection. The bot answers them against two endpoints scoped to a single trade:
+
+| Button | Endpoint | Effect |
+| ------- | ------------ | --------------------------------------- |
+| **Detail** / **Summary** | `GET /v1/telegram/{id}/trades/{trade_id}` | Re-renders the card with (or without) the strategy / account / leverage / risk block |
+| **Exit** | `POST /v1/telegram/{id}/trades/{trade_id}/exit` | After a confirmation tap, publishes a FLAT scoped to that trade's `strategy` + `symbol` + account |
+
+Both authorise against **every** account the caller is linked to, not just the
+active one — a card outlives an account switch. `exit` answers `409` on a trade
+that has already reached a terminal status, so a stale card cannot close a newer
+position on the same symbol.
 
 ### `broker_settings` table
 

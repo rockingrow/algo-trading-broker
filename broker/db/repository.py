@@ -36,6 +36,7 @@ from broker.db.models import (
   Signal,
   Trade,
   TradeBroadcastSubscription,
+  TradeNotification,
 )
 from broker.domain.broadcast_status import merge_status, status_for_action
 from broker.domain.trade_status import TradeStatusPolicy
@@ -52,6 +53,7 @@ from broker.schemas.core import (
 )
 from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.trade_event_schema import PositionEvent
+from broker.schemas.trade_schema import TradeCard
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.settings import settings
 
@@ -853,15 +855,15 @@ class SqlAlchemyAccountRepository:
 
 
 class SqlAlchemyTradeBroadcastRepository:
-  """Manages per-user opt-in for completed-trade Telegram broadcasts, and
-  resolves which subscribed users should be notified for a given account."""
+  """Manages per-user opt-in for live trade-card DMs, and resolves which
+  subscribed users should be sent one for a given account."""
 
   async def subscribe(
     self,
     telegram_user_id: int,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool:
-    """Opt a bot user in to completed-trade broadcasts. Idempotent — returns
+    """Opt a bot user in to live trade cards. Idempotent — returns
     True whether the row was created now or already existed."""
     platform_user_id = str(telegram_user_id)
     try:
@@ -895,7 +897,7 @@ class SqlAlchemyTradeBroadcastRepository:
     telegram_user_id: int,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool:
-    """Opt a bot user out of completed-trade broadcasts. Idempotent — returns
+    """Opt a bot user out of live trade cards. Idempotent — returns
     True even when there was no subscription to remove."""
     platform_user_id = str(telegram_user_id)
     try:
@@ -921,7 +923,7 @@ class SqlAlchemyTradeBroadcastRepository:
     telegram_user_id: int,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool:
-    """Whether a bot user is currently opted in to completed-trade broadcasts."""
+    """Whether a bot user is currently opted in to live trade cards."""
     platform_user_id = str(telegram_user_id)
     try:
       async with get_session() as session:
@@ -947,9 +949,9 @@ class SqlAlchemyTradeBroadcastRepository:
     gateway: str | None,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> list[str]:
-    """Return the platform user ids that should receive a completed-trade DM for
+    """Return the platform user ids that should receive a trade card for
     the account identified by ``(account_id, market, gateway)``: those both
-    linked to a matching account *and* opted in to broadcasts.
+    linked to a matching account *and* opted in to trade cards.
 
     Scoped by ``account_id`` + ``market`` + ``gateway`` (with a NULL-gateway
     fallback, mirroring the trade/account upsert path) so a bare id reused
@@ -1562,6 +1564,105 @@ def _log_entry(
   )
 
 
+class SqlAlchemyTradeNotificationRepository:
+  """Tracks the Telegram message that carries each trade's live card.
+
+  Every method swallows its exceptions and degrades to "no card known": a
+  notification is cosmetic, and a bookkeeping failure must never stop the TRADE
+  consumer from persisting the event that triggered it.
+  """
+
+  async def list_for_trade(
+    self,
+    trade_id: uuid.UUID,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> list[TradeCard]:
+    """Cards already posted for *trade_id*, one per recipient."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TradeNotification).where(
+            TradeNotification.trade_id == trade_id,
+            TradeNotification.platform == platform,
+          )
+        )
+        return [TradeCard.model_validate(row) for row in result.scalars().all()]
+    except Exception as exc:
+      log.exception("Failed to list trade cards for trade_id=%s: %s", trade_id, exc)
+      return []
+
+  async def record(
+    self,
+    trade_id: uuid.UUID,
+    chat_id: str,
+    message_id: int,
+    status: TradeStatusEnum,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool:
+    """Remember a freshly posted card. Idempotent — a second call for the same
+    recipient updates the existing row rather than violating the unique key,
+    which is what happens if a card was posted, deleted by the user, and then
+    re-posted."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TradeNotification).where(
+            TradeNotification.trade_id == trade_id,
+            TradeNotification.platform == platform,
+            TradeNotification.chat_id == chat_id,
+          )
+        )
+        row: Optional[TradeNotification] = result.scalars().first()
+        if row is not None:
+          row.message_id = message_id
+          row.status = status
+        else:
+          session.add(
+            TradeNotification(
+              id=uuid.uuid4(),
+              trade_id=trade_id,
+              platform=platform,
+              chat_id=chat_id,
+              message_id=message_id,
+              status=status,
+            )
+          )
+      return True
+    except Exception as exc:
+      log.exception(
+        "Failed to record trade card trade_id=%s chat_id=%s: %s",
+        trade_id,
+        chat_id,
+        exc,
+      )
+      return False
+
+  async def mark_status(self, card_id: uuid.UUID, status: TradeStatusEnum) -> bool:
+    """Record the status the card now displays, after a successful edit."""
+    try:
+      async with get_session() as session:
+        row = await session.get(TradeNotification, card_id)
+        if row is None:
+          return False
+        row.status = status
+      return True
+    except Exception as exc:
+      log.exception("Failed to update trade card id=%s: %s", card_id, exc)
+      return False
+
+  async def delete(self, card_id: uuid.UUID) -> bool:
+    """Forget a card whose message Telegram says is gone for good."""
+    try:
+      async with get_session() as session:
+        await session.execute(
+          delete(TradeNotification).where(TradeNotification.id == card_id)
+        )
+      return True
+    except Exception as exc:
+      log.exception("Failed to delete trade card id=%s: %s", card_id, exc)
+      return False
+
+
 class SqlAlchemySettingRepository:
   """Reads and upserts rows in the ``broker_settings`` table."""
 
@@ -1902,6 +2003,11 @@ class SqlAlchemyTradeRepository:
       log.warning("upsert_by_position_event: unknown position status=%s", event.status)
       return None
 
+    # TP2 / SL / R_SL all persist as CLOSED and ``action`` keeps the entry
+    # direction, so the event's own label is the only record of *how* the trade
+    # moved. Stored on the row because the live trade card is re-rendered later
+    # with nothing but the row to go on.
+    last_action = self._policy.to_last_action(event.status)
     is_running = self._policy.is_open(event.status)
     # A close price of 0 means the worker had none to report (seen on FLATTED
     # events) — no instrument ever closes at 0, so treat it like a missing
@@ -1934,6 +2040,7 @@ class SqlAlchemyTradeRepository:
           )
           return row
         row.status = trade_status
+        row.last_action = last_action
         row.is_running = is_running
         row.price = price
         row.quantity = event.volume
@@ -1982,6 +2089,7 @@ class SqlAlchemyTradeRepository:
         is_running=is_running,
         risk_percent=event.risk_percent,
         status=trade_status,
+        last_action=last_action,
         reject_reason=event.reject_reason,
       )
       session.add(new_row)
@@ -2034,6 +2142,51 @@ class SqlAlchemyTradeRepository:
     except Exception as exc:
       log.exception("Failed to fetch trades for account_id=%s: %s", account_id, exc)
       return []
+
+  async def get_for_telegram_user(
+    self,
+    trade_id: uuid.UUID,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> Trade | None:
+    """Return the trade *trade_id* only if the bot user may see it.
+
+    "May see it" means the trade's owning account — matched on
+    ``account_id`` + ``market`` + ``gateway`` the way
+    ``list_broadcast_targets`` does — is one this user is linked to. Any of
+    their linked accounts qualifies, not just the active one: a trade card
+    stays actionable after the owner has switched to another account.
+
+    Returning None for both "no such trade" and "not yours" is deliberate —
+    the endpoint answers 404 either way rather than confirming that some other
+    owner's trade id exists.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Trade)
+          .join(
+            Account,
+            (Account.account_id == Trade.account_id)
+            & (Account.market == Trade.market)
+            & (or_(Account.gateway == Trade.gateway, Account.gateway.is_(None))),
+          )
+          .join(AccountBotLink, AccountBotLink.account_id == Account.id)
+          .where(
+            Trade.id == trade_id,
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == str(telegram_user_id),
+          )
+        )
+        return result.scalars().first()
+    except Exception as exc:
+      log.exception(
+        "Failed to fetch trade id=%s for telegram_user_id=%s: %s",
+        trade_id,
+        telegram_user_id,
+        exc,
+      )
+      return None
 
   async def count_by_account(self, account_id: str) -> int:
     """Return the total number of trades for an account.

@@ -115,6 +115,8 @@ class BrokerClientUser(BrokerClient):
     ACCOUNTS = "{telegram_id}/accounts"
     SWITCH = "{telegram_id}/active-account"
     TRADES = "{telegram_id}/trades"
+    TRADE = "{telegram_id}/trades/{trade_id}"
+    TRADE_EXIT = "{telegram_id}/trades/{trade_id}/exit"
     POSITIONS = "{telegram_id}/positions"
     FLAT = "{telegram_id}/commands/flat"
     PREVENT = "{telegram_id}/commands/prevent"
@@ -201,6 +203,41 @@ class BrokerClientUser(BrokerClient):
     return self._json_or_none(
       await self._request(
         "GET", self._path(self.ENDPOINTS.POSITIONS, telegram_id=telegram_user_id)
+      )
+    )
+
+  async def get_trade(
+    self, telegram_user_id: int, trade_id: str
+  ) -> Optional[dict[str, Any]]:
+    """One trade the user owns, or None when it isn't theirs / doesn't exist.
+
+    Scoped against every account linked to the caller, not just the active
+    one — a trade card outlives an account switch.
+    """
+    return self._json_or_none(
+      await self._request(
+        "GET",
+        self._path(
+          self.ENDPOINTS.TRADE, telegram_id=telegram_user_id, trade_id=trade_id
+        ),
+      )
+    )
+
+  async def exit_trade(
+    self, telegram_user_id: int, trade_id: str
+  ) -> Optional[dict[str, Any]]:
+    """Close one specific trade (FLAT scoped to its strategy + symbol).
+
+    None covers every failure the caller can't act on differently, including
+    the 409 the broker answers when the trade has closed in the meantime — the
+    card is refreshed either way, which is what tells the user what happened.
+    """
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(
+          self.ENDPOINTS.TRADE_EXIT, telegram_id=telegram_user_id, trade_id=trade_id
+        ),
       )
     )
 

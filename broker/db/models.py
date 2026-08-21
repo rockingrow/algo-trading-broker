@@ -189,6 +189,14 @@ class Trade(Base):
 
   # Status
   status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)
+  # The event that last moved this trade — TP1 / TP2 / SL / R_SL / FLAT /
+  # TERMINAL_CLOSED / FORCED_CLOSED (see ``TradeStatusPolicy.to_last_action``).
+  # Several of those map onto the same ``status``, and ``action`` keeps the
+  # entry direction, so the row alone otherwise never says *how* a trade ended.
+  # Persisted rather than passed along with the event because the live trade
+  # card is re-rendered later — by the bot, on a Detail tap — with only the row
+  # to go on. Nullable: rows written before the column existed have none.
+  last_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
   reject_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
   def __repr__(self) -> str:
@@ -392,8 +400,9 @@ class BotSession(Base):
 
 class TradeBroadcastSubscription(Base):
   """
-  One row per (platform, bot user) who has opted in to receive a Telegram DM
-  whenever one of their linked accounts completes (closes) a trade.
+  One row per (platform, bot user) who has opted in to receive the live trade
+  card — a Telegram DM posted when one of their linked accounts opens a trade
+  and edited in place as that trade progresses.
 
   Kept as its own table — rather than a column on ``bot_sessions`` or
   ``account_bot_links`` — because the opt-in is a per-user preference that
@@ -689,6 +698,56 @@ class BroadcastMessageLog(Base):
     return (
       f"<BroadcastMessageLog broadcast_message_id={self.broadcast_message_id} "
       f"seq={self.seq} kind={self.kind} status={self.status}>"
+    )
+
+
+class TradeNotification(Base):
+  """
+  One row per live trade card: the Telegram message a subscriber was sent for
+  one trade, remembered so later status changes can *edit* that same message
+  instead of posting a new one.
+
+  Keyed by ``(trade_id, platform, chat_id)`` — one card per trade per
+  recipient. ``message_id`` is what ``editMessageText`` needs; ``status`` is
+  the trade status the card currently shows, so an event that changes nothing
+  visible (a worker re-emitting the same status after an SL tweak) is skipped
+  rather than spending a Bot API call that Telegram would reject as
+  "message is not modified".
+
+  ``chat_id`` holds the recipient's platform user id (a Telegram DM chat has
+  the same id as the user), as text for the same reason ``AccountBotLink``
+  stores ids as text. Rows are deleted with their trade, and dropped
+  individually when Telegram reports the message as permanently unreachable
+  (user deleted it, or blocked the bot).
+  """
+
+  __tablename__ = "trade_notifications"
+  __table_args__ = (
+    UniqueConstraint(
+      "trade_id",
+      "platform",
+      "chat_id",
+      name="uq_trade_notifications_trade_platform_chat",
+    ),
+  )
+
+  trade_id: Mapped[uuid.UUID] = mapped_column(
+    UUID(as_uuid=True),
+    ForeignKey("trades.id", ondelete="CASCADE"),
+    nullable=False,
+    index=True,
+  )
+  platform: Mapped[BotPlatformTypeEnum] = mapped_column(
+    Enum(BotPlatformTypeEnum), nullable=False
+  )
+  chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+  message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+  status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)
+
+  def __repr__(self) -> str:
+    return (
+      f"<TradeNotification trade_id={self.trade_id} chat_id={self.chat_id} "
+      f"message_id={self.message_id} status={self.status}>"
     )
 
 

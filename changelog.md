@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live trade cards** — `/subscribe` now delivers an owner a Telegram message
+  the moment one of their linked accounts **opens** a trade, and that message
+  **edits itself** for the rest of the trade's life: `OPENED` →
+  `PARTIALLY_CLOSED` (TP1) → `CLOSED` / `FLAT` / `REJECTED`. An owner's chat
+  holds one message per trade instead of a stream of them.
+
+  While the trade is running the card carries two inline buttons:
+  - 🔍 **Detail** / ⬆️ **Summary** — expands the card with strategy, account,
+    market/gateway, leverage, risk, reference id and the worker's comment, and
+    collapses it again.
+  - 🛑 **Exit** — asks to confirm, then closes that trade (a FLAT scoped to its
+    strategy + symbol) and notes on the card that the exit is in flight.
+
+  On a terminal status the card is edited one last time and the buttons are
+  dropped, since there is nothing left to act on.
+
+  The card is posted with the *bot service's* token (`BOT_TELEGRAM_TOKEN`),
+  which is what makes the buttons work at all: their taps arrive as ordinary
+  callback queries on the bot's existing long poll, so there is no webhook and
+  no second connection. Two new endpoints back them,
+  `GET /v1/telegram/{id}/trades/{trade_id}` and
+  `POST /v1/telegram/{id}/trades/{trade_id}/exit`, both authorised against
+  **every** account the caller is linked to rather than the active one — a card
+  outlives an account switch. `exit` answers `409` on an already-terminal trade
+  so a stale card cannot close a newer position on the same symbol.
+
+  New `trade_notifications` table (migration `b8c9d0e1f2a3`) maps
+  `(trade_id, platform, chat_id)` → `message_id` plus the status that message
+  currently shows. Only status *transitions* trigger an edit, so the worker
+  re-emitting `TRADE` events for changes a card doesn't show (an SL nudge, a
+  sync tick) costs nothing. A card already posted keeps being refreshed even
+  after its owner unsubscribes — the opt-in gates *new* cards, and a frozen
+  card claiming `OPENED` with a live Exit button would be worse than none.
+  Telegram reporting a message as permanently unreachable (deleted, or the bot
+  blocked) drops the row; transient failures keep it for the next event.
+
 - **Broadcast update notices: a two-line reply on every new action** — A
   cycle's message is edited in place, and Telegram notifies nobody when a
   message is rewritten: a reader who saw the trade open never learned that it
@@ -191,6 +227,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FLAT (FLAT)`.
 
 ### Changed
+
+- **Completed-trade broadcasts are now the end state of a live card** — the
+  standalone "Trade completed" DM is gone; a closed trade is the final edit of
+  the card its owner has been watching since it opened. `/subscribe` ·
+  `/unsubscribe` and `trade_broadcast_subscriptions` are unchanged, and so is
+  what counts as a completion, so an owner who was subscribed before still gets
+  told when a trade ends — in the message they already have. An owner who
+  subscribes mid-trade gets their first card on the next event; when that event
+  is the close, the card simply arrives final and buttonless, matching the old
+  behaviour.
+
+  Internally `TradeBroadcastService` is replaced by `TradeCardService`, and
+  `format_completed_trade_message` by `broker/helpers/trade_card.py` (body,
+  keyboard and callback data in one place, mirrored bot-side by
+  `bot/app/presenters/trade_card.py`). Sending reuses the existing
+  `BroadcastNotifier` machinery — `TradeCardNotifier` subclasses it and only
+  overrides the token, the body formatting (a card carries its own markup, so
+  no `<pre>` box) and which errors count as unrecoverable, since a DM that
+  can't be edited can't be re-sent either. `BroadcastNotifier` gained an
+  optional `reply_markup` on send/edit, absent-not-null so the Bot API drops a
+  card's keyboard when the trade ends.
+
+  A new `trades.last_action` column (same migration) records the event that
+  last moved a trade, so the card can say `Closed (SL)` — TP2, SL and R_SL all
+  persist as `CLOSED` and `action` keeps the entry direction, so the row alone
+  never said *how* a trade ended. It is persisted rather than passed alongside
+  the event because the card is re-rendered later, by the bot on a Detail tap,
+  with only the row to go on; that also puts it on `TradeResponse`, so both
+  renderers show the same line.
+
+  Like the signal path, nothing Telegram-shaped happens on the TRADE callback:
+  `handle_event` only queues the trade and a single drain task does the Bot API
+  work, so a throttled Telegram can't stall trade bookkeeping. `QueuedNotifier`
+  couldn't serve here — a card needs the `message_id` its send returns — so the
+  service owns the same bounded-queue shape one level up. One drain task means
+  two events for the same trade can never be applied out of order.
 
 - **Bot: `/admin_flat` bare-invocation semantics** — Was: immediately
   presented the "Confirm FLAT for **ALL** accounts?" prompt. Now: opens

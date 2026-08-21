@@ -16,6 +16,7 @@ from broker.db.repository import (
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
   SqlAlchemyTradeBroadcastRepository,
+  SqlAlchemyTradeNotificationRepository,
   SqlAlchemyTradeRepository,
 )
 from broker.interfaces import (
@@ -27,6 +28,7 @@ from broker.interfaces import (
   SignalPublisher,
   SignalRepository,
   TradeBroadcastRepository,
+  TradeNotificationRepository,
   TradeRepository,
 )
 from broker.services.broadcast_service import (
@@ -59,6 +61,10 @@ def get_trade_repository() -> TradeRepository:
 
 def get_trade_broadcast_repository() -> TradeBroadcastRepository:
   return SqlAlchemyTradeBroadcastRepository()
+
+
+def get_trade_notification_repository() -> TradeNotificationRepository:
+  return SqlAlchemyTradeNotificationRepository()
 
 
 def get_broadcast_message_repository() -> BroadcastMessageRepository:

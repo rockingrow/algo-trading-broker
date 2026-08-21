@@ -21,7 +21,7 @@ from broker.schemas.core import (
   SignalActionEnum,
 )
 from broker.schemas.trade_event_schema import PositionEvent
-from broker.schemas.trade_schema import TradeStatusEnum
+from broker.schemas.trade_schema import TradeCard, TradeStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
 
 
@@ -155,7 +155,7 @@ class AccountRepository(Protocol):
 
 @runtime_checkable
 class TradeBroadcastRepository(Protocol):
-  """Per-user opt-in for completed-trade Telegram broadcasts and target lookup."""
+  """Per-user opt-in for live trade-card DMs, and recipient lookup."""
 
   async def subscribe(
     self,
@@ -260,6 +260,32 @@ class BroadcastMessageRepository(Protocol):
 
 
 @runtime_checkable
+class TradeNotificationRepository(Protocol):
+  """Remembers which Telegram message carries each trade's live card."""
+
+  async def list_for_trade(
+    self,
+    trade_id: uuid.UUID,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> list[TradeCard]: ...
+
+  async def record(
+    self,
+    trade_id: uuid.UUID,
+    chat_id: str,
+    message_id: int,
+    status: TradeStatusEnum,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool: ...
+
+  async def mark_status(
+    self, card_id: uuid.UUID, status: TradeStatusEnum
+  ) -> bool: ...
+
+  async def delete(self, card_id: uuid.UUID) -> bool: ...
+
+
+@runtime_checkable
 class TradeRepository(Protocol):
   """Applies position events from workers to the broker's trades table."""
 
@@ -273,6 +299,13 @@ class TradeRepository(Protocol):
     order: str = "desc",
     order_by: str = "updatedAt",
   ) -> list[Trade]: ...
+
+  async def get_for_telegram_user(
+    self,
+    trade_id: uuid.UUID,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> Trade | None: ...
 
   async def count_by_account(self, account_id: str) -> int: ...
 

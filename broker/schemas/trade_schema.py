@@ -13,6 +13,7 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 
 
@@ -26,11 +27,30 @@ class TradeStatusEnum(str, Enum):
   FLAT = "FLAT"
 
 
+class TradeCard(BaseModel):
+  """A live trade card already posted to one subscriber.
+
+  The value-object view of a ``trade_notifications`` row: everything the card
+  service needs to decide whether to edit that message, and nothing else. Kept
+  out of the ORM layer so the service (and its tests) never handle detached
+  SQLAlchemy instances.
+  """
+
+  id: uuid.UUID
+  chat_id: str
+  message_id: int
+  status: TradeStatusEnum
+
+  model_config = {"from_attributes": True}
+
+
 class TradeResponse(BaseModel):
   """API response model for a trade row."""
 
   id: uuid.UUID
   account_id: str
+  market: Optional[MarketTypeEnum] = None
+  gateway: Optional[str] = None
   account_leverage: Optional[int]
   account_balance_init: Optional[float]
   account_balance: Optional[float]
@@ -49,6 +69,9 @@ class TradeResponse(BaseModel):
   is_running: bool
   risk_percent: float
   status: TradeStatusEnum
+  # The event that last moved the trade (TP1/TP2/SL/R_SL/FLAT/...). Several map
+  # onto the same status, so this is what says *how* a trade ended.
+  last_action: Optional[str] = None
   reject_reason: Optional[str]
   createdAt: datetime
   updatedAt: datetime
@@ -59,6 +82,8 @@ class TradeResponse(BaseModel):
       "example": {
         "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
         "account_id": "MT5-12345678",
+        "market": "FOREX",
+        "gateway": "MT5",
         "account_leverage": 100,
         "account_balance_init": 10000.0,
         "account_balance": 10250.75,
@@ -77,6 +102,7 @@ class TradeResponse(BaseModel):
         "is_running": True,
         "risk_percent": 1.0,
         "status": "OPENED",
+        "last_action": "OPENED",
         "reject_reason": None,
         "createdAt": "2026-06-01T08:00:00Z",
         "updatedAt": "2026-06-02T09:30:00Z",

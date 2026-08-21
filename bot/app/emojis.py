@@ -34,3 +34,31 @@ WHITE_CIRCLE = _e(":white_circle:")
 BLUE_CIRCLE = _e(":blue_circle:")
 RED_CIRCLE = _e(":red_circle:")
 YELLOW_CIRCLE = _e(":yellow_circle:")
+
+# ── Live trade card ─────────────────────────────────────────────────
+# Mirrors broker/helpers/emoji_constants.py: the broker posts the card and the
+# bot re-renders it on Detail/Summary, so the two must pick the same glyphs or
+# the message visibly changes character when a button is tapped.
+TRADE_OPENED = _e(":blue_circle:")
+TRADE_PARTIALLY_CLOSED = _e(":bullseye:")
+TRADE_CLOSED = _e(":chequered_flag:")
+TRADE_FLAT = _e(":white_flag:")
+TRADE_REJECTED = _e(":prohibited:")
+SATELLITE = _e(":satellite_antenna:")
+
+DETAIL = _e(":magnifying_glass_tilted_left:")
+COLLAPSE = _e(":up_arrow:")
+PENDING = _e(":hourglass_not_done:")
+
+# Card header, styled like the broadcast message's own ``[STATUS]`` line.
+CYCLE_RUNNING = _e(":hourglass_not_done:")
+CYCLE_CLOSED = _e(":chequered_flag:")
+
+# Entry/action icons for the card's position line and its "Actions:" box.
+LONG = _e(":chart_increasing:")
+SHORT = _e(":chart_decreasing:")
+TP1 = _e(":bullseye:")
+TP2 = _e(":rocket:")
+R_SL = _e(":shield:")
+SL = _e(":hollow_red_circle:")
+FLAT = _e(":white_flag:")

@@ -1,12 +1,17 @@
 """
-broker/helpers/message_formatter.py — Builds every Telegram message body in
-one place: the signal-cycle broadcast, the completed-trade owner DM, and the
-blocked-signal warning.
+broker/helpers/message_formatter.py — Builds the broadcast-channel Telegram
+message bodies in one place: the signal-cycle broadcast, its update notice,
+and the blocked-signal warning.
 
 The signal bodies are cycle-shaped, not signal-shaped: a trade owns a single
 message that is re-rendered from its stored event history each time a new
 action arrives (see ``broker/services/broadcast_service.py``), so there is no
 "format one signal" entry point any more.
+
+The owner-facing side of the same trade is not here: it is a living message
+with buttons rather than a body, so it lives in
+``broker/helpers/trade_card.py`` next to the keyboard that drives it. Both
+render numbers through :func:`format_number`.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from broker.schemas.core import BroadcastStatusEnum, SignalActionEnum
 from broker.schemas.webhook_schema import WebhookPayload
 
 
-def _num(value) -> str:
+def format_number(value) -> str:
   """Render a number the way a human writes it.
 
   ``str()`` on a DB ``Numeric`` (a ``Decimal``) leaks the column's scale: a
@@ -47,51 +52,6 @@ def _num(value) -> str:
   if normalised.as_tuple().exponent > 0:
     normalised = normalised.quantize(Decimal(1))
   return f"{normalised:f}"
-
-
-def format_completed_trade_message(
-  trade,
-  *,
-  last_action: str | None = None,
-  timezone_offset: str | None = None,
-) -> str:
-  """Telegram DM body sent to an account owner when one of their trades closes.
-
-  Renders the persisted ``trades`` row (see ``broker.db.models.Trade``) — not a
-  webhook payload — because this fires off the worker's TRADE completion event,
-  after the trade has been upserted. Shows realised PnL when both the initial
-  and current account balance are known.
-
-  *last_action* is the event that ended the trade (``TP2``, ``SL``, ``R_SL``,
-  ``FLAT``, ...), shown in brackets after the status: several events map onto
-  the same ``CLOSED``, and the row itself keeps the entry action, so the status
-  alone never says *how* the trade ended. Comes from the caller because only
-  the TRADE event carries it.
-  """
-  status = getattr(trade.status, "value", str(trade.status))
-  action = getattr(trade.action, "value", str(trade.action))
-  # A FLATTED event yields status FLAT and last action FLAT — say it once.
-  if last_action and last_action != status:
-    status = f"{status} ({last_action})"
-
-  lines = [
-    f"{em.FLAT} <b>Trade completed</b>",
-    f"Account: <code>{trade.account_id}</code>",
-    f"Gateway: <b>{trade.gateway}</b>",
-    f"Symbol: <b>{trade.symbol}</b>",
-    f"Action: <b>{action}</b>",
-    f"Status: <b>{status}</b>",
-    f"Close price: <code>{_num(trade.price)}</code>",
-    f"Quantity: <code>{_num(trade.quantity)}</code>",
-  ]
-  if trade.account_balance is not None:
-    lines.append(f"Balance: <b>{_num(trade.account_balance)}</b>")
-  if trade.account_balance is not None and trade.account_balance_init is not None:
-    pnl = float(trade.account_balance) - float(trade.account_balance_init)
-    sign = "+" if pnl >= 0 else ""
-    lines.append(f"PnL: <b>{sign}{pnl:.2f}</b>")
-  lines.append(f"Time: {format_notification_time(trade.updatedAt, timezone_offset)}")
-  return "\n".join(lines)
 
 
 # ── Broadcast cycle message ────────────────────────────────────────────────
@@ -148,7 +108,7 @@ def _broadcast_flags_line(event: dict) -> str:
 
   parts: list[str] = []
   if event.get("tp1_percent") is not None:
-    parts.append(f"TP1%: {_num(event.get('tp1_percent'))}%")
+    parts.append(f"TP1%: {format_number(event.get('tp1_percent'))}%")
   if event.get("move_sl_to_be") is not None:
     parts.append(f"SL→BE: {_flag(bool(event.get('move_sl_to_be')))}")
   if event.get("is_running") is not None:
@@ -164,20 +124,20 @@ def _broadcast_flags_line(event: dict) -> str:
 def _format_entry_block(event: dict) -> str:
   lines = []
   if event.get("price") is not None:
-    lines.append(f"Price: {_num(event.get('price'))}")
+    lines.append(f"Price: {format_number(event.get('price'))}")
     
   qty_risk = []
   if event.get("quantity") is not None:
-    qty_risk.append(f"Quantity: {_num(event.get('quantity'))}")
+    qty_risk.append(f"Quantity: {format_number(event.get('quantity'))}")
   if event.get("risk_percent") is not None:
-    qty_risk.append(f"Risk: {_num(event.get('risk_percent'))}%")
+    qty_risk.append(f"Risk: {format_number(event.get('risk_percent'))}%")
   if qty_risk:
     lines.append(" | ".join(qty_risk))
     
   levels = []
   for name, key in (("SL", "sl"), ("TP1", "tp1"), ("TP2", "tp2")):
     if event.get(key) is not None:
-      levels.append(f"{name}: {_num(event.get(key))}")
+      levels.append(f"{name}: {format_number(event.get(key))}")
   if levels:
     lines.append(" | ".join(levels))
     
@@ -193,11 +153,11 @@ def _format_action_block(event: dict, *, timezone_offset: str | None) -> str:
   
   qty_risk = []
   if event.get("price") is not None:
-    qty_risk.append(f"Price: {_num(event.get('price'))}")
+    qty_risk.append(f"Price: {format_number(event.get('price'))}")
   if event.get("quantity") is not None:
-    qty_risk.append(f"Quantity: {_num(event.get('quantity'))}")
+    qty_risk.append(f"Quantity: {format_number(event.get('quantity'))}")
   if event.get("risk_percent") is not None:
-    qty_risk.append(f"Risk: {_num(event.get('risk_percent'))}%")
+    qty_risk.append(f"Risk: {format_number(event.get('risk_percent'))}%")
   if qty_risk:
     lines.append(" | ".join(qty_risk))
     

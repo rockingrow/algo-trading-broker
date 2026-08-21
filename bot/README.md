@@ -71,13 +71,33 @@ that count is above zero, the same trade table `/trades` renders, filtered
 to just those open positions. Backed by `GET
 /v1/telegram/{telegram_user_id}/positions`.
 
-`/subscribe` opts you in to a DM whenever one of your linked accounts **completes
-a trade**; `/unsubscribe` turns it off. The DM is sent by this same bot, so it
-lands in your existing chat. This is a per-user preference spanning every account
-you hold. "Completes" means any terminal close — a normal TP/SL close **and** an
-admin `/admin_flat`, since the position is over either way and you did not close
-it yourself. Each DM carries the account, gateway, symbol, action, status, close
-price, quantity, balance and PnL.
+### Live trade cards
+
+`/subscribe` opts you in to a message the moment one of your linked accounts
+**opens a trade**; `/unsubscribe` turns it off. This is a per-user preference
+spanning every account you hold.
+
+The message is a **card**, not an alert: it is sent by this same bot into your
+existing chat and then **edits itself** as the trade moves — `Opened` →
+`Partially closed` (TP1) → `Closed` / `Flatted` / `Rejected` — so you end up with
+one message per trade rather than a stream of them. It shows symbol, direction,
+status, price, quantity, SL/TP1/TP2, balance and running PnL.
+
+While the trade is still running the card carries two buttons:
+
+| Button | What it does |
+| ------- | --------------------------------------- |
+| 🔍 **Detail** | Expands the card with strategy, account, market/gateway, leverage, risk, reference id and any worker comment. ⬆️ **Summary** collapses it again. |
+| 🛑 **Exit** | Asks to confirm, then closes the trade — a FLAT scoped to that trade's strategy and symbol. The card notes that the exit is in flight and updates itself once the worker reports the close. |
+
+Once the trade reaches a terminal status the card is updated one last time and
+the buttons disappear — that final state is your completed-trade notification.
+"Terminal" covers a normal TP/SL close, an admin `/admin_flat`, and a worker
+rejection. Buttons keep working across an account switch, since they act on the
+trade rather than on whichever account is active.
+
+A card that was already posted keeps updating even after you `/unsubscribe`;
+the opt-in only decides whether *new* trades get one.
 
 > ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_SIGNAL`/`ALLOW_SIGNAL` admin command
 > over NATS (via the broker). The **worker** must be updated to honor it —

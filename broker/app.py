@@ -17,6 +17,7 @@ from broker.db.repository import (
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
   SqlAlchemyTradeBroadcastRepository,
+  SqlAlchemyTradeNotificationRepository,
   SqlAlchemyTradeRepository,
 )
 from broker.helpers import emoji_constants as em
@@ -35,7 +36,6 @@ from broker.services.nats_service import (
   TradeEventConsumer,
 )
 from broker.services.notification_service import (
-  OwnerBroadcastNotifier,
   QueuedNotifier,
   TelegramNotification,
 )
@@ -45,7 +45,7 @@ from broker.services.signal_processing_service import (
   SignalWorker,
 )
 from broker.services.signal_retry_job import SignalRetryJob
-from broker.services.trade_broadcast_service import TradeBroadcastService
+from broker.services.trade_card_service import TradeCardService
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -75,16 +75,17 @@ async def lifespan(app: FastAPI):
   publisher = NatsPublisher(connection=nats_client)
   setting_repo = SqlAlchemySettingRepository()
   signal_repo = SqlAlchemySignalRepository()
-  # Owner DMs are queued for the same reason as the signal notifications:
-  # nats-py awaits the TRADE callback before pulling the next event, so a DM to
-  # a throttled Telegram would stall the trade bookkeeping behind it.
-  owner_notifier = QueuedNotifier(OwnerBroadcastNotifier())
-  await owner_notifier.start()
-  trade_broadcast_service = TradeBroadcastService(
+  # Owner trade cards run off their own queue for the same reason as the signal
+  # notifications: nats-py awaits the TRADE callback before pulling the next
+  # event, so a DM to a throttled Telegram would stall the trade bookkeeping
+  # behind it. QueuedNotifier can't serve here — a card needs the message id its
+  # send returns — so the service owns the queue itself.
+  trade_card_service = TradeCardService(
     broadcast_repository=SqlAlchemyTradeBroadcastRepository(),
+    notification_repository=SqlAlchemyTradeNotificationRepository(),
     setting_repository=setting_repo,
-    notifier=owner_notifier,
   )
+  await trade_card_service.start()
   # Signal-cycle broadcaster writer + CDC dispatcher: signals and TRADE events
   # only record cycle changes onto ``broadcast_messages``; a Postgres
   # LISTEN/NOTIFY listener wakes the dispatcher which then edits the Telegram
@@ -94,7 +95,7 @@ async def lifespan(app: FastAPI):
   consumer = TradeEventConsumer(
     trade_repository=SqlAlchemyTradeRepository(),
     connection=nats_client,
-    broadcast_service=trade_broadcast_service,
+    card_service=trade_card_service,
     signal_broadcast_service=signal_broadcaster,
   )
   system_consumer = SystemEventConsumer(
@@ -168,7 +169,8 @@ async def lifespan(app: FastAPI):
   await signals_notifier.stop()
   await system_consumer.stop()
   await consumer.stop()
-  await owner_notifier.stop()
+  # After the TRADE consumer, so nothing is still being queued behind the flush.
+  await trade_card_service.stop()
   await nats_client.close()
   await nats_notifier.stop()
   await close_db()

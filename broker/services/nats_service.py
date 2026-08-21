@@ -81,7 +81,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
   from broker.services.broadcast_service import SignalBroadcastService
-  from broker.services.trade_broadcast_service import TradeBroadcastService
+  from broker.services.trade_card_service import TradeCardService
 
 from nats.aio.subscription import Subscription
 from nats.js import api
@@ -221,9 +221,9 @@ def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
 class TradeEventConsumer:
   """Consumes TRADE events from NATS and persists them via a TradeRepository.
 
-  When a ``TradeBroadcastService`` is injected, each persisted event is also
-  handed to it so a completed (closed) trade is DM-ed to its subscribed
-  owners. When a ``SignalBroadcastService`` is injected, the event is recorded
+  When a ``TradeCardService`` is injected, each persisted event is also handed
+  to it so the trade's live Telegram card is posted or refreshed for every
+  subscribed owner. When a ``SignalBroadcastService`` is injected, the event is recorded
   against the signal's broadcast cycle too, so the public channel message shows
   which workers executed the signal and where each of them stands. Both are
   best-effort and never block persistence.
@@ -233,12 +233,12 @@ class TradeEventConsumer:
     self,
     trade_repository: TradeRepository,
     connection: NatsClient | None = None,
-    broadcast_service: "TradeBroadcastService | None" = None,
+    card_service: "TradeCardService | None" = None,
     signal_broadcast_service: "SignalBroadcastService | None" = None,
   ) -> None:
     self._repo = trade_repository
     self._conn = connection or nats_client
-    self._broadcast = broadcast_service
+    self._cards = card_service
     self._signal_broadcast = signal_broadcast_service
     self._sub: Optional[Subscription] = None
 
@@ -284,12 +284,12 @@ class TradeEventConsumer:
       log.exception("Failed to apply TRADE event: %s", exc)
       return
 
-    if self._broadcast is not None:
+    if self._cards is not None:
       try:
-        await self._broadcast.maybe_broadcast(event, trade)
+        await self._cards.handle_event(event, trade)
       except Exception as exc:
-        # Broadcasting must never break TRADE consumption.
-        log.exception("Failed to broadcast completed trade: %s", exc)
+        # Card delivery must never break TRADE consumption.
+        log.exception("Failed to queue trade card update: %s", exc)
 
     if self._signal_broadcast is not None:
       try:
@@ -848,7 +848,8 @@ class NatsPublisher:
     payload = signal.model_dump_json().encode()
     await self._conn.nc.publish(subject, payload)
     log.info(
-      "Published [%s] action=%s strategy=%s symbol=%s account_id=%s market=%s gateway=%s",
+      "Published [%s] action=%s strategy=%s symbol=%s account_id=%s market=%s "
+      "gateway=%s ref_id=%s",
       subject,
       signal.action,
       signal.strategy,
@@ -856,6 +857,7 @@ class NatsPublisher:
       signal.account_id,
       signal.market,
       signal.gateway,
+      signal.ref_id,
     )
 
   async def publish_system_signal(
