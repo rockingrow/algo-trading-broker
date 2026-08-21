@@ -55,7 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`GET`/`POST /admin/settings/private-reply-notify` and
   `.../public-reply-notify`) and from the bot's new
   `/admin_private_reply_notify` and `/admin_public_reply_notify` commands,
-  each taking `enable` or `disable` as its argument.
+  each taking `enable` or `disable` as its argument. Migration
+  `0205b8abba12_add_broadcast_reply_notify_settings` seeds both rows as
+  `"1"` (enabled) so they show up explicitly in `broker_settings` from the
+  start.
 - **Broadcast update notices: a two-line reply on every new action** — A
   cycle's message is edited in place, and Telegram notifies nobody when a
   message is rewritten: a reader who saw the trade open never learned that it
