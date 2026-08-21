@@ -4,7 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from broker.schemas.account_schema import MarketTypeEnum
+from broker.schemas.account_schema import AccountSettings, MarketTypeEnum
 from broker.schemas.core import MarketEnum, SignalActionEnum
 
 
@@ -86,7 +86,17 @@ class TradingSignal(BaseModel):
 
   model_config = ConfigDict(use_enum_values=True)
 
+  # Identity of THIS signal — the broker's ``signals`` row id, minted per
+  # persisted signal and therefore unique per action. This is the
+  # de-duplication key: a worker that sees a signal live and then again inside
+  # a ``retry_signals`` replay recognises it by this id alone.
   signal_id: str
+  # Identity of the trade **cycle** the signal belongs to — the ``signal_uxid``
+  # from the webhook payload, shared by the entry and every TP/SL/FLAT that
+  # follows it. It is for correlation, never for de-duplication: a worker uses
+  # it to tie a close back to the position it opened. Optional, because a
+  # payload that predates the field has none.
+  signal_uxid: Optional[str] = None
   timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
   strategy: str
@@ -123,6 +133,14 @@ class AdminSignal(BaseModel):
   * **Broadcast** (no ``account_id``) — published to the shared ``ADMIN``
     subject and fanned out to every connected worker, which filters for itself
     (e.g. a strategy/symbol-scoped or flat-everything directive).
+
+  ``ref_id``, when known, narrows a FLAT to the exact position it belongs to
+  — strategy+symbol alone is ambiguous once the same strategy holds two
+  positions on one symbol (e.g. the Telegram trade card's Close button, which
+  has the specific trade in hand). This is the worker's own unique column, so
+  it also stays correct for a position the worker opened by hand rather than
+  through the broker. Optional because it isn't always resolvable: a manual
+  FLAT typed by a user names no single trade.
   """
 
   model_config = ConfigDict(
@@ -137,6 +155,7 @@ class AdminSignal(BaseModel):
         "account_id": "123456",
         "market": "FOREX",
         "gateway": "MT5",
+        "ref_id": "987654321",
       }
     },
   )
@@ -148,6 +167,7 @@ class AdminSignal(BaseModel):
   account_id: Optional[str] = None
   market: Optional[MarketTypeEnum] = None
   gateway: Optional[str] = None
+  ref_id: Optional[str] = None
 
   @model_validator(mode="after")
   def _require_market_gateway_with_account_id(self) -> "AdminSignal":
@@ -282,6 +302,11 @@ class SystemWorkerConnectedAck(SystemSignal):
     the strategy subject so the worker can replay them through the same handler
     and de-duplicate by ``signal_id``. Always present; ``[]`` means nothing to
     replay.
+  * ``settings`` — the worker's own ``accounts.settings`` blob: what its owner
+    set from the bot (e.g. ``signal_blocked`` via /prevent). Always present and
+    always complete — an account that has never run a command gets the schema
+    defaults — so a worker starting up, or reconnecting after being offline,
+    applies the owner's current state instead of its own defaults.
   * ``crypto_leverage_init`` — allowed symbols + default leverage, **only** for
     a crypto worker; ``None`` for every other market.
 
@@ -306,6 +331,7 @@ class SystemWorkerConnectedAck(SystemSignal):
         "retry_signals": [
           {
             "signal_id": "sig_123",
+            "signal_uxid": "9f2c4b7e18a3d605",
             "timestamp": "2026-06-29T23:59:30+00:00",
             "strategy": "MT5_GOLD_M5_V1",
             "action": "LONG",
@@ -318,6 +344,7 @@ class SystemWorkerConnectedAck(SystemSignal):
             "risk_percent": 1.0,
           }
         ],
+        "settings": {"signal_blocked": False},
         "crypto_leverage_init": None,
       }
     },
@@ -336,6 +363,14 @@ class SystemWorkerConnectedAck(SystemSignal):
     description=(
       "Signals persisted in the last ``max_retry_timeout`` seconds whose "
       "strategy the worker announced. Same shape as the SIGNAL payload."
+    ),
+  )
+  settings: AccountSettings = Field(
+    default_factory=AccountSettings,
+    description=(
+      "The worker's per-account settings, as set from the bot (e.g. "
+      "``signal_blocked`` from /prevent). Always complete: an account that "
+      "has never run a command gets the defaults."
     ),
   )
   crypto_leverage_init: Optional[CryptoLeverageConfig] = Field(

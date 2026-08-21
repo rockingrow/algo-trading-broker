@@ -89,6 +89,40 @@ class CryptoAllowedSymbolRequest(BaseModel):
   )
 
 
+class PublicBroadcastChatIdsRequest(BaseModel):
+  """Request body for POST /settings/public-broadcast-chat-ids.
+
+  The chats the **public** signal broadcast is delivered to. An empty list is
+  allowed and meaningful — it turns the public broadcast off — which is why
+  this has no ``min_length`` unlike the other list settings.
+  """
+
+  chat_ids: list[str] = Field(
+    default_factory=list,
+    description=(
+      "Telegram chat ids (or @channel usernames) to broadcast publicly to, "
+      "e.g. ['-1001234567890', '@my_public_channel']. Empty disables it."
+    ),
+  )
+
+
+class ReplyNotifyRequest(BaseModel):
+  """Request body for POST /settings/private-reply-notify and
+  /settings/public-reply-notify.
+
+  Explicit set rather than a toggle — the bot passes the admin's literal
+  enable/disable input straight through.
+  """
+
+  enabled: bool = Field(
+    ...,
+    description=(
+      "Whether a reply notice is posted under the broadcast message for each "
+      "new event (entry, TP1, SL, FLAT, ...) in this audience."
+    ),
+  )
+
+
 class CryptoMaxLeverageRequest(BaseModel):
   """Request body for POST /settings/crypto-max-leverage."""
 

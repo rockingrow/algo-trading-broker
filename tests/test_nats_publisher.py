@@ -1,7 +1,9 @@
 import json
 from datetime import datetime, timezone
 
-from broker.schemas.account_schema import MarketTypeEnum
+import pytest
+
+from broker.schemas.account_schema import AccountSettings, MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminActionEnum,
@@ -31,16 +33,19 @@ class FakeAck:
 class FakeJS:
   def __init__(self):
     self.published: list[tuple[str, dict]] = []
+    self.calls: list[dict] = []
 
-  async def publish(self, subject, payload):
+  async def publish(self, subject, payload, timeout=None, headers=None):
     self.published.append((subject, json.loads(payload.decode())))
+    self.calls.append({"timeout": timeout, "headers": headers})
     return FakeAck(seq=len(self.published))
 
 
 class FakeConn:
-  def __init__(self):
+  def __init__(self, is_connected: bool = True):
     self.nc = FakeNC()
     self.js = FakeJS()
+    self.is_connected = is_connected
 
 
 def _signal(**overrides) -> TradingSignal:
@@ -81,15 +86,21 @@ async def test_publish_flat_payload_shape():
   publisher = NatsPublisher(connection=conn)
   ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
   await publisher.publish_flat(
-    signal_id="sig-flat-1", symbol="XAUUSD", timestamp=ts, strategy="strat-x"
+    signal_id="sig-flat-1",
+    signal_uxid="9f2c4b7e18a3d605",
+    symbol="XAUUSD",
+    timestamp=ts,
+    strategy="strat-x",
   )
 
   subject, body = conn.nc.published[0]
   assert subject == "strat-x"
   # signal_id is required so workers can de-duplicate a live FLAT against the
-  # same signal replayed inside a WORKER_CONNECTED_ACK's retry_signals.
+  # same signal replayed inside a WORKER_CONNECTED_ACK's retry_signals;
+  # signal_uxid names the trade cycle being closed.
   assert body == {
     "signal_id": "sig-flat-1",
+    "signal_uxid": "9f2c4b7e18a3d605",
     "strategy": "strat-x",
     "timestamp": ts.isoformat(),
     "action": SignalActionEnum.FLAT.value,
@@ -180,10 +191,11 @@ async def test_publish_system_ack():
   assert subject == "_INBOX.ack"
   assert body["action"] == "WORKER_CONNECTED_ACK"
   assert body["account_id"] == "FOREX-MT5-1"
-  # The three configuration blocks are always present, empty when there is
+  # The configuration blocks are always present, empty/defaulted when there is
   # nothing to send, so a worker can parse them unconditionally.
   assert body["strategy_magic_map"] == {}
   assert body["retry_signals"] == []
+  assert body["settings"] == {"signal_blocked": False}
   assert body["crypto_leverage_init"] is None
 
 
@@ -195,6 +207,7 @@ async def test_publish_system_ack_carries_the_whole_handshake_config():
     account_id="CRYPTO-BINANCE-7654321",
     strategy_magic_map={"MT5_GOLD_M5_V1": 20260409},
     retry_signals=[_signal(strategy="MT5_GOLD_M5_V1")],
+    settings=AccountSettings(signal_blocked=True),
     crypto_leverage_init=CryptoLeverageConfig(
       symbols=["BTC", "ETH"], default_leverage=10
     ),
@@ -209,6 +222,7 @@ async def test_publish_system_ack_carries_the_whole_handshake_config():
   assert body["strategy_magic_map"] == {"MT5_GOLD_M5_V1": 20260409}
   assert len(body["retry_signals"]) == 1
   assert body["retry_signals"][0]["signal_id"] == "sig-1"
+  assert body["settings"] == {"signal_blocked": True}
   assert body["crypto_leverage_init"] == {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10,
@@ -260,6 +274,36 @@ async def test_publish_webhook_event_targets_jetstream_signal_subject():
   subject, body = conn.js.published[0]
   assert subject == "SIGNALS.wt_cross_v1"
   assert body["signal_id"] == "sig-123"
+
+
+async def test_publish_webhook_event_forwards_deadline_and_dedup_id():
+  conn = FakeConn()
+  publisher = NatsPublisher(connection=conn)
+  await publisher.publish_webhook_event(
+    signal_id="",
+    strategy="wt_cross_v1",
+    envelope={"payload": {"strategy": "wt_cross_v1"}},
+    timeout=0.75,
+    msg_id="abc123",
+  )
+
+  # The caller's deadline bounds the PubAck wait (nats-py would wait 5s), and
+  # the id lets JetStream drop a retry of an envelope it already stored.
+  assert conn.js.calls[0]["timeout"] == 0.75
+  assert conn.js.calls[0]["headers"] == {"Nats-Msg-Id": "abc123"}
+
+
+async def test_publish_webhook_event_fails_fast_while_disconnected():
+  conn = FakeConn(is_connected=False)
+  publisher = NatsPublisher(connection=conn)
+
+  # Buffering the write and waiting out the timeout for an ack that cannot
+  # arrive is exactly what costs TradingView its delivery.
+  with pytest.raises(ConnectionError):
+    await publisher.publish_webhook_event(
+      signal_id="", strategy="wt_cross_v1", envelope={"payload": {}}
+    )
+  assert conn.js.published == []
 
 
 async def test_replayed_signals_keep_the_live_signal_shape():

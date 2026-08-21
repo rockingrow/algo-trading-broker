@@ -41,6 +41,18 @@ class WebhookSettings(BaseSettings):
   # TradingView reuses a pooled connection the server has already closed and the
   # alert dies as "server closed the connection unexpectedly".
   KEEPALIVE_TIMEOUT: int = 120
+  # Hard deadline (seconds) for the JetStream enqueue on the HTTP path.
+  # TradingView aborts a delivery that has not answered within a few seconds
+  # ("request took too long and timed out"), while nats-py waits up to 5s for a
+  # PubAck by default — longer than TradingView's patience, so a single slow ack
+  # (NATS reconnecting, a busy file store) killed the alert. Anything slower
+  # than this is handed to the deferred enqueue queue and the alert still gets
+  # its 202.
+  ENQUEUE_TIMEOUT: float = 1.0
+  # Gap between deferred re-enqueue attempts, and how many are spent on one
+  # envelope before it is dropped with an ERROR.
+  DEFERRED_ENQUEUE_INTERVAL: float = 2.0
+  DEFERRED_ENQUEUE_MAX_ATTEMPTS: int = 15
 
 
 class BrokerApiSettings(BaseSettings):
@@ -113,25 +125,40 @@ class TelegramSettings(BaseSettings):
 
   ENABLED: bool = False
   BOT_TOKEN: str = ""
-  CHAT_ID: str = ""  # management: NATS events, service start/stop
-  CHAT_CHANNEL_ID: str = ""  # signals: NATS published trades
+  # Every chat id in this group — BROKER_LOG_CHAT_IDS, PRIVATE_BROADCAST_CHAT_IDS
+  # and LOG_CHAT_ID below — is resolved through
+  # ``notification_service.parse_chat_targets``, so each accepts a
+  # comma-separated list of chats, and any entry may address a topic inside a
+  # supergroup that has Topics enabled by suffixing the topic id:
+  # ``-1002173777783_924584`` sends with ``message_thread_id`` so the message
+  # lands in that topic instead of General.
+  BROKER_LOG_CHAT_IDS: str = ""  # management: NATS events, service start/stop
+  PRIVATE_BROADCAST_CHAT_IDS: str = ""  # signals: private/operator signal-cycle broadcast
+
+  # Per-request timeout (seconds) on api.telegram.org. On networks where
+  # Telegram is throttled or filtered the TCP connection is accepted and then
+  # no response ever arrives, so every send hangs for this long before raising
+  # ``httpx.ReadTimeout``. Notifications are best-effort and are delivered off
+  # the signal path (see ``QueuedNotifier``), so this only bounds how long one
+  # stuck send occupies the notification queue.
+  HTTP_TIMEOUT: float = 5.0
 
   # Token of the *bot-service* BotFather bot (the one end-users actually DM to
   # link and drive their account — BOT_TELEGRAM_TOKEN in the bot's config).
   # Read from the shared .env so the broker can DM an account's owner directly
-  # (completed-trade broadcasts): a user can only be messaged by the bot they
+  # (the live trade cards): a user can only be messaged by the bot they
   # started, and that is this bot, not the broker's own notification bot
   # (BOT_TOKEN). Empty disables owner broadcasts. Its env var breaks the
   # ``TELEGRAM_`` prefix, so it is pinned with an explicit alias.
   SERVICE_BOT_TOKEN: str = Field(default="", validation_alias="BOT_TELEGRAM_TOKEN")
 
   # Error-log hook: when enabled (and ENABLED is true), log records at ERROR
-  # level or above are forwarded to the management chat (CHAT_ID).
+  # level or above are forwarded to the management chat (BROKER_LOG_CHAT_IDS).
   LOG_ERRORS_ENABLED: bool = False
   LOG_DEDUP_WINDOW: int = 60  # seconds — suppress identical messages
   # Dedicated bot/chat that receives forwarded ERROR logs, kept separate from
   # the main bot so a Telegram outage/ban on one never affects the other.
-  # Both fall back to BOT_TOKEN / CHAT_ID when left empty.
+  # Both fall back to BOT_TOKEN / BROKER_LOG_CHAT_IDS when left empty.
   LOG_CHAT_ID: str = ""
   LOG_BOT_TOKEN: str = ""
 

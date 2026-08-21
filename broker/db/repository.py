@@ -17,7 +17,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, cast, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from broker.db.engine import get_session
@@ -26,16 +28,32 @@ from broker.db.models import (
   AccountBotLink,
   AccountLinkToken,
   BotSession,
+  BroadcastMessage,
+  BroadcastMessageChat,
+  BroadcastMessageLog,
+  BroadcastMessageWorker,
   BrokerSetting,
   Signal,
   Trade,
   TradeBroadcastSubscription,
+  TradeNotification,
 )
+from broker.domain.broadcast_status import merge_status, status_for_action
 from broker.domain.trade_status import TradeStatusPolicy
 from broker.logger import get_logger
 from broker.schemas.account_schema import AccountLinkSummary, MarketTypeEnum
-from broker.schemas.core import BotPlatformTypeEnum, SignalStatusEnum
+from broker.interfaces.db_protocol import BroadcastCycleView
+from broker.schemas.core import (
+  BotPlatformTypeEnum,
+  BroadcastAudienceEnum,
+  BroadcastLogKindEnum,
+  BroadcastLogStatusEnum,
+  SignalActionEnum,
+  SignalStatusEnum,
+)
+from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.trade_event_schema import PositionEvent
+from broker.schemas.trade_schema import TradeCard
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.settings import settings
 
@@ -753,17 +771,99 @@ class SqlAlchemyAccountRepository:
       )
       return None
 
+  # ── accounts.settings (per-account command state) ──────────────────
+
+  async def get_settings(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> dict:
+    """Return the ``settings`` blob of a worker's account row.
+
+    Read on every ``WORKER_CONNECTED`` handshake to fill the ``settings`` block
+    of the ACK. Scoped by ``account_id`` + ``market`` + ``gateway`` — the same
+    (gateway or legacy NULL) match ``upsert_gateway`` uses, since that call runs
+    first on the handshake and may just have inserted the row.
+
+    Returns ``{}`` for an unknown account or a failed read: a worker gets the
+    schema defaults rather than no configuration at all.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Account.settings).where(
+            Account.account_id == account_id,
+            Account.market == market,
+            or_(Account.gateway == gateway, Account.gateway.is_(None)),
+          )
+        )
+        raw = result.scalars().first()
+        return raw if isinstance(raw, dict) else {}
+    except Exception as exc:
+      log.exception(
+        "Failed to read settings for account_id=%s market=%s gateway=%s: %s",
+        account_id,
+        market,
+        gateway,
+        exc,
+      )
+      return {}
+
+  async def update_settings(self, account_uuid: uuid.UUID, patch: dict) -> dict | None:
+    """Merge *patch* into an account's ``settings`` and return the new blob.
+
+    Keyed by the row's UUID, not the bare ``account_id``, because the caller
+    (the Telegram command endpoints) has already resolved the exact account and
+    a bare id is not unique across market/gateway pairs.
+
+    The merge happens in Postgres (``settings || patch``), not in Python: two
+    commands landing at the same time would otherwise read the same blob and
+    the second write would drop the first one's key. Only the keys in *patch*
+    are touched — anything else in the blob, including a key written by a newer
+    broker version, is preserved.
+
+    Returns ``None`` when the account doesn't exist or the write failed, so the
+    caller can report the command as failed instead of silently losing the
+    setting.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          update(Account)
+          .where(Account.id == account_uuid)
+          .values(
+            settings=func.coalesce(Account.settings, cast({}, JSONB)).op("||")(
+              cast(patch, JSONB)
+            )
+          )
+          .returning(Account.settings)
+        )
+        merged = result.scalars().first()
+        if merged is None:
+          log.warning("No account row to update settings for id=%s", account_uuid)
+          return None
+        log.info(
+          "Account settings updated id=%s patch=%s result=%s",
+          account_uuid,
+          patch,
+          merged,
+        )
+        return merged
+    except Exception as exc:
+      log.exception(
+        "Failed to update settings for account id=%s: %s", account_uuid, exc
+      )
+      return None
+
 
 class SqlAlchemyTradeBroadcastRepository:
-  """Manages per-user opt-in for completed-trade Telegram broadcasts, and
-  resolves which subscribed users should be notified for a given account."""
+  """Manages per-user opt-in for live trade-card DMs, and resolves which
+  subscribed users should be sent one for a given account."""
 
   async def subscribe(
     self,
     telegram_user_id: int,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool:
-    """Opt a bot user in to completed-trade broadcasts. Idempotent — returns
+    """Opt a bot user in to live trade cards. Idempotent — returns
     True whether the row was created now or already existed."""
     platform_user_id = str(telegram_user_id)
     try:
@@ -797,7 +897,7 @@ class SqlAlchemyTradeBroadcastRepository:
     telegram_user_id: int,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool:
-    """Opt a bot user out of completed-trade broadcasts. Idempotent — returns
+    """Opt a bot user out of live trade cards. Idempotent — returns
     True even when there was no subscription to remove."""
     platform_user_id = str(telegram_user_id)
     try:
@@ -823,7 +923,7 @@ class SqlAlchemyTradeBroadcastRepository:
     telegram_user_id: int,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool:
-    """Whether a bot user is currently opted in to completed-trade broadcasts."""
+    """Whether a bot user is currently opted in to live trade cards."""
     platform_user_id = str(telegram_user_id)
     try:
       async with get_session() as session:
@@ -849,9 +949,9 @@ class SqlAlchemyTradeBroadcastRepository:
     gateway: str | None,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> list[str]:
-    """Return the platform user ids that should receive a completed-trade DM for
+    """Return the platform user ids that should receive a trade card for
     the account identified by ``(account_id, market, gateway)``: those both
-    linked to a matching account *and* opted in to broadcasts.
+    linked to a matching account *and* opted in to trade cards.
 
     Scoped by ``account_id`` + ``market`` + ``gateway`` (with a NULL-gateway
     fallback, mirroring the trade/account upsert path) so a bare id reused
@@ -892,6 +992,675 @@ class SqlAlchemyTradeBroadcastRepository:
         exc,
       )
       return []
+
+
+class SqlAlchemyBroadcastMessageRepository:
+  """Owns every table behind the one-message-per-signal-cycle Telegram
+  broadcast: the cycle itself, its per-chat messages, the workers that executed
+  it, and the append-only write log that drives delivery.
+
+  Nothing here talks to Telegram. Writers record a change and append a log row
+  in the same transaction; a Postgres trigger notifies, and the dispatcher
+  reads the log back out (see ``broker/services/broadcast_service.py``). Two
+  rules make that safe under concurrency:
+
+  * every write that touches a cycle takes a ``FOR UPDATE`` row lock on it, so
+    two signals arriving together queue instead of both reading the same
+    ``events`` list and one overwriting the other's append;
+  * the lock also hands out ``last_seq``, the cycle's version, which the
+    dispatcher compares against each chat's ``delivered_seq`` so a slow
+    delivery can never replace a newer message body with an older one.
+  """
+
+  # ── Writers ────────────────────────────────────────────────────────
+
+  async def record_event(
+    self,
+    *,
+    strategy: str,
+    signal_uxid: str,
+    symbol: str,
+    timeframe: str | None,
+    action: SignalActionEnum,
+    event: dict,
+  ) -> BroadcastMessage | None:
+    """Find-or-create the cycle for ``(strategy, signal_uxid)``, append *event*
+    to it and log the change. Returns the up-to-date row, or None on failure.
+
+    This is one call rather than a get + create/update pair because the unique
+    key is exactly what makes the cycle idempotent: two signals of the same
+    trade arriving close together (or a JetStream redelivery racing the retry
+    job) must converge on one row. A losing insert raises ``IntegrityError``,
+    which is retried once — the second pass finds the winner's row and takes
+    the update branch.
+
+    Replays are also de-duplicated inside the cycle: an event whose action and
+    timestamp match the last recorded one is not appended a second time, and
+    logs no change, so a redelivered signal costs nothing instead of doubling a
+    line in the message.
+    """
+    for attempt in (1, 2):
+      try:
+        async with get_session() as session:
+          row = await self._locked_cycle(session, strategy, signal_uxid)
+          incoming_status = status_for_action(action)
+
+          if row is None:
+            row = BroadcastMessage(
+              id=uuid.uuid4(),
+              strategy=strategy,
+              signal_uxid=signal_uxid,
+              symbol=symbol,
+              timeframe=timeframe,
+              actions=action.value,
+              latest_action=action,
+              status=incoming_status,
+              events=[event],
+              last_seq=1,
+            )
+            session.add(row)
+            await session.flush()
+            session.add(
+              _log_entry(row, seq=1, kind=BroadcastLogKindEnum.SIGNAL, payload=event)
+            )
+            await session.flush()
+            await session.refresh(row)
+            log.info(
+              "broadcast cycle opened strategy=%s signal_uxid=%s action=%s",
+              strategy,
+              signal_uxid,
+              action.value,
+            )
+            return row
+
+          if _is_duplicate_event(row.events, event):
+            # A replay: the cycle already shows this line, so there is nothing
+            # to deliver. Returning the row keeps the caller's flow uniform.
+            log.debug(
+              "broadcast cycle replay ignored strategy=%s signal_uxid=%s action=%s",
+              strategy,
+              signal_uxid,
+              action.value,
+            )
+            return row
+
+          # Reassign rather than append: SQLAlchemy does not track in-place
+          # mutation of a JSONB list, so an ``.append`` would never be flushed.
+          row.events = list(row.events or []) + [event]
+          row.actions = ",".join(
+            [part for part in (row.actions or "").split(",") if part] + [action.value]
+          )
+          row.latest_action = action
+          row.status = merge_status(row.status, incoming_status)
+          row.last_seq = (row.last_seq or 0) + 1
+          session.add(
+            _log_entry(
+              row, seq=row.last_seq, kind=BroadcastLogKindEnum.SIGNAL, payload=event
+            )
+          )
+          await session.flush()
+          await session.refresh(row)
+          log.debug(
+            "broadcast cycle updated strategy=%s signal_uxid=%s action=%s seq=%d",
+            strategy,
+            signal_uxid,
+            action.value,
+            row.last_seq,
+          )
+          return row
+      except IntegrityError:
+        if attempt == 1:
+          log.debug(
+            "broadcast cycle insert raced strategy=%s signal_uxid=%s — retrying",
+            strategy,
+            signal_uxid,
+          )
+          continue
+        log.exception(
+          "Failed to record broadcast event strategy=%s signal_uxid=%s",
+          strategy,
+          signal_uxid,
+        )
+        return None
+      except Exception as exc:
+        log.exception(
+          "Failed to record broadcast event strategy=%s signal_uxid=%s: %s",
+          strategy,
+          signal_uxid,
+          exc,
+        )
+        return None
+    return None
+
+  async def record_worker_execution(
+    self,
+    *,
+    strategy: str,
+    signal_uxid: str,
+    worker_id: str,
+    account_id: str,
+    market: MarketTypeEnum | None,
+    gateway: str | None,
+    latest_status: TradeStatusEnum,
+    latest_action: str | None = None,
+    reject_reason: str | None = None,
+    event_at: datetime | None = None,
+  ) -> BroadcastMessage | None:
+    """Record that *worker_id* executed the cycle, and log the change.
+
+    Returns the cycle (so the caller can log it), or None when there is no
+    cycle for ``(strategy, signal_uxid)`` — a worker can report a trade for a
+    signal that was never broadcast (Telegram off at the time, an older signal
+    predating the cycle tables), and that is not an error.
+
+    A repeat of the status a worker already showed is dropped without touching
+    ``last_seq``: TRADE events are chatty, and re-rendering an identical table
+    would spend a Telegram edit per event for no visible change.
+    """
+    try:
+      async with get_session() as session:
+        row = await self._locked_cycle(session, strategy, signal_uxid)
+        if row is None:
+          return None
+
+        result = await session.execute(
+          select(BroadcastMessageWorker).where(
+            BroadcastMessageWorker.broadcast_message_id == row.id,
+            BroadcastMessageWorker.worker_id == worker_id,
+          )
+        )
+        worker: Optional[BroadcastMessageWorker] = result.scalars().first()
+        now = event_at or datetime.now(timezone.utc)
+
+        if worker is not None:
+          unchanged = (
+            worker.latest_status == latest_status
+            and worker.latest_action == latest_action
+          )
+          if unchanged:
+            return row
+          worker.latest_status = latest_status
+          worker.latest_action = latest_action
+          worker.reject_reason = reject_reason
+          worker.last_event_at = now
+          if market is not None:
+            worker.market = market
+          if gateway is not None:
+            worker.gateway = gateway
+        else:
+          session.add(
+            BroadcastMessageWorker(
+              id=uuid.uuid4(),
+              broadcast_message_id=row.id,
+              worker_id=worker_id,
+              account_id=account_id,
+              market=market,
+              gateway=gateway,
+              latest_status=latest_status,
+              latest_action=latest_action,
+              reject_reason=reject_reason,
+              last_event_at=now,
+            )
+          )
+
+        row.last_seq = (row.last_seq or 0) + 1
+        session.add(
+          _log_entry(
+            row,
+            seq=row.last_seq,
+            kind=BroadcastLogKindEnum.EXECUTION,
+            payload={
+              "worker_id": worker_id,
+              "account_id": account_id,
+              "status": getattr(latest_status, "value", str(latest_status)),
+              "action": latest_action,
+            },
+          )
+        )
+        await session.flush()
+        await session.refresh(row)
+        log.debug(
+          "broadcast worker recorded strategy=%s signal_uxid=%s worker_id=%s status=%s",
+          strategy,
+          signal_uxid,
+          worker_id,
+          latest_status,
+        )
+        return row
+    except Exception as exc:
+      log.exception(
+        "Failed to record broadcast worker strategy=%s signal_uxid=%s worker_id=%s: %s",
+        strategy,
+        signal_uxid,
+        worker_id,
+        exc,
+      )
+      return None
+
+  # ── Dispatcher side ────────────────────────────────────────────────
+
+  async def claim_pending_logs(
+    self, broadcast_message_id: uuid.UUID, *, max_attempts: int
+  ) -> list[BroadcastMessageLog]:
+    """Take ownership of a cycle's undelivered write-log entries.
+
+    Flips them ``PENDING`` → ``SENDING`` and bumps their attempt counter inside
+    one short transaction (no Telegram call is made while a lock is held), so a
+    second dispatcher — or the sweeper running alongside the listener — cannot
+    pick up the same entries. Entries past ``max_attempts`` are left alone;
+    ``finish_logs`` is what marks them FAILED.
+    """
+    try:
+      async with get_session() as session:
+        # Locking the cycle serialises against the writers, so a claim never
+        # races an in-flight append of the next seq.
+        await session.execute(
+          select(BroadcastMessage)
+          .where(BroadcastMessage.id == broadcast_message_id)
+          .with_for_update()
+        )
+        result = await session.execute(
+          select(BroadcastMessageLog)
+          .where(
+            BroadcastMessageLog.broadcast_message_id == broadcast_message_id,
+            BroadcastMessageLog.status == BroadcastLogStatusEnum.PENDING,
+            BroadcastMessageLog.attempts < max_attempts,
+          )
+          .order_by(BroadcastMessageLog.seq.asc())
+          .with_for_update(skip_locked=True)
+        )
+        rows = list(result.scalars().all())
+        for row in rows:
+          row.status = BroadcastLogStatusEnum.SENDING
+          row.attempts += 1
+        await session.flush()
+        return rows
+    except Exception as exc:
+      log.exception(
+        "Failed to claim broadcast logs broadcast_message_id=%s: %s",
+        broadcast_message_id,
+        exc,
+      )
+      return []
+
+  async def finish_logs(
+    self,
+    log_ids: list[uuid.UUID],
+    *,
+    delivered: bool,
+    error: str | None = None,
+    max_attempts: int | None = None,
+  ) -> bool:
+    """Close out claimed entries: DELIVERED, or back to PENDING for another
+    pass — FAILED once they have used up ``max_attempts``."""
+    if not log_ids:
+      return True
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BroadcastMessageLog).where(BroadcastMessageLog.id.in_(log_ids))
+        )
+        for row in result.scalars().all():
+          if delivered:
+            row.status = BroadcastLogStatusEnum.DELIVERED
+            row.delivered_at = datetime.now(timezone.utc)
+            row.last_error = None
+            continue
+          row.last_error = (error or "")[:255] or None
+          exhausted = max_attempts is not None and row.attempts >= max_attempts
+          row.status = (
+            BroadcastLogStatusEnum.FAILED
+            if exhausted
+            else BroadcastLogStatusEnum.PENDING
+          )
+      return True
+    except Exception as exc:
+      log.exception("Failed to finish broadcast logs: %s", exc)
+      return False
+
+  async def list_cycles_with_pending_logs(
+    self, *, max_attempts: int, stale_after_seconds: int, limit: int = 50
+  ) -> list[uuid.UUID]:
+    """Cycles holding work the dispatcher has not delivered.
+
+    This is the safety net under ``pg_notify``: a notification is fire-and-
+    forget, so anything appended while the broker was down (or while its
+    listener connection was broken) would otherwise sit unseen. Entries stuck
+    in ``SENDING`` past *stale_after_seconds* are picked up too — that state
+    only survives a dispatcher that died mid-delivery.
+    """
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BroadcastMessageLog.broadcast_message_id)
+          .where(
+            BroadcastMessageLog.attempts < max_attempts,
+            or_(
+              BroadcastMessageLog.status == BroadcastLogStatusEnum.PENDING,
+              and_(
+                BroadcastMessageLog.status == BroadcastLogStatusEnum.SENDING,
+                BroadcastMessageLog.updatedAt < threshold,
+              ),
+            ),
+          )
+          .group_by(BroadcastMessageLog.broadcast_message_id)
+          .order_by(func.min(BroadcastMessageLog.seq).asc())
+          .limit(limit)
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception("Failed to list cycles with pending broadcast logs: %s", exc)
+      return []
+
+  async def reclaim_stale_logs(self, *, stale_after_seconds: int) -> int:
+    """Return entries stranded in ``SENDING`` to ``PENDING`` so they can be
+    claimed again. Called by the sweeper before it dispatches."""
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BroadcastMessageLog).where(
+            BroadcastMessageLog.status == BroadcastLogStatusEnum.SENDING,
+            BroadcastMessageLog.updatedAt < threshold,
+          )
+        )
+        rows = list(result.scalars().all())
+        for row in rows:
+          row.status = BroadcastLogStatusEnum.PENDING
+        return len(rows)
+    except Exception as exc:
+      log.exception("Failed to reclaim stale broadcast logs: %s", exc)
+      return 0
+
+  async def load_cycle(
+    self, broadcast_message_id: uuid.UUID
+  ) -> BroadcastCycleView | None:
+    """The cycle plus everything needed to render and deliver it.
+
+    Read *after* claiming, so the body always reflects the newest state — even
+    newer than the claimed entries. Any change that lands in between simply
+    leaves its own entry pending, and the redundant edit it triggers is a no-op
+    Telegram reports as "message is not modified".
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BroadcastMessage).where(BroadcastMessage.id == broadcast_message_id)
+        )
+        message: Optional[BroadcastMessage] = result.scalars().first()
+        if message is None:
+          return None
+
+        result = await session.execute(
+          select(BroadcastMessageChat)
+          .where(BroadcastMessageChat.broadcast_message_id == broadcast_message_id)
+          .order_by(BroadcastMessageChat.createdAt.asc())
+        )
+        chats = list(result.scalars().all())
+
+        result = await session.execute(
+          select(BroadcastMessageWorker)
+          .where(BroadcastMessageWorker.broadcast_message_id == broadcast_message_id)
+          .order_by(BroadcastMessageWorker.createdAt.asc())
+        )
+        workers = list(result.scalars().all())
+        return BroadcastCycleView(message=message, chats=chats, workers=workers)
+    except Exception as exc:
+      log.exception(
+        "Failed to load broadcast cycle broadcast_message_id=%s: %s",
+        broadcast_message_id,
+        exc,
+      )
+      return None
+
+  async def upsert_chat(
+    self,
+    broadcast_message_id: uuid.UUID,
+    *,
+    audience: BroadcastAudienceEnum,
+    chat_id: str,
+    message_id: str | None,
+    message: str | None,
+    delivered_seq: int | None = None,
+    notified_event_count: int | None = None,
+    last_error: str | None = None,
+  ) -> bool:
+    """Record what a single chat currently holds for this cycle.
+
+    ``message_id`` is only overwritten when a new one is supplied, so a failed
+    edit (which passes None) never loses the id needed to edit that message
+    again later. ``delivered_seq`` and ``notified_event_count`` only ever move
+    forward, which is what makes a late delivery harmless: it cannot pull the
+    chat back to an older body, nor make it repeat a reply notice it has
+    already posted.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BroadcastMessageChat).where(
+            BroadcastMessageChat.broadcast_message_id == broadcast_message_id,
+            BroadcastMessageChat.chat_id == chat_id,
+          )
+        )
+        row: Optional[BroadcastMessageChat] = result.scalars().first()
+        if row is None:
+          session.add(
+            BroadcastMessageChat(
+              id=uuid.uuid4(),
+              broadcast_message_id=broadcast_message_id,
+              audience=audience,
+              chat_id=chat_id,
+              message_id=message_id,
+              message=message,
+              delivered_seq=delivered_seq or 0,
+              notified_event_count=notified_event_count,
+              last_error=last_error,
+            )
+          )
+          return True
+
+        row.audience = audience
+        if message_id is not None:
+          row.message_id = message_id
+        if message is not None:
+          row.message = message
+        if delivered_seq is not None and delivered_seq > (row.delivered_seq or 0):
+          row.delivered_seq = delivered_seq
+        if notified_event_count is not None and notified_event_count > (
+          row.notified_event_count or 0
+        ):
+          row.notified_event_count = notified_event_count
+        row.last_error = last_error
+      return True
+    except Exception as exc:
+      log.exception(
+        "Failed to upsert broadcast chat broadcast_message_id=%s chat_id=%s: %s",
+        broadcast_message_id,
+        chat_id,
+        exc,
+      )
+      return False
+
+  async def mark_broadcast(self, broadcast_message_id: uuid.UUID) -> bool:
+    """Stamp ``last_broadcast_at`` after a cycle has been pushed to Telegram."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BroadcastMessage).where(BroadcastMessage.id == broadcast_message_id)
+        )
+        row: Optional[BroadcastMessage] = result.scalars().first()
+        if row is None:
+          return False
+        row.last_broadcast_at = datetime.now(timezone.utc)
+      return True
+    except Exception as exc:
+      log.exception(
+        "Failed to stamp broadcast time broadcast_message_id=%s: %s",
+        broadcast_message_id,
+        exc,
+      )
+      return False
+
+  # ── Internals ──────────────────────────────────────────────────────
+
+  async def _locked_cycle(
+    self, session: AsyncSession, strategy: str, signal_uxid: str
+  ) -> Optional[BroadcastMessage]:
+    """The cycle row for the key, locked ``FOR UPDATE`` for the transaction.
+
+    The lock is the whole point: ``events`` is a JSONB list that is read,
+    extended and written back, so two concurrent writers without it would each
+    append to the same snapshot and the second commit would silently drop the
+    first one's line.
+    """
+    result = await session.execute(
+      select(BroadcastMessage)
+      .where(
+        BroadcastMessage.strategy == strategy,
+        BroadcastMessage.signal_uxid == signal_uxid,
+      )
+      .with_for_update()
+    )
+    return result.scalars().first()
+
+
+def _is_duplicate_event(events: list | None, event: dict) -> bool:
+  """True when *event* repeats the cycle's last recorded signal.
+
+  Keyed on action + payload timestamp: those two identify one TradingView
+  alert, so a redelivered or replayed signal is recognised while a genuine
+  second TP1 at a later timestamp still lands.
+  """
+  if not events:
+    return False
+  last = events[-1]
+  if not isinstance(last, dict):
+    return False
+  return (last.get("action"), last.get("timestamp")) == (
+    event.get("action"),
+    event.get("timestamp"),
+  )
+
+
+def _log_entry(
+  row: BroadcastMessage, *, seq: int, kind: BroadcastLogKindEnum, payload: dict
+) -> BroadcastMessageLog:
+  """A write-log entry for a change just made to *row*, in the same transaction.
+
+  Committing the change and its log entry together is what makes delivery
+  recoverable: the Telegram edit can fail, the process can die, the
+  notification can be missed — the entry is still on disk for the dispatcher
+  (or its sweeper) to pick up.
+  """
+  return BroadcastMessageLog(
+    id=uuid.uuid4(),
+    broadcast_message_id=row.id,
+    seq=seq,
+    kind=kind,
+    payload=payload,
+    status=BroadcastLogStatusEnum.PENDING,
+    attempts=0,
+  )
+
+
+class SqlAlchemyTradeNotificationRepository:
+  """Tracks the Telegram message that carries each trade's live card.
+
+  Every method swallows its exceptions and degrades to "no card known": a
+  notification is cosmetic, and a bookkeeping failure must never stop the TRADE
+  consumer from persisting the event that triggered it.
+  """
+
+  async def list_for_trade(
+    self,
+    trade_id: uuid.UUID,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> list[TradeCard]:
+    """Cards already posted for *trade_id*, one per recipient."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TradeNotification).where(
+            TradeNotification.trade_id == trade_id,
+            TradeNotification.platform == platform,
+          )
+        )
+        return [TradeCard.model_validate(row) for row in result.scalars().all()]
+    except Exception as exc:
+      log.exception("Failed to list trade cards for trade_id=%s: %s", trade_id, exc)
+      return []
+
+  async def record(
+    self,
+    trade_id: uuid.UUID,
+    chat_id: str,
+    message_id: int,
+    status: TradeStatusEnum,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> bool:
+    """Remember a freshly posted card. Idempotent — a second call for the same
+    recipient updates the existing row rather than violating the unique key,
+    which is what happens if a card was posted, deleted by the user, and then
+    re-posted."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(TradeNotification).where(
+            TradeNotification.trade_id == trade_id,
+            TradeNotification.platform == platform,
+            TradeNotification.chat_id == chat_id,
+          )
+        )
+        row: Optional[TradeNotification] = result.scalars().first()
+        if row is not None:
+          row.message_id = message_id
+          row.status = status
+        else:
+          session.add(
+            TradeNotification(
+              id=uuid.uuid4(),
+              trade_id=trade_id,
+              platform=platform,
+              chat_id=chat_id,
+              message_id=message_id,
+              status=status,
+            )
+          )
+      return True
+    except Exception as exc:
+      log.exception(
+        "Failed to record trade card trade_id=%s chat_id=%s: %s",
+        trade_id,
+        chat_id,
+        exc,
+      )
+      return False
+
+  async def mark_status(self, card_id: uuid.UUID, status: TradeStatusEnum) -> bool:
+    """Record the status the card now displays, after a successful edit."""
+    try:
+      async with get_session() as session:
+        row = await session.get(TradeNotification, card_id)
+        if row is None:
+          return False
+        row.status = status
+      return True
+    except Exception as exc:
+      log.exception("Failed to update trade card id=%s: %s", card_id, exc)
+      return False
+
+  async def delete(self, card_id: uuid.UUID) -> bool:
+    """Forget a card whose message Telegram says is gone for good."""
+    try:
+      async with get_session() as session:
+        await session.execute(
+          delete(TradeNotification).where(TradeNotification.id == card_id)
+        )
+      return True
+    except Exception as exc:
+      log.exception("Failed to delete trade card id=%s: %s", card_id, exc)
+      return False
 
 
 class SqlAlchemySettingRepository:
@@ -966,6 +1735,7 @@ class SqlAlchemySignalRepository:
       symbol=payload.symbol,
       timeframe=payload.timeframe,
       timestamp=payload.timestamp,
+      signal_uxid=payload.signal_uxid,
       action=pos.action,
       price=pos.price or 0.0,
       quantity=pos.quantity or 0.0,
@@ -1233,6 +2003,11 @@ class SqlAlchemyTradeRepository:
       log.warning("upsert_by_position_event: unknown position status=%s", event.status)
       return None
 
+    # TP2 / SL / R_SL all persist as CLOSED and ``action`` keeps the entry
+    # direction, so the event's own label is the only record of *how* the trade
+    # moved. Stored on the row because the live trade card is re-rendered later
+    # with nothing but the row to go on.
+    last_action = self._policy.to_last_action(event.status)
     is_running = self._policy.is_open(event.status)
     # A close price of 0 means the worker had none to report (seen on FLATTED
     # events) — no instrument ever closes at 0, so treat it like a missing
@@ -1265,6 +2040,7 @@ class SqlAlchemyTradeRepository:
           )
           return row
         row.status = trade_status
+        row.last_action = last_action
         row.is_running = is_running
         row.price = price
         row.quantity = event.volume
@@ -1313,6 +2089,7 @@ class SqlAlchemyTradeRepository:
         is_running=is_running,
         risk_percent=event.risk_percent,
         status=trade_status,
+        last_action=last_action,
         reject_reason=event.reject_reason,
       )
       session.add(new_row)
@@ -1366,6 +2143,51 @@ class SqlAlchemyTradeRepository:
       log.exception("Failed to fetch trades for account_id=%s: %s", account_id, exc)
       return []
 
+  async def get_for_telegram_user(
+    self,
+    trade_id: uuid.UUID,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> Trade | None:
+    """Return the trade *trade_id* only if the bot user may see it.
+
+    "May see it" means the trade's owning account — matched on
+    ``account_id`` + ``market`` + ``gateway`` the way
+    ``list_broadcast_targets`` does — is one this user is linked to. Any of
+    their linked accounts qualifies, not just the active one: a trade card
+    stays actionable after the owner has switched to another account.
+
+    Returning None for both "no such trade" and "not yours" is deliberate —
+    the endpoint answers 404 either way rather than confirming that some other
+    owner's trade id exists.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Trade)
+          .join(
+            Account,
+            (Account.account_id == Trade.account_id)
+            & (Account.market == Trade.market)
+            & (or_(Account.gateway == Trade.gateway, Account.gateway.is_(None))),
+          )
+          .join(AccountBotLink, AccountBotLink.account_id == Account.id)
+          .where(
+            Trade.id == trade_id,
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == str(telegram_user_id),
+          )
+        )
+        return result.scalars().first()
+    except Exception as exc:
+      log.exception(
+        "Failed to fetch trade id=%s for telegram_user_id=%s: %s",
+        trade_id,
+        telegram_user_id,
+        exc,
+      )
+      return None
+
   async def count_by_account(self, account_id: str) -> int:
     """Return the total number of trades for an account.
 
@@ -1380,3 +2202,45 @@ class SqlAlchemyTradeRepository:
     except Exception as exc:
       log.exception("Failed to count trades for account_id=%s: %s", account_id, exc)
       return 0
+
+  async def list_open_by_account(self, account_id: str) -> list[Trade]:
+    """Return currently running (``is_running``) trades for an account, most
+    recently updated first. Unpaginated — the number of positions a single
+    account can have open at once is small by construction (one per
+    symbol/strategy the worker allows).
+
+    Same bare-``account_id`` limitation as ``list_by_account``.
+    """
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Trade)
+          .where(Trade.account_id == account_id)
+          .where(Trade.is_running.is_(True))
+          .order_by(Trade.updatedAt.desc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception(
+        "Failed to fetch open trades for account_id=%s: %s", account_id, exc
+      )
+      return []
+
+  async def list_distinct_strategies(self) -> list[str]:
+    """Distinct non-empty ``strategy`` values seen on the ``trades`` table,
+    alphabetically. Backs the admin FLAT strategy picker — a FLAT scoped to a
+    strategy the broker has never observed is worthless, so the picker only
+    offers ones a trade has actually carried."""
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(Trade.strategy)
+          .where(Trade.strategy.is_not(None))
+          .where(Trade.strategy != "")
+          .distinct()
+          .order_by(Trade.strategy.asc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+      log.exception("Failed to list distinct strategies: %s", exc)
+      return []

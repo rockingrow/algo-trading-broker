@@ -94,6 +94,16 @@ class FakeTgAccountRepo:
       self._active.pop(key, None)
     return True
 
+  async def update_settings(self, account_uuid, patch):
+    """Merge *patch* into the account's settings, like the real repository's
+    server-side ``settings || patch``. ``None`` for an unknown row."""
+    account = next((a for a in self._accounts if a.id == account_uuid), None)
+    if account is None:
+      return None
+    merged = {**(account.settings or {}), **patch}
+    account.settings = merged
+    return merged
+
   def linked_user_ids(self, account: Account) -> list[str]:
     """Test helper: who currently holds *account* (the join table's other
     direction, which no endpoint exposes)."""
@@ -101,15 +111,19 @@ class FakeTgAccountRepo:
 
 
 class FakeTradeRepo:
-  def __init__(self, trades, total):
+  def __init__(self, trades, total, open_trades=None):
     self._trades = trades
     self._total = total
+    self._open_trades = open_trades if open_trades is not None else trades
 
   async def list_by_account(self, account_id, *, limit, offset, order, order_by):
     return self._trades
 
   async def count_by_account(self, account_id):
     return self._total
+
+  async def list_open_by_account(self, account_id):
+    return self._open_trades
 
 
 class FakePublisher:
@@ -260,6 +274,51 @@ def test_trades_after_link(ctx):
   assert body["data"][0]["symbol"] == "XAUUSD"
 
 
+# ── positions ───────────────────────────────────────────────────────
+
+
+def test_positions_requires_link(ctx):
+  resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/positions", headers=_headers())
+  assert resp.status_code == 404
+
+
+def test_positions_after_link(ctx):
+  ctx["client"].post(
+    "/v1/telegram/link",
+    json={"token": str(TOKEN), "telegram_user_id": TG_ID},
+    headers=_headers(),
+  )
+  resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/positions", headers=_headers())
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["count"] == 1
+  assert body["data"][0]["symbol"] == "XAUUSD"
+
+
+def test_positions_empty_when_none_open():
+  app = FastAPI()
+  app.include_router(get_core_router())
+  account_repo = FakeTgAccountRepo(_make_account())
+  app.dependency_overrides[get_account_repository] = lambda: account_repo
+  app.dependency_overrides[get_trade_repository] = lambda: FakeTradeRepo(
+    [_make_trade()], total=1, open_trades=[]
+  )
+  app.dependency_overrides[get_publisher] = lambda: FakePublisher()
+  app.dependency_overrides[ensure_api_key] = lambda: None
+  client = TestClient(app)
+
+  client.post(
+    "/v1/telegram/link",
+    json={"token": str(TOKEN), "telegram_user_id": TG_ID},
+    headers=_headers(),
+  )
+  resp = client.get(f"/v1/telegram/{TG_ID}/positions", headers=_headers())
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["count"] == 0
+  assert body["data"] == []
+
+
 # ── commands ────────────────────────────────────────────────────────
 
 
@@ -308,6 +367,77 @@ def test_prevent_allow_publishes_allow_signal(ctx):
   )
   assert resp.status_code == 200
   assert resp.json()["action"] == "ALLOW_SIGNAL"
+
+
+# ── commands persist into accounts.settings ─────────────────────────
+#
+# The ADMIN publish only reaches a worker that is connected right now; the
+# settings blob is what the WORKER_CONNECTED_ACK replays on every reconnect,
+# so a command that publishes without persisting silently expires.
+
+
+def _prevent(ctx, enabled: bool):
+  return ctx["client"].post(
+    f"/v1/telegram/{TG_ID}/commands/prevent",
+    json={"enabled": enabled},
+    headers=_headers(),
+  )
+
+
+def test_prevent_persists_signal_blocked_on_the_account(ctx):
+  _link(ctx)
+  resp = _prevent(ctx, True)
+
+  assert resp.status_code == 200
+  assert resp.json()["settings"] == {"signal_blocked": True}
+  assert ctx["account_repo"]._accounts[0].settings == {"signal_blocked": True}
+
+
+def test_allow_flips_the_persisted_setting_back(ctx):
+  _link(ctx)
+  _prevent(ctx, True)
+  resp = _prevent(ctx, False)
+
+  assert resp.json()["settings"] == {"signal_blocked": False}
+  assert ctx["account_repo"]._accounts[0].settings == {"signal_blocked": False}
+
+
+def test_prevent_keeps_unrelated_settings_keys(ctx):
+  _link(ctx)
+  # A key this broker version doesn't know (written by a newer one, or by a
+  # command added later) must survive the write — it is a merge, not a replace.
+  ctx["account_repo"]._accounts[0].settings = {"future_toggle": "keep-me"}
+  resp = _prevent(ctx, True)
+
+  assert resp.json()["settings"] == {
+    "future_toggle": "keep-me",
+    "signal_blocked": True,
+  }
+
+
+def test_prevent_fails_without_publishing_when_the_write_fails(ctx):
+  _link(ctx)
+
+  async def failing_update(account_uuid, patch):
+    return None
+
+  ctx["account_repo"].update_settings = failing_update
+  resp = _prevent(ctx, True)
+
+  # A command whose intent could not be recorded is a failed command: nothing
+  # is published either, so the worker and the DB can't disagree.
+  assert resp.status_code == 500
+  assert ctx["publisher"].admin_signals == []
+
+
+def test_flat_changes_no_settings(ctx):
+  _link(ctx)
+  resp = ctx["client"].post(
+    f"/v1/telegram/{TG_ID}/commands/flat", json={}, headers=_headers()
+  )
+  # FLAT is an action, not a setting — it must not touch the blob.
+  assert resp.json()["settings"] is None
+  assert not ctx["account_repo"]._accounts[0].settings
 
 
 def test_command_requires_link(ctx):

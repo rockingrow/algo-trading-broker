@@ -35,3 +35,19 @@ ACCOUNTS_PER_PAGE: int = 10
 
 # Six columns, including a free-text account name.
 ADMIN_ACCOUNTS_PER_PAGE: int = 50
+
+# ── Live trade card ─────────────────────────────────────────────────
+# The broker posts a card per trade (see ``broker/helpers/trade_card.py``) with
+# these callback prefixes baked into its buttons, and this bot receives the
+# taps — the card is sent with BOT_TELEGRAM_TOKEN, so its callback queries
+# arrive on the same long poll as everything else. The two lists must stay
+# byte-identical: a mismatch shows up as a button that silently does nothing.
+CB_TRADE_DETAIL: str = "tc:d"
+CB_TRADE_SUMMARY: str = "tc:s"
+CB_TRADE_EXIT: str = "tc:x"
+CB_TRADE_EXIT_CONFIRM: str = "tc:xy"
+CB_TRADE_EXIT_CANCEL: str = "tc:xn"
+
+# Statuses where the trade is over and the card drops its buttons. Mirrors
+# ``broker.helpers.trade_card.TERMINAL_STATUSES``.
+TERMINAL_TRADE_STATUSES: frozenset[str] = frozenset({"CLOSED", "FLAT", "REJECTED"})

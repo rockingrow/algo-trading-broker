@@ -115,6 +115,9 @@ class BrokerClientUser(BrokerClient):
     ACCOUNTS = "{telegram_id}/accounts"
     SWITCH = "{telegram_id}/active-account"
     TRADES = "{telegram_id}/trades"
+    TRADE = "{telegram_id}/trades/{trade_id}"
+    TRADE_EXIT = "{telegram_id}/trades/{trade_id}/exit"
+    POSITIONS = "{telegram_id}/positions"
     FLAT = "{telegram_id}/commands/flat"
     PREVENT = "{telegram_id}/commands/prevent"
     UNLINK = "{telegram_id}/unlink"
@@ -132,13 +135,30 @@ class BrokerClientUser(BrokerClient):
       )
     )
 
+  async def resolve_account(
+    self, telegram_user_id: int
+  ) -> tuple[bool, Optional[dict[str, Any]]]:
+    """``(answered, account)`` for the user's currently active account.
+
+    ``get_account`` collapses "the broker says this user has no account" and
+    "the broker couldn't be reached" into the same ``None``, which is all a
+    handler needs — either way it has nothing to act on. Anything that *stores*
+    the answer needs them apart: the command menu must not strip a linked
+    user's commands because one call timed out (see services/menu.py).
+    """
+    resp = await self._request(
+      "GET", self._path(self.ENDPOINTS.ACCOUNT, telegram_id=telegram_user_id)
+    )
+    if resp is None:
+      return False, None
+    if resp.status_code == 404:
+      return True, None
+    return True, resp.json()
+
   async def get_account(self, telegram_user_id: int) -> Optional[dict[str, Any]]:
     """Return the Telegram user's currently active account, or None if unbound."""
-    return self._json_or_none(
-      await self._request(
-        "GET", self._path(self.ENDPOINTS.ACCOUNT, telegram_id=telegram_user_id)
-      )
-    )
+    _, account = await self.resolve_account(telegram_user_id)
+    return account
 
   async def list_accounts(
     self, telegram_user_id: int
@@ -172,6 +192,52 @@ class BrokerClientUser(BrokerClient):
         "GET",
         self._path(self.ENDPOINTS.TRADES, telegram_id=telegram_user_id),
         params={"limit": limit, "offset": offset},
+      )
+    )
+
+  async def list_open_positions(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Return the user's currently open positions
+    (``{"count": int, "data": [...]}``), or None on failure."""
+    return self._json_or_none(
+      await self._request(
+        "GET", self._path(self.ENDPOINTS.POSITIONS, telegram_id=telegram_user_id)
+      )
+    )
+
+  async def get_trade(
+    self, telegram_user_id: int, trade_id: str
+  ) -> Optional[dict[str, Any]]:
+    """One trade the user owns, or None when it isn't theirs / doesn't exist.
+
+    Scoped against every account linked to the caller, not just the active
+    one — a trade card outlives an account switch.
+    """
+    return self._json_or_none(
+      await self._request(
+        "GET",
+        self._path(
+          self.ENDPOINTS.TRADE, telegram_id=telegram_user_id, trade_id=trade_id
+        ),
+      )
+    )
+
+  async def exit_trade(
+    self, telegram_user_id: int, trade_id: str
+  ) -> Optional[dict[str, Any]]:
+    """Close one specific trade (FLAT scoped to its strategy + symbol).
+
+    None covers every failure the caller can't act on differently, including
+    the 409 the broker answers when the trade has closed in the meantime — the
+    card is refreshed either way, which is what tells the user what happened.
+    """
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(
+          self.ENDPOINTS.TRADE_EXIT, telegram_id=telegram_user_id, trade_id=trade_id
+        ),
       )
     )
 
@@ -257,6 +323,7 @@ class BrokerClientAdmin(BrokerClient):
   class ENDPOINTS(Endpoint):
     ACCOUNTS = "accounts"
     FLAT = "flat"
+    STRATEGIES = "strategies"
     ROTATE_TOKEN = "accounts/{account_id}/link-token/rotate"
     LINK_TELEGRAM = "accounts/{account_uuid}/link-telegram"
     SETTINGS = "settings"
@@ -265,6 +332,9 @@ class BrokerClientAdmin(BrokerClient):
     STRATEGY_MAGIC_MAP = "settings/strategy-magic-map"
     CRYPTO_ALLOWED_SYMBOL = "settings/crypto-allowed-symbol"
     CRYPTO_MAX_LEVERAGE = "settings/crypto-max-leverage"
+    PUBLIC_BROADCAST_CHAT_IDS = "settings/public-broadcast-chat-ids"
+    PRIVATE_REPLY_NOTIFY = "settings/private-reply-notify"
+    PUBLIC_REPLY_NOTIFY = "settings/public-reply-notify"
 
   async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
     """All trading accounts (includes link_token + linked_user_ids)."""
@@ -330,6 +400,13 @@ class BrokerClientAdmin(BrokerClient):
           "gateway": gateway,
         },
       )
+    )
+
+  async def admin_list_strategies(self) -> Optional[list[str]]:
+    """Distinct strategy names the broker has ever seen on a trade,
+    alphabetically. Powers the admin FLAT strategy picker."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.STRATEGIES))
     )
 
   async def admin_rotate_token(self, account_id: str) -> Optional[dict[str, Any]]:
@@ -432,5 +509,59 @@ class BrokerClientAdmin(BrokerClient):
         "POST",
         self._path(self.ENDPOINTS.CRYPTO_MAX_LEVERAGE),
         json={"default_leverage": default_leverage},
+      )
+    )
+
+  async def get_public_broadcast_chat_ids(self) -> Optional[dict[str, Any]]:
+    """Current ``public_broadcast_chat_ids`` value (comma-separated chat ids,
+    empty string when the public broadcast is off)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.PUBLIC_BROADCAST_CHAT_IDS))
+    )
+
+  async def set_public_broadcast_chat_ids(
+    self, chat_ids: list[str]
+  ) -> Optional[dict[str, Any]]:
+    """Replace the public broadcast chats; an empty list turns them off. The
+    broker normalises (trim/dedup) so there is one validation path."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.PUBLIC_BROADCAST_CHAT_IDS),
+        json={"chat_ids": chat_ids},
+      )
+    )
+
+  async def get_private_reply_notify(self) -> Optional[dict[str, Any]]:
+    """Whether private broadcast events currently get a reply notice under
+    the cycle's message (unset on the broker side = enabled)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.PRIVATE_REPLY_NOTIFY))
+    )
+
+  async def set_private_reply_notify(self, enabled: bool) -> Optional[dict[str, Any]]:
+    """Enable/disable the reply notice for private broadcast events."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.PRIVATE_REPLY_NOTIFY),
+        json={"enabled": enabled},
+      )
+    )
+
+  async def get_public_reply_notify(self) -> Optional[dict[str, Any]]:
+    """Whether public broadcast events currently get a reply notice under
+    the cycle's message (unset on the broker side = enabled)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.PUBLIC_REPLY_NOTIFY))
+    )
+
+  async def set_public_reply_notify(self, enabled: bool) -> Optional[dict[str, Any]]:
+    """Enable/disable the reply notice for public broadcast events."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.PUBLIC_REPLY_NOTIFY),
+        json={"enabled": enabled},
       )
     )

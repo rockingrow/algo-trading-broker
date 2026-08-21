@@ -62,6 +62,32 @@ async def test_get_account_404_returns_none():
   await client.aclose()
 
 
+async def test_resolve_account_separates_no_account_from_no_broker():
+  """The command menu acts on the answer, so "not linked" and "couldn't ask"
+  must not look the same (see services/menu.py)."""
+
+  def linked(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"account_id": "acc-1"})
+
+  def unlinked(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(404)
+
+  def unreachable(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("broker down", request=request)
+
+  client = _client(linked)
+  assert await client.resolve_account(7) == (True, {"account_id": "acc-1"})
+  await client.aclose()
+
+  client = _client(unlinked)
+  assert await client.resolve_account(7) == (True, None)
+  await client.aclose()
+
+  client = _client(unreachable)
+  assert await client.resolve_account(7) == (False, None)
+  await client.aclose()
+
+
 async def test_list_trades_passes_pagination_params():
   captured = {}
 
@@ -75,6 +101,29 @@ async def test_list_trades_passes_pagination_params():
   assert result["page"]["total"] == 0
   assert captured["path"] == "/v1/telegram/7/trades"
   assert captured["params"] == {"limit": "5", "offset": "10"}
+  await client.aclose()
+
+
+async def test_list_open_positions_returns_json():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    return httpx.Response(200, json={"count": 1, "data": [{"symbol": "XAUUSD"}]})
+
+  client = _client(handler)
+  result = await client.list_open_positions(7)
+  assert result == {"count": 1, "data": [{"symbol": "XAUUSD"}]}
+  assert captured["path"] == "/v1/telegram/7/positions"
+  await client.aclose()
+
+
+async def test_list_open_positions_404_returns_none():
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(404)
+
+  client = _client(handler)
+  assert await client.list_open_positions(7) is None
   await client.aclose()
 
 
@@ -277,6 +326,20 @@ async def test_admin_flat_default_body():
   await client.aclose()
 
 
+async def test_admin_list_strategies_returns_json_list():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    return httpx.Response(200, json=["strat_a", "strat_b"])
+
+  client = _admin_client(handler)
+  result = await client.admin_list_strategies()
+  assert result == ["strat_a", "strat_b"]
+  assert captured["path"] == "/admin/strategies"
+  await client.aclose()
+
+
 async def test_admin_flat_scoped_body_includes_market_and_gateway():
   captured = {}
 
@@ -405,7 +468,9 @@ async def test_get_crypto_allowed_symbol_path():
   def handler(request: httpx.Request) -> httpx.Response:
     captured["path"] = request.url.path
     captured["method"] = request.method
-    return httpx.Response(200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"})
+    return httpx.Response(
+      200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"}
+    )
 
   client = _admin_client(handler)
   result = await client.get_crypto_allowed_symbol()
@@ -422,7 +487,9 @@ async def test_set_crypto_allowed_symbol_posts_symbols_list():
     captured["path"] = request.url.path
     captured["method"] = request.method
     captured["body"] = request.content.decode()
-    return httpx.Response(200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"})
+    return httpx.Response(
+      200, json={"setting": "crypto_allowed_symbol", "value": "BTC,ETH"}
+    )
 
   client = _admin_client(handler)
   result = await client.set_crypto_allowed_symbol(["btc", "eth"])
@@ -473,6 +540,98 @@ async def test_set_crypto_max_leverage_broker_422_returns_none():
 
   client = _admin_client(handler)
   assert await client.set_crypto_max_leverage(-1) is None
+  await client.aclose()
+
+
+async def test_get_private_reply_notify_path():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    return httpx.Response(
+      200,
+      json={
+        "setting": "private_broadcast_reply_notify",
+        "value": "1",
+        "state": "ENABLED",
+      },
+    )
+
+  client = _admin_client(handler)
+  result = await client.get_private_reply_notify()
+  assert result["state"] == "ENABLED"
+  assert captured["path"] == "/admin/settings/private-reply-notify"
+  assert captured["method"] == "GET"
+  await client.aclose()
+
+
+async def test_set_private_reply_notify_posts_enabled_flag():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    captured["body"] = request.content.decode()
+    return httpx.Response(
+      200,
+      json={
+        "setting": "private_broadcast_reply_notify",
+        "value": "0",
+        "state": "DISABLED",
+      },
+    )
+
+  client = _admin_client(handler)
+  result = await client.set_private_reply_notify(False)
+  assert result["state"] == "DISABLED"
+  assert captured["path"] == "/admin/settings/private-reply-notify"
+  assert captured["method"] == "POST"
+  assert '"enabled":false' in captured["body"].replace(" ", "")
+  await client.aclose()
+
+
+async def test_get_public_reply_notify_path():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    return httpx.Response(
+      200,
+      json={
+        "setting": "public_broadcast_reply_notify",
+        "value": "1",
+        "state": "ENABLED",
+      },
+    )
+
+  client = _admin_client(handler)
+  result = await client.get_public_reply_notify()
+  assert result["state"] == "ENABLED"
+  assert captured["path"] == "/admin/settings/public-reply-notify"
+  assert captured["method"] == "GET"
+  await client.aclose()
+
+
+async def test_set_public_reply_notify_posts_enabled_flag():
+  captured = {}
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    captured["path"] = request.url.path
+    captured["method"] = request.method
+    captured["body"] = request.content.decode()
+    return httpx.Response(
+      200,
+      json={"setting": "public_broadcast_reply_notify", "value": "1", "state": "ENABLED"},
+    )
+
+  client = _admin_client(handler)
+  result = await client.set_public_reply_notify(True)
+  assert result["state"] == "ENABLED"
+  assert captured["path"] == "/admin/settings/public-reply-notify"
+  assert captured["method"] == "POST"
+  assert '"enabled":true' in captured["body"].replace(" ", "")
   await client.aclose()
 
 

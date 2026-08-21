@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -5,11 +6,11 @@ from typing import Optional
 
 import pytest
 
-from broker.constants import NOTIFICATION_TIMEZONE_KEY
 from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.publisher_schema import TradingSignal
 from broker.schemas.webhook_schema import PositionSchema, WebhookPayload
 from broker.services.signal_processing_service import (
+  DeferredEnqueuer,
   SignalError,
   SignalProcessingService,
 )
@@ -96,10 +97,26 @@ class FakePublisher:
     self.published: list[TradingSignal] = []
     self.flats: list[tuple] = []
     self._publish_fails = publish_fails
+    # Set to make the next N enqueues fail, standing in for a NATS blip.
+    self.enqueue_failures = 0
+    self.enqueue_hangs = False
 
-  async def publish_webhook_event(self, *, signal_id, strategy, envelope):
+  async def publish_webhook_event(
+    self, *, signal_id, strategy, envelope, timeout=None, msg_id=None
+  ):
+    if self.enqueue_hangs:
+      await asyncio.sleep(3600)
+    if self.enqueue_failures > 0:
+      self.enqueue_failures -= 1
+      raise RuntimeError("jetstream unavailable")
     self.enqueued.append(
-      {"signal_id": signal_id, "strategy": strategy, "envelope": envelope}
+      {
+        "signal_id": signal_id,
+        "strategy": strategy,
+        "envelope": envelope,
+        "timeout": timeout,
+        "msg_id": msg_id,
+      }
     )
 
   async def publish(self, signal):
@@ -107,10 +124,12 @@ class FakePublisher:
       raise RuntimeError("worker publish failed")
     self.published.append(signal)
 
-  async def publish_flat(self, *, signal_id, symbol, timestamp, strategy):
+  async def publish_flat(
+    self, *, signal_id, signal_uxid=None, symbol, timestamp, strategy
+  ):
     if self._publish_fails:
       raise RuntimeError("worker publish failed")
-    self.flats.append((signal_id, symbol, timestamp, strategy))
+    self.flats.append((signal_id, signal_uxid, symbol, timestamp, strategy))
 
   async def publish_admin_signal(self, **kwargs):
     return None
@@ -133,6 +152,32 @@ class FakeNotifier:
     self.messages.append(message_text)
 
 
+class FakeBroadcaster:
+  """Records what the service handed to the broadcaster.
+
+  The service no longer formats the signal itself — that is the dispatcher's
+  job — so a test that used to inspect the rendered message body now checks
+  what payload / attempt number the broadcaster was fed instead.
+  """
+
+  def __init__(self):
+    self.calls: list[tuple[WebhookPayload, int | None]] = []
+
+  async def broadcast(self, payload, *, attempt_number=None):
+    self.calls.append((payload, attempt_number))
+
+
+async def _wait_until(predicate, timeout: float = 2.0) -> None:
+  """Poll *predicate* until it holds, so tests never sleep on a fixed guess."""
+  loop = asyncio.get_running_loop()
+  deadline = loop.time() + timeout
+  while loop.time() < deadline:
+    if predicate():
+      return
+    await asyncio.sleep(0.01)
+  raise AssertionError("condition not reached within timeout")
+
+
 def _payload(action=SignalActionEnum.LONG, token="secret", **overrides):
   base = dict(
     strategy="strat",
@@ -152,25 +197,30 @@ def _make_service(
   signal_id=None,
   secret="secret",
   publish_fails=False,
+  deferred_enqueuer=None,
+  broadcaster=None,
 ):
   publisher = FakePublisher(publish_fails=publish_fails)
   notifier = FakeNotifier()
+  broadcaster = broadcaster if broadcaster is not None else FakeBroadcaster()
   signal_repo = FakeSignalRepository(return_id=signal_id)
   service = SignalProcessingService(
     signal_repository=signal_repo,
     setting_repository=FakeSettingRepository(blocked=blocked),
     publisher=publisher,
     notifier=notifier,
+    broadcaster=broadcaster,
     webhook_secret=secret,
+    deferred_enqueuer=deferred_enqueuer,
   )
-  return service, publisher, notifier, signal_repo
+  return service, publisher, notifier, broadcaster, signal_repo
 
 
 # ── Enqueue path (webhook route) ─────────────────────────────────────
 
 
 async def test_enqueue_only_pushes_to_jetstream_no_side_effects():
-  service, publisher, notifier, signal_repo = _make_service()
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
   result = await service.enqueue(_payload())
 
   assert result["status"] == "queued"
@@ -189,7 +239,7 @@ async def test_enqueue_only_pushes_to_jetstream_no_side_effects():
 
 
 async def test_enqueue_of_flat_signal_also_uses_jetstream():
-  service, publisher, _, _ = _make_service()
+  service, publisher, _, _, _ = _make_service()
   result = await service.enqueue(_payload(action=SignalActionEnum.FLAT))
   assert result["status"] == "queued"
   assert publisher.flats == []
@@ -197,14 +247,14 @@ async def test_enqueue_of_flat_signal_also_uses_jetstream():
 
 
 async def test_invalid_token_raises_401():
-  service, _, _, _ = _make_service()
+  service, _, _, _, _ = _make_service()
   with pytest.raises(SignalError) as exc:
     await service.enqueue(_payload(token="wrong"))
   assert exc.value.status_code == 401
 
 
 async def test_missing_secret_raises_500():
-  service, _, _, _ = _make_service(secret="")
+  service, _, _, _, _ = _make_service(secret="")
   with pytest.raises(SignalError) as exc:
     await service.enqueue(_payload())
   assert exc.value.status_code == 500
@@ -212,15 +262,15 @@ async def test_missing_secret_raises_500():
 
 async def test_enqueue_does_not_check_block_gate():
   # Block gate lives in the handler now — the webhook must return fast.
-  service, publisher, notifier, _ = _make_service(blocked=True)
+  service, publisher, notifier, _, _ = _make_service(blocked=True)
   result = await service.enqueue(_payload())
   assert result["status"] == "queued"
   assert notifier.messages == []
   assert len(publisher.enqueued) == 1
 
 
-async def test_enqueue_failure_raises_500():
-  service, publisher, _, _ = _make_service()
+async def test_enqueue_failure_without_a_deferred_queue_raises_503():
+  service, publisher, _, _, _ = _make_service()
 
   async def boom(**_kwargs):
     raise RuntimeError("jetstream down")
@@ -228,63 +278,153 @@ async def test_enqueue_failure_raises_500():
   publisher.publish_webhook_event = boom  # type: ignore[assignment]
   with pytest.raises(SignalError) as exc:
     await service.enqueue(_payload())
-  assert exc.value.status_code == 500
+  # 503, not a hung request: TradingView reports a refusal it can show the
+  # operator instead of "request took too long and timed out".
+  assert exc.value.status_code == 503
+
+
+async def test_enqueue_carries_the_deadline_and_a_dedup_id():
+  service, publisher, _, _, _ = _make_service()
+  await service.enqueue(_payload())
+
+  enq = publisher.enqueued[0]
+  assert enq["timeout"] == settings.webhook.ENQUEUE_TIMEOUT
+  assert enq["msg_id"]
+
+
+async def test_slow_enqueue_is_deferred_and_still_answers(monkeypatch):
+  monkeypatch.setattr(settings.webhook, "ENQUEUE_TIMEOUT", 0.05)
+  deferred = DeferredEnqueuer(FakePublisher(), interval_seconds=0.01)
+  service, publisher, _, _, _ = _make_service(deferred_enqueuer=deferred)
+  publisher.enqueue_hangs = True
+
+  started = asyncio.get_running_loop().time()
+  result = await service.enqueue(_payload())
+  elapsed = asyncio.get_running_loop().time() - started
+
+  # The alert is answered inside the deadline instead of waiting out nats-py's
+  # 5s PubAck timeout, and the envelope is kept for the background retry.
+  assert result["status"] == "deferred"
+  assert elapsed < 1.0
+  assert deferred.pending == 1
+
+
+async def test_deferred_enqueue_retries_until_jetstream_accepts():
+  publisher = FakePublisher()
+  publisher.enqueue_failures = 2
+  deferred = DeferredEnqueuer(publisher, interval_seconds=0.01)
+  await deferred.start()
+  try:
+    deferred.submit(strategy="strat", envelope={"payload": {}}, msg_id="mid-1")
+    await _wait_until(lambda: publisher.enqueued)
+  finally:
+    await deferred.stop()
+
+  assert len(publisher.enqueued) == 1
+  # Same id on every attempt, so an enqueue whose first ack was merely slow is
+  # dropped by JetStream rather than replayed into a second position.
+  assert publisher.enqueued[0]["msg_id"] == "mid-1"
+
+
+async def test_deferred_enqueue_gives_up_after_max_attempts():
+  publisher = FakePublisher()
+  publisher.enqueue_failures = 99
+  deferred = DeferredEnqueuer(publisher, interval_seconds=0.01, max_attempts=3)
+  await deferred.start()
+  try:
+    deferred.submit(strategy="strat", envelope={"payload": {}}, msg_id="mid-2")
+    await _wait_until(lambda: deferred.pending == 0 and publisher.enqueue_failures < 99)
+    await asyncio.sleep(0.05)
+  finally:
+    await deferred.stop()
+
+  # 99 - 3 attempts spent; the envelope is dropped rather than retried forever.
+  assert publisher.enqueue_failures == 96
+  assert publisher.enqueued == []
+
+
+async def test_enqueue_reports_503_when_the_backlog_is_full():
+  deferred = DeferredEnqueuer(FakePublisher(), interval_seconds=0.01, maxsize=1)
+  service, publisher, _, _, _ = _make_service(deferred_enqueuer=deferred)
+  publisher.enqueue_failures = 2
+
+  first = await service.enqueue(_payload())
+  assert first["status"] == "deferred"
+
+  with pytest.raises(SignalError) as exc:
+    await service.enqueue(_payload())
+  assert exc.value.status_code == 503
 
 
 # ── Handler path (JetStream consumer) ────────────────────────────────
 
 
 async def test_handle_enqueued_persists_publishes_notifies_and_marks_published():
-  service, publisher, notifier, signal_repo = _make_service()
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
   result = await service.handle_enqueued(payload=_payload())
 
   assert result["status"] == "accepted"
   assert len(signal_repo.logged) == 1
   assert len(publisher.published) == 1
   assert publisher.published[0].symbol == "XAUUSD"
-  assert len(notifier.messages) == 1
+  # The signal itself is handed to the broadcaster, not to the notifier —
+  # a signal is one line in a longer-lived cycle message.
+  assert len(broadcaster.calls) == 1
+  assert notifier.messages == []
   assert signal_repo.published_ids == [result["signal_id"]]
 
 
 async def test_handle_enqueued_flat_uses_publish_flat():
-  service, publisher, notifier, signal_repo = _make_service()
-  result = await service.handle_enqueued(payload=_payload(action=SignalActionEnum.FLAT))
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+  payload = _payload(action=SignalActionEnum.FLAT)
+  result = await service.handle_enqueued(payload=payload)
 
   assert result["status"] == "accepted"
-  # signal_id is threaded through so workers can dedup live FLAT against a
-  # retry_signals replay of the same signal.
+  # signal_id identifies this directive; signal_uxid ties it back to the cycle.
   assert publisher.flats == [
-    (result["signal_id"], "XAUUSD", datetime(2026, 1, 1, tzinfo=timezone.utc), "strat")
+    (
+      result["signal_id"],
+      payload.signal_uxid,
+      "XAUUSD",
+      datetime(2026, 1, 1, tzinfo=timezone.utc),
+      "strat",
+    )
   ]
   assert publisher.published == []
   assert signal_repo.published_ids == [result["signal_id"]]
 
 
 async def test_handle_enqueued_blocked_signal_notifies_and_drops():
-  service, publisher, notifier, signal_repo = _make_service(blocked=True)
+  service, publisher, notifier, broadcaster, signal_repo = _make_service(blocked=True)
   result = await service.handle_enqueued(payload=_payload())
   assert result["status"] == "blocked"
   # A blocked signal is not persisted and is not fanned out.
   assert signal_repo.logged == []
   assert publisher.published == []
   assert publisher.flats == []
-  # But the operator is still notified.
+  # But the operator is still notified — a *block* is an operational event, not
+  # a signal, so it stays on the notifier and never reaches the broadcaster.
   assert len(notifier.messages) == 1
+  assert broadcaster.calls == []
 
 
 async def test_handle_enqueued_persist_failure_raises_for_jetstream_redelivery():
-  service, _, _, _ = _make_service(signal_id="__persist_fail__")
+  service, _, _, _, _ = _make_service(signal_id="__persist_fail__")
   with pytest.raises(RuntimeError):
     await service.handle_enqueued(payload=_payload())
 
 
 async def test_handle_enqueued_publish_failure_records_attempt_and_returns():
-  service, publisher, notifier, signal_repo = _make_service(publish_fails=True)
+  service, publisher, notifier, broadcaster, signal_repo = _make_service(
+    publish_fails=True
+  )
   result = await service.handle_enqueued(payload=_payload())
   assert result["status"] == "retry_scheduled"
   assert len(signal_repo.failed_ids) == 1
-  # No notification / mark_published on a failed fan-out.
+  # No broadcast / mark_published on a failed fan-out — the signal never
+  # reached workers, so it must not appear in the cycle message either.
   assert notifier.messages == []
+  assert broadcaster.calls == []
   assert signal_repo.published_ids == []
   # Row is still QUEUED with one attempt consumed.
   row = signal_repo._rows[result["signal_id"]]
@@ -298,6 +438,7 @@ async def test_handle_enqueued_publish_failure_records_attempt_and_returns():
 async def test_retry_signal_replays_fanout_and_marks_published_on_success():
   publisher = FakePublisher()
   notifier = FakeNotifier()
+  broadcaster = FakeBroadcaster()
   signal_id = str(uuid.uuid4())
   signal_repo = FakeSignalRepository(
     existing={
@@ -313,6 +454,7 @@ async def test_retry_signal_replays_fanout_and_marks_published_on_success():
     setting_repository=FakeSettingRepository(),
     publisher=publisher,
     notifier=notifier,
+    broadcaster=broadcaster,
     webhook_secret="secret",
   )
 
@@ -320,12 +462,12 @@ async def test_retry_signal_replays_fanout_and_marks_published_on_success():
   assert result["status"] == "accepted"
   assert len(publisher.published) == 1
   assert signal_repo.published_ids == [signal_id]
-  # Second-attempt notification carries the Attempt marker.
-  assert "Attempt:" in notifier.messages[0]
+  # Second attempt overall: attempts=2 on entry → attempt number 2.
+  assert broadcaster.calls[0][1] == 2
 
 
 async def test_retry_signal_missing_row_returns_not_found():
-  service, _, _, _ = _make_service()
+  service, _, _, _, _ = _make_service()
   result = await service.retry_signal(str(uuid.uuid4()))
   assert result["status"] == "not_found"
 
@@ -378,63 +520,44 @@ async def test_retry_signal_publish_failure_records_attempt_failure():
   assert signal_repo.failed_ids == [signal_id]
 
 
-# ── Notification timezone wiring (handler path) ──────────────────────
+# ── Broadcaster wiring (handler + retry path) ────────────────────────
 
 
-async def test_signal_notification_uses_configured_timezone():
-  publisher = FakePublisher()
-  notifier = FakeNotifier()
-  setting_repo = FakeSettingRepository()
-  setting_repo.values[NOTIFICATION_TIMEZONE_KEY] = "-5"
-  service = SignalProcessingService(
-    signal_repository=FakeSignalRepository(),
-    setting_repository=setting_repo,
-    publisher=publisher,
-    notifier=notifier,
-    webhook_secret="secret",
-  )
-
-  await service.handle_enqueued(payload=_payload())
-
-  assert "Time: 2025-12-31 19:00:00 (UTC-5)" in notifier.messages[0]
+async def test_handle_enqueued_hands_payload_to_broadcaster():
+  """A fanned-out signal is fed to the broadcaster with the entry payload."""
+  service, _, _, broadcaster, _ = _make_service()
+  payload = _payload()
+  await service.handle_enqueued(payload=payload)
+  assert len(broadcaster.calls) == 1
+  fed_payload, attempt = broadcaster.calls[0]
+  assert fed_payload.signal_uxid == payload.signal_uxid
+  # First attempt has no marker — it is the default path.
+  assert attempt is None
 
 
-async def test_flat_notification_uses_configured_timezone():
-  publisher = FakePublisher()
-  notifier = FakeNotifier()
-  setting_repo = FakeSettingRepository()
-  setting_repo.values[NOTIFICATION_TIMEZONE_KEY] = "0"
-  service = SignalProcessingService(
-    signal_repository=FakeSignalRepository(),
-    setting_repository=setting_repo,
-    publisher=publisher,
-    notifier=notifier,
-    webhook_secret="secret",
-  )
-
+async def test_broadcaster_receives_flat_the_same_way():
+  service, _, _, broadcaster, _ = _make_service()
   await service.handle_enqueued(payload=_payload(action=SignalActionEnum.FLAT))
-
-  assert "Time: 2026-01-01 00:00:00 (UTC+0)" in notifier.messages[0]
-
-
-async def test_signal_notification_defaults_to_utc_plus_7_when_unset():
-  service, _, notifier, _ = _make_service()
-  await service.handle_enqueued(payload=_payload())
-  assert "Time: 2026-01-01 07:00:00 (UTC+7)" in notifier.messages[0]
+  assert len(broadcaster.calls) == 1
+  assert broadcaster.calls[0][0].position.action == SignalActionEnum.FLAT
 
 
-# ── Attempt line on notifications ────────────────────────────────────
+async def test_broadcast_failure_does_not_block_mark_published():
+  """A Telegram outage must never roll back a successful worker publish."""
+
+  class ExplodingBroadcaster:
+    async def broadcast(self, payload, *, attempt_number=None):
+      raise RuntimeError("telegram down")
+
+  service, _, _, _, signal_repo = _make_service(broadcaster=ExplodingBroadcaster())
+  result = await service.handle_enqueued(payload=_payload())
+  assert result["status"] == "accepted"
+  assert signal_repo.published_ids == [result["signal_id"]]
 
 
-async def test_first_attempt_notification_has_no_attempt_line():
-  service, _, notifier, _ = _make_service()
-  await service.handle_enqueued(payload=_payload())
-  assert "Attempt:" not in notifier.messages[0]
-
-
-async def test_second_and_third_attempts_show_attempt_line():
+async def test_second_and_third_attempts_carry_the_attempt_number():
   publisher = FakePublisher()
-  notifier = FakeNotifier()
+  broadcaster = FakeBroadcaster()
   # Two rows so we can retry each once with attempts=2 and attempts=1.
   raw = _payload().model_dump(mode="json")
   signal_repo = FakeSignalRepository()
@@ -456,7 +579,8 @@ async def test_second_and_third_attempts_show_attempt_line():
     signal_repository=signal_repo,
     setting_repository=FakeSettingRepository(),
     publisher=publisher,
-    notifier=notifier,
+    notifier=FakeNotifier(),
+    broadcaster=broadcaster,
     webhook_secret="secret",
   )
 
@@ -464,5 +588,22 @@ async def test_second_and_third_attempts_show_attempt_line():
   await service.retry_signal("22222222-2222-2222-2222-222222222222")
 
   # attempts=2 → 2nd attempt overall, attempts=1 → 3rd attempt overall.
-  assert "Attempt: <b>2</b>" in notifier.messages[0]
-  assert "Attempt: <b>3</b>" in notifier.messages[1]
+  assert [n for _, n in broadcaster.calls] == [2, 3]
+
+
+async def test_broadcaster_is_optional():
+  """Wiring the service without a broadcaster silently disables broadcasts."""
+  publisher = FakePublisher()
+  signal_repo = FakeSignalRepository()
+  service = SignalProcessingService(
+    signal_repository=signal_repo,
+    setting_repository=FakeSettingRepository(),
+    publisher=publisher,
+    notifier=FakeNotifier(),
+    webhook_secret="secret",
+  )
+  result = await service.handle_enqueued(payload=_payload())
+  # The signal still gets fanned out and marked published; the broadcast just
+  # never happens, which is what "no broadcaster" is supposed to mean.
+  assert result["status"] == "accepted"
+  assert signal_repo.published_ids == [result["signal_id"]]

@@ -12,18 +12,47 @@ broker's HTTP API and never touches the database or NATS directly.
 | **Enduser** | Anyone who links an account | Sends one of the account's link tokens (UUID) via `/start`; the bot records their Telegram id against that account. |
 | **Admin** | Telegram IDs in `TELEGRAM_ADMIN_IDS` | Router-level `IsAdmin` filter. Admins don't need a linked account. |
 
-Menus are role-aware via Telegram command **scopes**, re-applied on every
-startup (`setup_bot_commands`): endusers get the default menu, each admin id
-gets an extended chat-scoped menu.
+Menus are role-aware **and** link-aware, via Telegram command **scopes**
+(`app/services/menu.py`):
+
+| Who | Menu |
+| --- | ---- |
+| Not linked | `/start` — nothing else |
+| Linked | The full enduser menu |
+| Admin, not linked | `/start` + the `admin_` commands |
+| Admin, linked | Enduser menu + the `admin_` commands |
+
+Every user command needs an account behind it, so until one is linked the menu
+is trimmed to the command that gets the user somewhere: `/start`. `/help` is
+trimmed with the rest — it is a tour of commands they cannot run — and is
+refused alongside them (it sits on a router behind `AuthMiddleware`). Admin
+commands never needed a linked account, so an unlinked admin loses only the
+user half of their menu.
+
+`CommandMenuMiddleware` re-checks the sender's link status on **every** update,
+which is what keeps the menu honest after a change the bot never saw in that
+chat — an `/admin_rotate` that unlinked the user, an `/admin_linkaccount` that
+linked them. Linking and `/unlink` also re-apply the menu on the spot, so it
+changes with the same tap instead of on the next message. Two things keep that
+cheap: the menu last applied to each chat is remembered in-process (no Telegram
+call when nothing changed), and the account resolved for the menu is passed on
+to `AuthMiddleware` (no second broker call). A broker that can't be reached
+leaves the menu alone — an outage is not evidence that a user unlinked.
+
+On startup the **default** scope — what every chat the bot has never spoken to
+falls back to — is set to the `/start`-only menu, and each admin's own menu is
+refreshed.
 
 > An admin must `/start` the bot once before Telegram will accept a chat-scoped
-> menu for them ("chat not found" is caught and logged; the menu applies on the
-> next startup after their first message).
+> menu for them ("chat not found" is caught and logged; nothing is cached, so
+> the next update after their first message applies it).
 
 ### Enduser commands
 
-`/start` (link), `/trades`, `/flat`, `/prevent`, `/allow`, `/status`,
-`/myaccounts`, `/link`, `/switch`, `/unlink`, `/help`.
+`/start` (link), `/status`, `/trades`, `/flat`, `/prevent`, `/allow`,
+`/myaccounts`, `/link`, `/switch`, `/unlink`, `/subscribe`, `/unsubscribe`,
+`/help` — all but `/start` require a linked account, and are hidden until
+there is one.
 
 `FLAT`/`PREVENT`/`ALLOW` each require a confirmation tap.
 
@@ -36,13 +65,39 @@ One linked account is **active** at a time; `/status`, `/trades`, `/flat`,
 accounts, `/link` adds one, and `/switch` lists them with a button per account
 to change the active one.
 
-`/subscribe` opts you in to a DM whenever one of your linked accounts **completes
-a trade**; `/unsubscribe` turns it off. The DM is sent by this same bot, so it
-lands in your existing chat. This is a per-user preference spanning every account
-you hold. "Completes" means any terminal close — a normal TP/SL close **and** an
-admin `/admin_flat`, since the position is over either way and you did not close
-it yourself. Each DM carries the account, gateway, symbol, action, status, close
-price, quantity, balance and PnL.
+`/status` also shows an **Open positions** line — the number of trades
+currently running (``is_running``) on the active account — and, whenever
+that count is above zero, the same trade table `/trades` renders, filtered
+to just those open positions. Backed by `GET
+/v1/telegram/{telegram_user_id}/positions`.
+
+### Live trade cards
+
+`/subscribe` opts you in to a message the moment one of your linked accounts
+**opens a trade**; `/unsubscribe` turns it off. This is a per-user preference
+spanning every account you hold.
+
+The message is a **card**, not an alert: it is sent by this same bot into your
+existing chat and then **edits itself** as the trade moves — `Opened` →
+`Partially closed` (TP1) → `Closed` / `Flatted` / `Rejected` — so you end up with
+one message per trade rather than a stream of them. It shows symbol, direction,
+status, price, quantity, SL/TP1/TP2, balance and running PnL.
+
+While the trade is still running the card carries two buttons:
+
+| Button | What it does |
+| ------- | --------------------------------------- |
+| 🔍 **Detail** | Expands the card with strategy, account, market/gateway, leverage, risk, reference id and any worker comment. ⬆️ **Summary** collapses it again. |
+| 🛑 **Exit** | Asks to confirm, then closes the trade — a FLAT scoped to that trade's strategy and symbol. The card notes that the exit is in flight and updates itself once the worker reports the close. |
+
+Once the trade reaches a terminal status the card is updated one last time and
+the buttons disappear — that final state is your completed-trade notification.
+"Terminal" covers a normal TP/SL close, an admin `/admin_flat`, and a worker
+rejection. Buttons keep working across an account switch, since they act on the
+trade rather than on whichever account is active.
+
+A card that was already posted keeps updating even after you `/unsubscribe`;
+the opt-in only decides whether *new* trades get one.
 
 > ⚠️ `PREVENT`/`ALLOW` publish a `BLOCK_SIGNAL`/`ALLOW_SIGNAL` admin command
 > over NATS (via the broker). The **worker** must be updated to honor it —
@@ -63,12 +118,15 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_accounts` | Accounts + linked-user count + link token (spoiler), then a second table of row UUIDs | `GET /v1/accounts` |
 | `/admin_newaccount` | Register an account (pick market → gateway → type id) | `POST /admin/accounts` |
 | `/admin_trades [account_id]` | Trades of any account (picker if no arg) | `GET /v1/{account_id}/trades` |
-| `/admin_flat [account_id]` | FLAT everything, or one account (confirm) | `POST /admin/flat` |
+| `/admin_flat [account_id]` | Bare: walk strategy → market → gateway pickers (each with **All**) then confirm; with `account_id`: one account (confirm) | `GET /admin/strategies`, `POST /admin/flat` |
 | `/admin_rotate [account_id]` | Rotate a link token — revokes old **and unlinks every linked user** (confirm) | `POST /admin/accounts/{id}/link-token/rotate` |
 | `/admin_linkaccount` | Bind a Telegram user to an account directly (pick account → type user id) | `POST /admin/accounts/{uuid}/link-telegram` |
 | `/admin_invite_url [code]` | One-tap invite link for an account (picker if no arg) | `GET /v1/accounts` (picker only) |
 | `/admin_settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
 | `/admin_magicmap [json]` | View + replace the strategy → magic-number map (paste JSON, or pass it inline) | `GET` + `POST /admin/settings/strategy-magic-map` |
+| `/admin_public_chats` | View + replace the chats the **public** signal broadcast goes to (comma-separated; `-` turns it off) | `GET` + `POST /admin/settings/public-broadcast-chat-ids` |
+| `/admin_private_reply_notify [enable\|disable]` | View, or set whether the **private** broadcast posts a reply notice on each new action (default enabled) | `GET` + `POST /admin/settings/private-reply-notify` |
+| `/admin_public_reply_notify [enable\|disable]` | View, or set whether the **public** broadcast posts a reply notice on each new action (default enabled) | `GET` + `POST /admin/settings/public-reply-notify` |
 
 ### Link-token semantics
 
@@ -116,7 +174,7 @@ convenience, not a second security model, so share it as privately as the token.
 
 Every list command replies with a monospace table (a Telegram `<pre>` block)
 built by `render_table` in `app/utils/table.py` — `/myaccounts`, `/switch`,
-`/trades`, `/atrades`:
+`/trades`, `/atrades`, and `/status` (when there are open positions to show):
 
 ```text
 📊 Trades (1–3 / 20) · times in UTC+7
@@ -154,7 +212,7 @@ to UTC+7, the broker's own default.
 ```
 app/
 ├── __main__.py        # Dispatcher, polling, graceful shutdown
-├── commands.py        # USER/ADMIN command lists + scoped setup_bot_commands
+├── commands.py        # START-only/USER/ADMIN command lists + menu_for()
 ├── config.py          # BotSettings (pydantic-settings; admin_ids)
 ├── constants.py       # markets + gateways valid per market
 ├── emojis.py          # named emoji constants (no raw glyphs in source)
@@ -162,7 +220,9 @@ app/
 ├── states.py          # FSM: LinkAccount, CreateAccount
 ├── filters/           # is_admin.py — IsAdmin router gate
 ├── services/          # broker_client.py — httpx client (enduser + admin calls)
-├── middlewares/       # deps.py (DI), auth.py (require-linked guard)
+│                      # menu.py — applies the link-aware command menu
+├── middlewares/       # deps.py (DI), auth.py (require-linked guard),
+│                      # menu.py (re-check link status on every update)
 ├── handlers/          # start, link, trades, commands, account, admin
 ├── keyboards/         # inline keyboards (confirm, pagination, pickers, settings)
 ├── presenters/        # render API payloads → Telegram HTML

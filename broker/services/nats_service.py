@@ -31,18 +31,20 @@ inbound consumption.
   reply. When a message carries a reply inbox (``msg.reply``), the broker
   answers *that one worker* directly with **exactly one** message:
 
-  * settings OK               → ``WORKER_CONNECTED_ACK``
-  * settings missing/invalid  → ``WORKER_CONNECTED_ERROR`` (with a reason)
+  * config OK                     → ``WORKER_CONNECTED_ACK``
+  * crypto config missing/invalid → ``WORKER_CONNECTED_ERROR`` (with a reason)
 
   One and only one, because that is all a reply inbox accepts: ``request()``
   resolves its future (or, ``old_style``, auto-unsubscribes at ``max_msgs=1``)
   on the first reply and silently drops anything after it. So the ACK carries
   the worker's entire initial configuration in a single payload — the
   ``strategy_magic_map`` filtered to the strategies it announced, the
-  ``retry_signals`` replay, and (crypto only) the ``crypto_leverage_init``
-  block. A crypto worker whose settings are missing or invalid gets the ERROR
-  instead: it is not told the handshake succeeded when the config it needs
-  could not be built.
+  ``retry_signals`` replay, the ``settings`` its owner set from the bot (the
+  ``accounts.settings`` blob, e.g. ``signal_blocked`` from /prevent), and
+  (crypto only) the ``crypto_leverage_init`` block. A crypto worker whose
+  broker-wide crypto settings are missing or invalid gets the ERROR instead:
+  it is not told the handshake succeeded when the config it needs could not be
+  built.
 
   Because every path replies, a worker's ``request`` always resolves instead
   of silently hanging, and the worker can retry on timeout (e.g. if the
@@ -64,7 +66,10 @@ inbound consumption.
   rather than running them concurrently. The two crypto BrokerSetting reads
   are combined into a single ``get_many`` query and cached briefly
   (``CRYPTO_SETTINGS_CACHE_TTL_SECONDS``) so that burst doesn't turn into one
-  DB round trip per worker.
+  DB round trip per worker. The per-account ``settings`` read is deliberately
+  left uncached — it is scoped to one account, so caching it would only ever
+  serve the same worker reconnecting twice, at the cost of replying with a
+  block that a command run in the meantime has already invalidated.
 """
 
 from __future__ import annotations
@@ -75,9 +80,11 @@ from datetime import datetime
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-  from broker.services.trade_broadcast_service import TradeBroadcastService
+  from broker.services.broadcast_service import SignalBroadcastService
+  from broker.services.trade_card_service import TradeCardService
 
 from nats.aio.subscription import Subscription
+from nats.js import api
 from pydantic import ValidationError
 
 from broker.constants import (
@@ -97,7 +104,11 @@ from broker.interfaces import (
 )
 from broker.logger import get_logger
 from broker.nats import JETSTREAM_SIGNAL_SUBJECT_PREFIX, NatsClient, nats_client
-from broker.schemas.account_schema import MarketTypeEnum, decompose_worker_id
+from broker.schemas.account_schema import (
+  AccountSettings,
+  MarketTypeEnum,
+  decompose_worker_id,
+)
 from broker.schemas.core import MarketEnum, SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminSignal,
@@ -136,6 +147,36 @@ def _jetstream_subject(strategy: str) -> str:
 # so a short TTL is a deliberate trade-off between freshness and load: an
 # admin update reaches new handshakes within CRYPTO_SETTINGS_CACHE_TTL_SECONDS.
 CRYPTO_SETTINGS_CACHE_TTL_SECONDS = 30.0
+
+
+def _parse_account_settings(raw: object, account_id: str) -> AccountSettings:
+  """Shape an ``accounts.settings`` blob into the ACK's ``settings`` block.
+
+  Anything unusable — a row that predates the column, a hand-edited value of
+  the wrong type, a key whose value doesn't fit its field — falls back to the
+  schema defaults rather than raising: a bad blob must not cost the worker its
+  whole configuration, and "no settings" is exactly what the defaults mean.
+  Unknown keys are dropped by the model itself (``extra="ignore"``); they stay
+  in the row, since writes merge rather than replace.
+  """
+  if not isinstance(raw, dict):
+    if raw is not None:
+      log.warning(
+        "accounts.settings for account_id=%s is not an object, got %s — using defaults",
+        account_id,
+        type(raw).__name__,
+      )
+    return AccountSettings()
+  try:
+    return AccountSettings(**raw)
+  except ValidationError as exc:
+    log.error(
+      "accounts.settings for account_id=%s is invalid: %s | raw=%r — using defaults",
+      account_id,
+      exc,
+      raw,
+    )
+    return AccountSettings()
 
 
 def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
@@ -180,20 +221,25 @@ def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
 class TradeEventConsumer:
   """Consumes TRADE events from NATS and persists them via a TradeRepository.
 
-  When a ``TradeBroadcastService`` is injected, each persisted event is also
-  handed to it so a completed (closed) trade is DM-ed to its subscribed
-  owners. The broadcast is best-effort and never blocks persistence.
+  When a ``TradeCardService`` is injected, each persisted event is also handed
+  to it so the trade's live Telegram card is posted or refreshed for every
+  subscribed owner. When a ``SignalBroadcastService`` is injected, the event is recorded
+  against the signal's broadcast cycle too, so the public channel message shows
+  which workers executed the signal and where each of them stands. Both are
+  best-effort and never block persistence.
   """
 
   def __init__(
     self,
     trade_repository: TradeRepository,
     connection: NatsClient | None = None,
-    broadcast_service: "TradeBroadcastService | None" = None,
+    card_service: "TradeCardService | None" = None,
+    signal_broadcast_service: "SignalBroadcastService | None" = None,
   ) -> None:
     self._repo = trade_repository
     self._conn = connection or nats_client
-    self._broadcast = broadcast_service
+    self._cards = card_service
+    self._signal_broadcast = signal_broadcast_service
     self._sub: Optional[Subscription] = None
 
   async def start(self) -> None:
@@ -238,20 +284,28 @@ class TradeEventConsumer:
       log.exception("Failed to apply TRADE event: %s", exc)
       return
 
-    if self._broadcast is not None:
+    if self._cards is not None:
       try:
-        await self._broadcast.maybe_broadcast(event, trade)
+        await self._cards.handle_event(event, trade)
       except Exception as exc:
-        # Broadcasting must never break TRADE consumption.
-        log.exception("Failed to broadcast completed trade: %s", exc)
+        # Card delivery must never break TRADE consumption.
+        log.exception("Failed to queue trade card update: %s", exc)
+
+    if self._signal_broadcast is not None:
+      try:
+        await self._signal_broadcast.record_execution(event, trade)
+      except Exception as exc:
+        # Same rule: the execution table is a nicety on top of the TRADE row.
+        log.exception("Failed to record execution on the broadcast cycle: %s", exc)
 
 
 class SystemEventConsumer:
   """Consumes SYSTEM events from NATS and answers the WORKER_CONNECTED handshake.
 
   Answers with a single WORKER_CONNECTED_ACK carrying the worker's whole initial
-  configuration (strategy magic map, retry replay, and the crypto leverage block
-  for crypto workers), because a reply inbox only accepts one message.
+  configuration (strategy magic map, retry replay, the account's own settings,
+  and the crypto leverage block for crypto workers), because a reply inbox only
+  accepts one message.
   """
 
   SUBJECT = PublishTopicEnum.SYSTEM
@@ -367,12 +421,14 @@ class SystemEventConsumer:
 
     magic_map = await self._build_strategy_magic_map(event.strategies)
     retry_signals = await self._build_retry_signals(event.account_id, event.strategies)
+    account_settings = await self._build_account_settings(event)
 
     await self._reply_ack(
       reply_to,
       event.account_id,
       strategy_magic_map=magic_map,
       retry_signals=retry_signals,
+      settings=account_settings,
       crypto_leverage_init=crypto_leverage,
     )
 
@@ -402,6 +458,35 @@ class SystemEventConsumer:
         account_id,
         exc,
       )
+
+  async def _build_account_settings(
+    self, event: SystemWorkerConnectedSignal
+  ) -> AccountSettings:
+    """Return what the account's owner set from the bot (``/prevent`` & co.).
+
+    Read straight from the row on every handshake — deliberately *not* cached
+    like the broker-wide settings: this one is per account, so a cache would
+    only ever help a worker that reconnects twice in a row, and would be worth
+    a stale block the moment a user runs a command mid-storm.
+
+    Not cached also means not fatal: a failed read logs and hands the worker
+    the schema defaults, same as an account that has never run a command.
+    """
+    account_id = decompose_worker_id(event.account_id, event.market, event.gateway)
+    try:
+      raw = await self._accounts.get_settings(
+        account_id=account_id,
+        market=MarketTypeEnum(event.market),
+        gateway=event.gateway,
+      )
+    except Exception as exc:
+      log.exception(
+        "SYSTEM settings lookup failed account_id=%s: %s — using defaults",
+        account_id,
+        exc,
+      )
+      return AccountSettings()
+    return _parse_account_settings(raw, account_id)
 
   async def _build_strategy_magic_map(self, strategies: list[str]) -> dict[str, int]:
     """Return the strategy → magic-number map filtered to *strategies*.
@@ -506,6 +591,9 @@ class SystemEventConsumer:
         continue
       try:
         payload = WebhookPayload(**raw_payload)
+        # Replaying with the persisted row id is what makes the replay
+        # recognisable: the worker sees the same signal_id it saw live and
+        # drops the duplicate. The cycle id rides along from the payload.
         signals.append(parse_signal(payload, signal_id))
       except Exception as exc:
         # A single bad row must not derail the replay for the rest.
@@ -598,6 +686,7 @@ class SystemEventConsumer:
     *,
     strategy_magic_map: dict[str, int],
     retry_signals: list[TradingSignal],
+    settings: AccountSettings,
     crypto_leverage_init: Optional[CryptoLeverageConfig] = None,
   ) -> None:
     """Answer the handshake with the worker's complete initial configuration.
@@ -612,6 +701,7 @@ class SystemEventConsumer:
         account_id=account_id,
         strategy_magic_map=strategy_magic_map,
         retry_signals=retry_signals,
+        settings=settings,
         crypto_leverage_init=crypto_leverage_init,
       )
     except Exception as exc:
@@ -646,7 +736,13 @@ class NatsPublisher:
     self._conn = connection or nats_client
 
   async def publish_webhook_event(
-    self, *, signal_id: str, strategy: str, envelope: dict
+    self,
+    *,
+    signal_id: str,
+    strategy: str,
+    envelope: dict,
+    timeout: float | None = None,
+    msg_id: str | None = None,
   ) -> None:
     """Persist a raw webhook envelope to JetStream so it can be handled offline.
 
@@ -655,15 +751,32 @@ class NatsPublisher:
     consumer. TradingView therefore gets its 202 back as soon as the message is
     durably queued, closing the ``server closed the connection unexpectedly``
     failure mode that came from doing the whole pipeline inline.
+
+    *timeout* bounds the wait for the PubAck (nats-py's own default is 5s —
+    longer than TradingView waits for the whole request), and *msg_id* is sent
+    as ``Nats-Msg-Id`` so JetStream drops a re-enqueue of an envelope whose
+    first ack was merely slow instead of storing the alert twice.
+
+    Raises ``ConnectionError`` when the client has no live connection: nats-py
+    would otherwise buffer the write and let the caller wait out the full
+    timeout for an ack that cannot arrive.
     """
+    if not self._conn.is_connected:
+      raise ConnectionError("NATS connection is not established")
+
     subject = _jetstream_subject(strategy)
     payload = json.dumps(envelope, default=str).encode()
-    ack = await self._conn.js.publish(subject, payload)
+    headers = {api.Header.MSG_ID.value: msg_id} if msg_id else None
+    ack = await self._conn.js.publish(
+      subject, payload, timeout=timeout, headers=headers
+    )
     log.info(
-      "Enqueued [%s] signal_id=%s stream_seq=%s",
+      "Enqueued [%s] signal_id=%s msg_id=%s stream_seq=%s duplicate=%s",
       subject,
       signal_id,
+      msg_id,
       getattr(ack, "seq", None),
+      getattr(ack, "duplicate", False),
     )
 
   async def publish(self, signal: TradingSignal) -> None:
@@ -689,17 +802,20 @@ class NatsPublisher:
     symbol: str,
     timestamp: datetime,
     strategy: str,
+    signal_uxid: str | None = None,
   ) -> None:
     """Broadcast a FLAT (close-all) directive on the strategy subject.
 
-    Carries ``signal_id`` — same field the LONG/SHORT/TP payloads (a full
-    ``TradingSignal``) already do — so a worker seeing this signal live and
-    then again inside a WORKER_CONNECTED_ACK's ``retry_signals`` can de-duplicate by
-    id instead of by guessing on content.
+    Carries both ids the LONG/SHORT/TP payloads (a full ``TradingSignal``)
+    carry, and for the same reasons: ``signal_id`` is unique per signal, so a
+    worker seeing this directive live and then again inside a
+    WORKER_CONNECTED_ACK's ``retry_signals`` de-duplicates by id instead of
+    guessing on content; ``signal_uxid`` names the trade cycle being closed.
     """
     payload = json.dumps(
       {
         "signal_id": signal_id,
+        "signal_uxid": signal_uxid,
         "strategy": strategy,
         "timestamp": timestamp.isoformat(),
         "action": SignalActionEnum.FLAT.value,
@@ -708,9 +824,10 @@ class NatsPublisher:
     ).encode()
     await self._conn.nc.publish(strategy, payload)
     log.info(
-      "Published [%s] FLAT directive signal_id=%s symbol=%s",
+      "Published [%s] FLAT directive signal_id=%s signal_uxid=%s symbol=%s",
       strategy,
       signal_id,
+      signal_uxid,
       symbol,
     )
 
@@ -731,7 +848,8 @@ class NatsPublisher:
     payload = signal.model_dump_json().encode()
     await self._conn.nc.publish(subject, payload)
     log.info(
-      "Published [%s] action=%s strategy=%s symbol=%s account_id=%s market=%s gateway=%s",
+      "Published [%s] action=%s strategy=%s symbol=%s account_id=%s market=%s "
+      "gateway=%s ref_id=%s",
       subject,
       signal.action,
       signal.strategy,
@@ -739,6 +857,7 @@ class NatsPublisher:
       signal.account_id,
       signal.market,
       signal.gateway,
+      signal.ref_id,
     )
 
   async def publish_system_signal(
@@ -767,8 +886,8 @@ class NatsPublisher:
 
   async def publish_system_ack(self, *, subject: str | None = None, **kwargs) -> None:
     """Answer a WORKER_CONNECTED handshake with the worker's whole initial
-    configuration — magic map, signal replay and (crypto only) leverage config —
-    in the one message a NATS reply inbox accepts.
+    configuration — magic map, signal replay, account settings and (crypto
+    only) leverage config — in the one message a NATS reply inbox accepts.
 
     Delivered on *subject* (the request's reply inbox) when set, so only the
     worker that asked sees its own configuration; otherwise broadcast on the

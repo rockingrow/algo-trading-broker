@@ -9,6 +9,9 @@ from broker.constants import (
   CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_INCLUDE_SIGNAL_RAW,
   NOTIFICATION_TIMEZONE_KEY,
+  PRIVATE_REPLY_NOTIFY_KEY,
+  PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_REPLY_NOTIFY_KEY,
   SIGNAL_BLOCKED,
   SILENT_SIGNAL,
   STRATEGY_MAGIC_MAP_KEY,
@@ -24,12 +27,14 @@ from broker.providers import (
   get_admin_notifier,
   get_publisher,
   get_setting_repository,
+  get_trade_repository,
 )
 from broker.interfaces import (
   AccountRepository,
   Notifier,
   SettingRepository,
   SignalPublisher,
+  TradeRepository,
 )
 from broker.schemas.account_schema import (
   AccountResponse,
@@ -44,6 +49,8 @@ from broker.schemas.admin_schema import (
   CryptoAllowedSymbolRequest,
   CryptoMaxLeverageRequest,
   NotificationTimezoneRequest,
+  PublicBroadcastChatIdsRequest,
+  ReplyNotifyRequest,
   RotateTokenResponse,
   SettingToggleResponse,
   SettingValueResponse,
@@ -59,6 +66,60 @@ from broker.openapi import AUTH_RESPONSES
 from broker.security.ensure_api_key import ensure_api_key
 
 log = get_logger(__name__)
+
+
+def _normalise_chat_ids(raw: str | None) -> list[str]:
+  """De-duplicated, whitespace-trimmed chat ids for the public broadcast setting.
+
+  Callers pass an already-comma-joined string (either from the request body or
+  the stored setting), and get back the ordered entries that survive: blanks
+  and the ``"-"`` placeholder are dropped so a trailing comma never turns into
+  a bogus target. Kept local to this endpoint because it is the only place we
+  round-trip the setting through the ``list[str]`` shape the admin API uses.
+  """
+  if not raw:
+    return []
+  ids = [part.strip() for part in raw.split(",")]
+  return list(dict.fromkeys(i for i in ids if i and i != "-"))
+
+
+async def _reply_notify_state(
+  setting_repo: SettingRepository, key: str
+) -> SettingToggleResponse:
+  """Current enabled/disabled state of a reply-notify setting.
+
+  Unlike the toggles above (unset = disabled), these default to *enabled* —
+  the reply notice is on unless an admin has explicitly turned it off.
+  """
+  enabled = await setting_repo.get(key) != "0"
+  state_label = "ENABLED" if enabled else "DISABLED"
+  return SettingToggleResponse(
+    setting=key, value="1" if enabled else "0", state=state_label
+  )
+
+
+async def _set_reply_notify(
+  setting_repo: SettingRepository,
+  notifier: Notifier,
+  key: str,
+  enabled: bool,
+) -> SettingToggleResponse:
+  value = "1" if enabled else "0"
+  ok = await setting_repo.set(key, value)
+  if not ok:
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="Failed to update broker setting",
+    )
+
+  state_label = "ENABLED" if enabled else "DISABLED"
+  log.info("%s set -> %s", key, value)
+  await notifier.send_message(
+    f"{em.GEAR} <b>Broker setting changed</b>\n"
+    f"Setting: <code>{key}</code>\n"
+    f"Reply notify: <b>{state_label}</b>\n"
+  )
+  return SettingToggleResponse(setting=key, value=value, state=state_label)
 
 
 async def _push_crypto_leverage_init(
@@ -334,6 +395,132 @@ def get_admin_router() -> APIRouter:
     return SettingValueResponse(setting=CRYPTO_ALLOWED_SYMBOL_KEY, value=value)
 
   @router.get(
+    "/settings/public-broadcast-chat-ids",
+    tags=["settings"],
+    summary="Get the public signal-broadcast chats",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_public_broadcast_chat_ids(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Current PUBLIC_BROADCAST_CHAT_IDS_KEY value (comma-separated, empty when
+    the public broadcast is off)."""
+    value = await setting_repo.get(PUBLIC_BROADCAST_CHAT_IDS_KEY) or ""
+    return SettingValueResponse(setting=PUBLIC_BROADCAST_CHAT_IDS_KEY, value=value)
+
+  @router.post(
+    "/settings/public-broadcast-chat-ids",
+    tags=["settings"],
+    summary="Set the public signal-broadcast chats",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_public_broadcast_chat_ids(
+    body: PublicBroadcastChatIdsRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingValueResponse:
+    """Replace the chats the public signal broadcast is delivered to.
+
+    Unlike the private audience (an env var, a deployment concern), the public
+    one is edited at runtime — from here or the bot's /admin_public_chats — so
+    it lives in ``broker_settings``. An empty list is accepted on purpose: it
+    is how the public broadcast is turned off.
+
+    Chats already holding a message keep it; the dispatcher simply stops
+    editing a chat once it is no longer a target, and a chat added mid-trade
+    gets the full cycle history on the next signal.
+    """
+    value = ",".join(_normalise_chat_ids(",".join(body.chat_ids)))
+
+    ok = await setting_repo.set(PUBLIC_BROADCAST_CHAT_IDS_KEY, value)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broker setting",
+      )
+
+    log.info("%s updated -> %s", PUBLIC_BROADCAST_CHAT_IDS_KEY, value)
+    await notifier.send_message(
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
+      f"Setting: <code>{PUBLIC_BROADCAST_CHAT_IDS_KEY}</code>\n"
+      f"Chats: <b>{value or '(none — public broadcast off)'}</b>\n"
+    )
+
+    return SettingValueResponse(setting=PUBLIC_BROADCAST_CHAT_IDS_KEY, value=value)
+
+  @router.get(
+    "/settings/private-reply-notify",
+    tags=["settings"],
+    summary="Get whether private broadcast events get a reply notice",
+    response_model=SettingToggleResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_private_reply_notify(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingToggleResponse:
+    """Current PRIVATE_REPLY_NOTIFY_KEY state (unset = ENABLED)."""
+    return await _reply_notify_state(setting_repo, PRIVATE_REPLY_NOTIFY_KEY)
+
+  @router.post(
+    "/settings/private-reply-notify",
+    tags=["settings"],
+    summary="Set whether private broadcast events get a reply notice",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_private_reply_notify(
+    body: ReplyNotifyRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingToggleResponse:
+    """Set PRIVATE_REPLY_NOTIFY_KEY. When disabled, the private broadcast
+    message keeps being edited in place — only the reply notice under it, the
+    thing that actually notifies a reader, is silenced."""
+    return await _set_reply_notify(
+      setting_repo, notifier, PRIVATE_REPLY_NOTIFY_KEY, body.enabled
+    )
+
+  @router.get(
+    "/settings/public-reply-notify",
+    tags=["settings"],
+    summary="Get whether public broadcast events get a reply notice",
+    response_model=SettingToggleResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_public_reply_notify(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingToggleResponse:
+    """Current PUBLIC_REPLY_NOTIFY_KEY state (unset = ENABLED)."""
+    return await _reply_notify_state(setting_repo, PUBLIC_REPLY_NOTIFY_KEY)
+
+  @router.post(
+    "/settings/public-reply-notify",
+    tags=["settings"],
+    summary="Set whether public broadcast events get a reply notice",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_public_reply_notify(
+    body: ReplyNotifyRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingToggleResponse:
+    """Set PUBLIC_REPLY_NOTIFY_KEY. When disabled, the public broadcast
+    message keeps being edited in place — only the reply notice under it, the
+    thing that actually notifies a reader, is silenced."""
+    return await _set_reply_notify(
+      setting_repo, notifier, PUBLIC_REPLY_NOTIFY_KEY, body.enabled
+    )
+
+  @router.get(
     "/settings/crypto-max-leverage",
     tags=["settings"],
     summary="Get the default crypto leverage",
@@ -489,6 +676,23 @@ def get_admin_router() -> APIRouter:
     )
 
     return SettingValueResponse(setting=NOTIFICATION_TIMEZONE_KEY, value=value)
+
+  @router.get(
+    "/strategies",
+    tags=["trading"],
+    summary="List known strategy names",
+    description=(
+      "Return the distinct ``strategy`` values the broker has ever recorded on "
+      "a trade, alphabetically. Backs the Telegram admin FLAT strategy picker — "
+      "an empty list simply means no trades have been observed yet."
+    ),
+    response_model=list[str],
+    responses=AUTH_RESPONSES,
+  )
+  async def list_strategies(
+    trade_repo: TradeRepository = Depends(get_trade_repository),
+  ) -> list[str]:
+    return await trade_repo.list_distinct_strategies()
 
   @router.post(
     "/flat",

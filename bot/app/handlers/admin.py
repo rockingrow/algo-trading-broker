@@ -14,6 +14,10 @@ String(50) and never contains ':'):
                                 the broker now requires market + gateway
                                 alongside it, see admin_flat's docstring)
 - aflatc:{index}               disambiguation picker → picks aflat_candidates[index]
+- afls:{index|a}               /aflat scope picker → strategy (index into FSM
+                                aflat_strategies, or "a" for All)
+- aflm:{market|a}              /aflat scope picker → market ("a" for All)
+- aflg:{gateway|a}             /aflat scope picker → gateway ("a" for All)
 - arotp:{account_id}           picker → rotate confirm
 - arot:{account_id}:ok|no      rotate confirm
 - aset:{slug}                  toggle a broker setting
@@ -29,7 +33,7 @@ from __future__ import annotations
 
 import html
 import json
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -46,10 +50,12 @@ from app.constants import (
 )
 from app.filters.is_admin import IsAdmin
 from app.presenters import messages
+from app.services.menu import CommandMenu
 from app.states import (
   AdminCryptoAllowedSymbol,
   AdminCryptoMaxLeverage,
   AdminLinkAccount,
+  AdminPublicBroadcastChats,
   CreateAccount,
   SetStrategyMagicMap,
 )
@@ -175,20 +181,74 @@ async def cb_atrades_page(call: CallbackQuery, broker_admin: BrokerClientAdmin) 
 
 
 # ── /aflat ──────────────────────────────────────────────────────────
-# account_id alone no longer identifies a single account (the broker now
-# requires market + gateway alongside it — see FlatRequest's docstring),
-# so scoping to one account resolves those from the live account list first.
-# Because that resolved target can't safely fit in callback_data (well under
-# 64 bytes for a worst-case 50-char account_id + market/gateway), it's kept
-# in FSM data instead; only the confirm/cancel decision travels on the wire.
+# Two entry shapes:
+#   /aflat                → sequential scope pickers (strategy → market →
+#                            gateway → confirm), each carrying an "All" row so
+#                            the admin can stay broad or narrow at will.
+#   /aflat <account_id>   → resolve one account and confirm. account_id alone
+#                            no longer identifies a single account (the broker
+#                            now requires market + gateway alongside it — see
+#                            FlatRequest's docstring), so the live account list
+#                            is fetched first to bind market/gateway to the
+#                            resolved target, and — because that target can't
+#                            safely fit in callback_data — it lives in FSM
+#                            data; only confirm/cancel travels on the wire.
 
 
-def _aflat_confirm_text(account: dict) -> str:
+def _aflat_scope_text(scope: dict) -> str:
+  parts = []
+  strat = scope.get("strategy")
+  parts.append(
+    f"strategy=<code>{html.escape(str(strat))}</code>"
+    if strat
+    else "strategy=<b>ALL</b>"
+  )
+  market = scope.get("market")
+  parts.append(
+    f"market=<b>{html.escape(str(market))}</b>" if market else "market=<b>ALL</b>"
+  )
+  gateway = scope.get("gateway")
+  parts.append(
+    f"gateway=<b>{html.escape(str(gateway))}</b>" if gateway else "gateway=<b>ALL</b>"
+  )
+  return " · ".join(parts)
+
+
+def _aflat_target_confirm_text(account: dict) -> str:
   return (
     f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for account "
     f"<code>{html.escape(str(account.get('account_id')))}</code> "
     f"({html.escape(str(account.get('market')))}/"
     f"{html.escape(str(account.get('gateway')))})?"
+  )
+
+
+def _aflat_scope_confirm_text(scope: dict) -> str:
+  return (
+    f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) with scope:\n"
+    f"{_aflat_scope_text(scope)}"
+  )
+
+
+async def _aflat_start_scope_flow(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  """Kick off the strategy → market → gateway → confirm picker sequence.
+
+  The strategy list is fetched from the broker and stashed in FSM data so the
+  strategy callback can safely reference it by index (raw names would risk
+  Telegram's 64-byte callback_data cap and echo user text back on the wire).
+  A failed fetch degrades to an empty list; the admin can still pick "All"."""
+  strategies = await broker_admin.admin_list_strategies() or []
+  await state.update_data(
+    aflat_target="*",
+    aflat_candidates=None,
+    aflat_strategies=strategies,
+    aflat_scope={"strategy": None, "market": None, "gateway": None},
+  )
+  await message.answer(
+    f"{emojis.WARNING} <b>FLAT</b> scope — pick a strategy (or All):",
+    reply_markup=inline.aflat_strategy_picker(strategies),
   )
 
 
@@ -201,11 +261,7 @@ async def cmd_aflat(
 ) -> None:
   arg = (command.args or "").strip()
   if not arg:
-    await state.update_data(aflat_target="*", aflat_candidates=None)
-    await message.answer(
-      f"{emojis.WARNING} Confirm <b>FLAT</b> (close positions) for <b>ALL</b> accounts?",
-      reply_markup=inline.confirm_keyboard("aflat"),
-    )
+    await _aflat_start_scope_flow(message, state, broker_admin)
     return
 
   accounts = await broker_admin.admin_list_accounts() or []
@@ -229,7 +285,7 @@ async def cmd_aflat(
   account = matches[0]
   await state.update_data(aflat_target=account, aflat_candidates=None)
   await message.answer(
-    _aflat_confirm_text(account), reply_markup=inline.confirm_keyboard("aflat")
+    _aflat_target_confirm_text(account), reply_markup=inline.confirm_keyboard("aflat")
   )
 
 
@@ -249,7 +305,92 @@ async def cb_aflat_pick(call: CallbackQuery, state: FSMContext) -> None:
   account = candidates[idx]
   await state.update_data(aflat_target=account, aflat_candidates=None)
   await safe_edit_text(
-    call.message, _aflat_confirm_text(account), inline.confirm_keyboard("aflat")
+    call.message, _aflat_target_confirm_text(account), inline.confirm_keyboard("aflat")
+  )
+  await call.answer()
+
+
+@router.callback_query(F.data.startswith("afls:"))
+async def cb_aflat_pick_strategy(call: CallbackQuery, state: FSMContext) -> None:
+  raw = call.data.split(":", 1)[1]
+  data = await state.get_data()
+  strategies = data.get("aflat_strategies") or []
+  scope = dict(data.get("aflat_scope") or {})
+
+  if raw == inline.AFLAT_ALL:
+    scope["strategy"] = None
+  else:
+    try:
+      idx = int(raw)
+    except ValueError:
+      await call.answer()
+      return
+    if idx < 0 or idx >= len(strategies):
+      await call.answer(
+        f"{emojis.WARNING} Expired — run /aflat again.", show_alert=True
+      )
+      return
+    scope["strategy"] = strategies[idx]
+
+  await state.update_data(aflat_scope=scope)
+  await safe_edit_text(
+    call.message,
+    f"{emojis.WARNING} <b>FLAT</b> scope — pick a market (or All):\n"
+    f"{_aflat_scope_text(scope)}",
+    inline.aflat_market_picker(),
+  )
+  await call.answer()
+
+
+@router.callback_query(F.data.startswith("aflm:"))
+async def cb_aflat_pick_market(call: CallbackQuery, state: FSMContext) -> None:
+  raw = call.data.split(":", 1)[1]
+  data = await state.get_data()
+  scope = dict(data.get("aflat_scope") or {})
+
+  if raw == inline.AFLAT_ALL:
+    scope["market"] = None
+  elif raw in MARKETS:
+    scope["market"] = raw
+  else:
+    await call.answer()
+    return
+
+  await state.update_data(aflat_scope=scope)
+  await safe_edit_text(
+    call.message,
+    f"{emojis.WARNING} <b>FLAT</b> scope — pick a gateway (or All):\n"
+    f"{_aflat_scope_text(scope)}",
+    inline.aflat_gateway_picker(scope.get("market")),
+  )
+  await call.answer()
+
+
+@router.callback_query(F.data.startswith("aflg:"))
+async def cb_aflat_pick_gateway(call: CallbackQuery, state: FSMContext) -> None:
+  raw = call.data.split(":", 1)[1]
+  data = await state.get_data()
+  scope = dict(data.get("aflat_scope") or {})
+
+  if raw == inline.AFLAT_ALL:
+    scope["gateway"] = None
+  else:
+    market = scope.get("market")
+    valid_gateways = (
+      GATEWAYS_BY_MARKET.get(market, [])
+      if market
+      else [gw for lst in GATEWAYS_BY_MARKET.values() for gw in lst]
+    )
+    if raw not in valid_gateways:
+      await call.answer()
+      return
+    scope["gateway"] = raw
+
+  await state.update_data(aflat_scope=scope)
+  await safe_edit_text(
+    call.message,
+    _aflat_scope_confirm_text(scope),
+    inline.confirm_keyboard("aflat"),
   )
   await call.answer()
 
@@ -261,7 +402,13 @@ async def cb_aflat(
   decision = call.data.split(":", 1)[1]
   data = await state.get_data()
   target = data.get("aflat_target")
-  await state.update_data(aflat_target=None, aflat_candidates=None)
+  scope = data.get("aflat_scope") or {}
+  await state.update_data(
+    aflat_target=None,
+    aflat_candidates=None,
+    aflat_strategies=None,
+    aflat_scope=None,
+  )
 
   if decision != "confirm" or target is None:
     await safe_edit_text(call.message, "Cancelled.")
@@ -269,7 +416,11 @@ async def cb_aflat(
     return
 
   if target == "*":
-    result = await broker_admin.admin_flat()
+    result = await broker_admin.admin_flat(
+      strategy=scope.get("strategy"),
+      market=scope.get("market"),
+      gateway=scope.get("gateway"),
+    )
   else:
     result = await broker_admin.admin_flat(
       account_id=target.get("account_id"),
@@ -392,7 +543,10 @@ async def cb_admin_linkaccount_pick(call: CallbackQuery, state: FSMContext) -> N
   AdminLinkAccount.waiting_for_telegram_id, F.text & ~F.text.startswith("/")
 )
 async def receive_link_telegram_id(
-  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+  message: Message,
+  state: FSMContext,
+  broker_admin: BrokerClientAdmin,
+  menu: CommandMenu,
 ) -> None:
   raw = (message.text or "").strip()
   if not raw.isdigit():
@@ -416,6 +570,9 @@ async def receive_link_telegram_id(
       "Run /admin_linkaccount to retry."
     )
     return
+  # The user linked from here has been sitting on the /start-only menu; give
+  # them their commands now instead of when they next message the bot.
+  await menu.sync(message.bot, int(raw), linked=True)
   await message.answer(messages.AdminMessages.format_linked_account(account, int(raw)))
 
 
@@ -708,6 +865,7 @@ async def receive_magic_map(
 async def prompt_magic_map_text(message: Message) -> None:
   await message.answer(f"{emojis.WARNING} Please send the magic map as JSON text.")
 
+
 # ── /admin_crypto_symbols ───────────────────────────────────────────
 # Show the current CRYPTO_ALLOWED_SYMBOL_KEY value and prompt for a new one as
 # a comma-separated list. Normalisation (trim/upper/dedup) lives on the broker
@@ -825,8 +983,7 @@ async def receive_admin_crypto_leverage(
     return
   if leverage <= 0:
     await message.answer(
-      f"{emojis.WARNING} Leverage must be a positive integer. "
-      "Send /cancel to abort."
+      f"{emojis.WARNING} Leverage must be a positive integer. Send /cancel to abort."
     )
     return
 
@@ -848,4 +1005,156 @@ async def receive_admin_crypto_leverage(
 async def prompt_admin_crypto_leverage_text(message: Message) -> None:
   await message.answer(
     f"{emojis.WARNING} Please send the leverage as a numeric text value."
+  )
+
+
+# ── /admin_public_chats ─────────────────────────────────────────────
+# Show the chats the PUBLIC signal broadcast is delivered to and prompt for a
+# new comma-separated list. The private audience stays an env var (a deployment
+# concern); the public one is edited here because it changes with the audience,
+# not with the deployment. Sending "-" clears it, which turns the public
+# broadcast off.
+
+
+@router.message(Command("admin_public_chats", "public_chats"))
+async def cmd_admin_public_chats(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  await state.clear()
+  current = await broker_admin.get_public_broadcast_chat_ids()
+  if current is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch current chats.")
+    return
+  await state.set_state(AdminPublicBroadcastChats.waiting_for_chat_ids)
+  value = str(current.get("value") or "")
+  shown = html.escape(value) if value else "<i>(none — public broadcast off)</i>"
+  await message.answer(
+    f"{emojis.GEAR} <b>Public broadcast chats</b>\n\n"
+    f"Current: <code>{shown}</code>\n\n"
+    "Send the new list, comma-separated (e.g. "
+    "<code>-1001234567890, @my_channel</code>).\n"
+    "Send <code>-</code> to turn the public broadcast off, or /cancel to abort."
+  )
+
+
+@router.message(AdminPublicBroadcastChats.waiting_for_chat_ids, Command("cancel"))
+async def cancel_admin_public_chats(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await message.answer("Cancelled.")
+
+
+@router.message(
+  AdminPublicBroadcastChats.waiting_for_chat_ids, F.text & ~F.text.startswith("/")
+)
+async def receive_admin_public_chats(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  # "-" is the explicit "no public chats" answer; the broker drops it as a
+  # placeholder either way, so an empty list is what gets sent.
+  chat_ids = [] if raw == "-" else [c.strip() for c in raw.split(",") if c.strip()]
+
+  result = await broker_admin.set_public_broadcast_chat_ids(chat_ids)
+  await state.clear()
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update public chats. Run /admin_public_chats to retry."
+    )
+    return
+  value = str(result.get("value") or "")
+  shown = html.escape(value) if value else "<i>(none — public broadcast off)</i>"
+  await message.answer(
+    f"{emojis.CHECK} <b>Public broadcast chats updated</b>\n"
+    f"New value: <code>{shown}</code>"
+  )
+
+
+@router.message(AdminPublicBroadcastChats.waiting_for_chat_ids, ~F.text)
+async def prompt_admin_public_chats_text(message: Message) -> None:
+  await message.answer(
+    f"{emojis.WARNING} Please send the chat ids as text, comma-separated."
+  )
+
+
+# ── /admin_private_reply_notify, /admin_public_reply_notify ─────────
+# Each audience's broadcast message is edited in place, and an edit never
+# notifies Telegram users on its own — a two-line reply under the message is
+# what actually does (see broker/services/broadcast_service.py's module
+# docstring). These commands enable/disable that reply per audience; the
+# broadcast message itself keeps being edited either way. Default is enabled.
+
+
+def _parse_enable_disable(raw: str) -> Optional[bool]:
+  value = raw.strip().lower()
+  if value == "enable":
+    return True
+  if value == "disable":
+    return False
+  return None
+
+
+async def _handle_reply_notify_command(
+  message: Message,
+  command: CommandObject,
+  *,
+  label: str,
+  command_name: str,
+  get: Callable[[], Awaitable[Optional[dict]]],
+  setter: Callable[[bool], Awaitable[Optional[dict]]],
+) -> None:
+  arg = (command.args or "").strip()
+  if not arg:
+    current = await get()
+    state = str(current.get("state")) if current else "UNKNOWN"
+    await message.answer(
+      f"{emojis.GEAR} <b>{label} reply notify</b>\n\n"
+      f"Current: <b>{state}</b>\n\n"
+      f"Usage: <code>/{command_name} enable</code> or "
+      f"<code>/{command_name} disable</code>"
+    )
+    return
+
+  parsed = _parse_enable_disable(arg)
+  if parsed is None:
+    await message.answer(
+      f"{emojis.WARNING} Send <code>enable</code> or <code>disable</code>."
+    )
+    return
+
+  result = await setter(parsed)
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update {label.lower()} reply notify. "
+      f"Run /{command_name} to retry."
+    )
+    return
+  state = str(result.get("state"))
+  await message.answer(f"{emojis.CHECK} <b>{label} reply notify</b>: <b>{state}</b>")
+
+
+@router.message(Command("admin_private_reply_notify", "private_reply_notify"))
+async def cmd_private_reply_notify(
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
+) -> None:
+  await _handle_reply_notify_command(
+    message,
+    command,
+    label="Private broadcast",
+    command_name="admin_private_reply_notify",
+    get=broker_admin.get_private_reply_notify,
+    setter=broker_admin.set_private_reply_notify,
+  )
+
+
+@router.message(Command("admin_public_reply_notify", "public_reply_notify"))
+async def cmd_public_reply_notify(
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
+) -> None:
+  await _handle_reply_notify_command(
+    message,
+    command,
+    label="Public broadcast",
+    command_name="admin_public_reply_notify",
+    get=broker_admin.get_public_reply_notify,
+    setter=broker_admin.set_public_reply_notify,
   )

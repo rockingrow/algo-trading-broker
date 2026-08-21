@@ -32,7 +32,7 @@ def test_parse_signal_normalises_symbol():
 
 def test_parse_signal_defaults_missing_numbers():
   payload = _payload(position=PositionSchema(action=SignalActionEnum.SHORT))
-  signal = parse_signal(payload, "sig-2")
+  signal = parse_signal(payload, "sig-1")
   assert signal.price == 0.0
   assert signal.quantity == 0.0
   assert signal.is_running is False
@@ -49,7 +49,7 @@ def test_parse_signal_carries_scaling_when_flagged():
       scaling=ScalingSchema(tp=110.0, sl=95.0, quantity=0.5),
     )
   )
-  signal = parse_signal(payload, "sig-3")
+  signal = parse_signal(payload, "sig-1")
   assert signal.is_scale_position is True
   assert signal.scaling is not None
   assert signal.scaling.tp == 110.0
@@ -66,7 +66,7 @@ def test_parse_signal_omits_scaling_when_not_flagged():
       scaling=ScalingSchema(tp=110.0, sl=95.0, quantity=0.5),
     )
   )
-  signal = parse_signal(payload, "sig-4")
+  signal = parse_signal(payload, "sig-1")
   assert signal.is_scale_position is None
   assert signal.scaling is None
 
@@ -82,7 +82,7 @@ def test_parse_signal_carries_scale_strategy_when_flagged():
       scaling=ScalingSchema(tp=110.0, sl=95.0, quantity=0.5),
     )
   )
-  signal = parse_signal(payload, "sig-5")
+  signal = parse_signal(payload, "sig-1")
   assert signal.is_scale_position is True
   assert signal.scale_strategy == "add_on_pullback"
 
@@ -96,6 +96,30 @@ def test_parse_signal_omits_scale_strategy_when_not_flagged():
       scale_strategy="add_on_pullback",
     )
   )
-  signal = parse_signal(payload, "sig-6")
+  signal = parse_signal(payload, "sig-1")
   assert signal.is_scale_position is None
   assert signal.scale_strategy is None
+
+
+def test_parse_signal_ships_both_ids():
+  """``signal_id`` identifies the signal (the worker's de-duplication key);
+  ``signal_uxid`` identifies the trade cycle it belongs to."""
+  signal = parse_signal(_payload(signal_uxid="9f2c4b7e18a3d605"), "sig-7")
+  assert signal.signal_id == "sig-7"
+  assert signal.signal_uxid == "9f2c4b7e18a3d605"
+
+
+def test_signal_id_stays_unique_per_action_while_the_cycle_id_is_shared():
+  """Dedup by signal_id keeps working: two actions of one trade are two
+  signals, and only the cycle id is common to them."""
+  uxid = "9f2c4b7e18a3d605"
+  entry = parse_signal(_payload(signal_uxid=uxid), "sig-entry")
+  close = parse_signal(
+    _payload(
+      signal_uxid=uxid,
+      position=PositionSchema(action=SignalActionEnum.TP1, price=110.0, quantity=0.5),
+    ),
+    "sig-close",
+  )
+  assert entry.signal_id != close.signal_id
+  assert entry.signal_uxid == close.signal_uxid == uxid

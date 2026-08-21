@@ -34,6 +34,46 @@ def test_format_account_escapes_html():
   assert "&lt;b&gt;x&lt;/b&gt;" in out
 
 
+def test_format_status_shows_zero_open_positions():
+  out = messages.UserMessages.format_status(
+    {"account_id": "acc-1", "account_name": "Main", "market": "FOREX"},
+    {"count": 0, "data": []},
+    7.0,
+  )
+  assert "Open positions: <b>0</b>" in out
+  assert "SYMBOL" not in out
+
+
+def test_format_status_renders_open_positions_table():
+  positions = {
+    "count": 1,
+    "data": [
+      {
+        "symbol": "XAUUSD",
+        "action": "LONG",
+        "status": "OPENED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 1010.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      }
+    ],
+  }
+  out = messages.UserMessages.format_status(
+    {"account_id": "acc-1", "account_name": "Main", "market": "FOREX"}, positions, 7.0
+  )
+  assert "Open positions: <b>1</b>" in out
+  assert "XAUUSD" in out
+  assert "<pre>" in out
+
+
+def test_format_status_handles_failed_positions_fetch():
+  out = messages.UserMessages.format_status(
+    {"account_id": "acc-1", "account_name": "Main", "market": "FOREX"}, None, 7.0
+  )
+  assert "failed to load" in out
+
+
 def test_format_trades_empty():
   assert "No trades yet" in messages.UserMessages.format_trades(
     {"data": [], "page": {}}, 7.0
@@ -81,6 +121,50 @@ def test_format_trades_converts_to_local_time_with_zone_in_header():
   # row carries a compact time with no per-row label.
   assert "times in UTC+7" in out
   assert "01-01 07:00" in out
+
+
+def test_format_trades_shows_signed_pnl_when_balance_pair_present():
+  payload = {
+    "data": [
+      {
+        "symbol": "XAUUSD",
+        "action": "LONG",
+        "status": "CLOSED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 1010.0,
+        "account_balance_init": 1000.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      },
+      {
+        "symbol": "BTCUSDT",
+        "action": "SHORT",
+        "status": "CLOSED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 950.0,
+        "account_balance_init": 1000.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      },
+      {
+        "symbol": "ETHUSDT",
+        "action": "LONG",
+        "status": "OPENED",
+        "price": 100.0,
+        "quantity": 1.0,
+        "account_balance": 1010.0,
+        "updatedAt": "2026-01-01T00:00:00Z",
+      },
+    ],
+    "page": {"total": 3, "limit": 5, "offset": 0},
+  }
+  out = messages.UserMessages.format_trades(payload, 7.0)
+  assert "PNL" in out
+  # A gain is signed so a scanning eye can pick winners from losers.
+  assert "+10.00" in out
+  assert "-50.00" in out
+  # No initial balance means PnL is unknown — never zero, which would read wrong.
+  assert "—" in out
 
 
 def test_format_trades_renders_a_table_with_abbreviated_status():

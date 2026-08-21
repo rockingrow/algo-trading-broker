@@ -16,6 +16,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from broker.schemas.account_schema import MarketTypeEnum
+from broker.schemas.trade_schema import TradeResponse
 
 
 class LinkRequest(BaseModel):
@@ -77,9 +78,28 @@ class CommandResultResponse(BaseModel):
   action: str
   scope: str
   status: str = "published"
+  # The account's settings blob after the command, for commands that change one
+  # (``/prevent`` and ``/allow`` write ``signal_blocked``). ``None`` for a
+  # command that only publishes and stores nothing, like FLAT.
+  settings: Optional[dict] = Field(
+    default=None,
+    description="Account settings after the command; null if it changed none.",
+  )
 
 
 class BroadcastSubscriptionResponse(BaseModel):
-  """Whether the caller is opted in to completed-trade broadcast DMs."""
+  """Whether the caller is opted in to live trade-card DMs."""
 
   subscribed: bool
+
+
+class OpenPositionsResponse(BaseModel):
+  """Currently running (open) trades for the caller's linked account.
+
+  Unpaginated — ``data`` always carries every open position, and ``count``
+  is simply its length, spelled out so a caller that only needs the number
+  (the ``/status`` line) doesn't have to parse the list.
+  """
+
+  count: int
+  data: list[TradeResponse]

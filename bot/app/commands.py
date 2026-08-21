@@ -1,37 +1,39 @@
 """
-app/commands.py — Command lists + per-scope registration.
+app/commands.py — Command lists + which menu a given user should see.
 
-Two menus:
-- USER_COMMANDS  → default scope (every private chat / enduser).
-- ADMIN_COMMANDS → chat scope, only for configured admin ids (user cmds + extras).
+Three lists:
+- START_ONLY_COMMANDS  → what an *unlinked* user gets: /start, nothing else.
+- USER_COMMANDS        → the full enduser menu, once an account is linked.
+- ADMIN_EXTRA_COMMANDS → appended for the ids in TELEGRAM_ADMIN_IDS.
 
-``setup_bot_commands`` runs on every startup, so the menus are re-initialised
-each time the bot boots (and whenever admin ids change in the env).
+``menu_for`` picks between them. Applying a menu to a chat — and keeping it in
+step with the user's link status — is ``app/services/menu.py``'s job.
 """
 
 from __future__ import annotations
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import BotCommand
 
-from app.logger import get_logger
+# The only command that works without an account behind it, so the only one an
+# unlinked user is shown (see ``menu_for``). Shared with USER_COMMANDS below so
+# the entry can't drift between the two menus.
+START_COMMAND = BotCommand(command="start", description="Link account")
 
-log = get_logger(__name__)
+START_ONLY_COMMANDS = [START_COMMAND]
 
 USER_COMMANDS = [
-  BotCommand(command="start", description="Link account"),
+  START_COMMAND,
+  BotCommand(command="status", description="Account info + open positions"),
   BotCommand(command="trades", description="Recent trades"),
   BotCommand(command="flat", description="Close all positions"),
   BotCommand(command="prevent", description="Block new orders"),
   BotCommand(command="allow", description="Allow new orders"),
-  BotCommand(command="status", description="Account info"),
   BotCommand(command="myaccounts", description="List linked accounts"),
   BotCommand(command="link", description="Add another account"),
   BotCommand(command="switch", description="Change active account"),
   BotCommand(command="unlink", description="Unlink active account"),
-  BotCommand(command="subscribe", description="Get completed-trade alerts"),
-  BotCommand(command="unsubscribe", description="Stop completed-trade alerts"),
+  BotCommand(command="subscribe", description="Get live trade alerts"),
+  BotCommand(command="unsubscribe", description="Stop live trade alerts"),
   BotCommand(command="help", description="Help"),
 ]
 
@@ -57,8 +59,23 @@ ADMIN_EXTRA_COMMANDS = [
   BotCommand(command="admin_rotate", description="[ADMIN] Rotate token + unlink users"),
   BotCommand(command="admin_settings", description="[ADMIN] Broker settings"),
   BotCommand(command="admin_magicmap", description="[ADMIN] Edit strategy magic map"),
-  BotCommand(command="admin_crypto_symbols", description="[ADMIN] Crypto allowed symbols"),
-  BotCommand(command="admin_crypto_leverage", description="[ADMIN] Crypto max leverage"),
+  BotCommand(
+    command="admin_crypto_symbols", description="[ADMIN] Crypto allowed symbols"
+  ),
+  BotCommand(
+    command="admin_crypto_leverage", description="[ADMIN] Crypto max leverage"
+  ),
+  BotCommand(
+    command="admin_public_chats", description="[ADMIN] Public broadcast chats"
+  ),
+  BotCommand(
+    command="admin_private_reply_notify",
+    description="[ADMIN] Private broadcast reply notify",
+  ),
+  BotCommand(
+    command="admin_public_reply_notify",
+    description="[ADMIN] Public broadcast reply notify",
+  ),
   BotCommand(command="admin_linkaccount", description="[ADMIN] Link a Telegram user"),
   BotCommand(command="admin_invite_url", description="[ADMIN] One-tap invite link"),
 ]
@@ -66,23 +83,19 @@ ADMIN_EXTRA_COMMANDS = [
 ADMIN_COMMANDS = USER_COMMANDS + ADMIN_EXTRA_COMMANDS
 
 
-async def setup_bot_commands(bot: Bot, admin_ids: set[int]) -> None:
-  """(Re)register command menus: default (enduser) + chat-scoped admin menus."""
-  await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
+def menu_for(*, linked: bool, is_admin: bool) -> list[BotCommand]:
+  """The command menu a user should be seeing right now.
 
-  for admin_id in admin_ids:
-    try:
-      await bot.set_my_commands(
-        ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id)
-      )
-    except TelegramBadRequest as exc:
-      # Telegram returns "chat not found" until the admin has messaged the bot
-      # at least once; the menu applies after their first /start + next restart.
-      log.warning("Skip admin menu for %s (chat not reachable yet): %s", admin_id, exc)
+  Every user command needs an account behind it — an unlinked user who taps one
+  only ever gets "you haven't linked an account yet", /help included, since the
+  help text is a tour of commands they cannot run. So until they link, the menu
+  is trimmed to the one command that gets them somewhere: /start.
 
-  log.info(
-    "Command menus set — default=%d cmds, admins=%d (each %d cmds)",
-    len(USER_COMMANDS),
-    len(admin_ids),
-    len(ADMIN_COMMANDS),
-  )
+  The admin extras are not trimmed: admin commands never required a linked
+  account (see handlers/admin.py), so an unlinked admin keeps them and loses
+  only the user half of their menu.
+  """
+  commands = list(USER_COMMANDS if linked else START_ONLY_COMMANDS)
+  if is_admin:
+    commands += ADMIN_EXTRA_COMMANDS
+  return commands

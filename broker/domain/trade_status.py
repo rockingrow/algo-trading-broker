@@ -39,6 +39,13 @@ class TradeStatusPolicy:
   # Position statuses that represent a still-running trade.
   _OPEN_STATUSES = {"OPENED", "TP1"}
 
+  # Worker position statuses whose name differs from the action an operator
+  # knows the event by. Only FLATTED does today — it is the admin FLAT
+  # directive landing back — so every other status is already its own label.
+  _LAST_ACTION_LABELS: dict[str, str] = {
+    "FLATTED": "FLAT",
+  }
+
   # Monotonic lifecycle order; a transition to a lower rank is a downgrade.
   _STATUS_ORDER: dict[TradeStatusEnum, int] = {
     TradeStatusEnum.OPENED: 0,
@@ -52,6 +59,14 @@ class TradeStatusPolicy:
     """Translate a worker position status into a broker trade status, or None
     if the status is unknown."""
     return self._POSITION_STATUS_TO_TRADE_STATUS.get(position_status)
+
+  def to_last_action(self, position_status: str) -> str | None:
+    """Label the event that moved the trade to its status, as the action an
+    operator recognises: ``TP1`` / ``TP2`` / ``SL`` / ``R_SL`` / ``FLAT`` /
+    ``TERMINAL_CLOSED`` / ``FORCED_CLOSED``. None for an unknown status."""
+    if position_status not in self._POSITION_STATUS_TO_TRADE_STATUS:
+      return None
+    return self._LAST_ACTION_LABELS.get(position_status, position_status)
 
   def is_open(self, position_status: str) -> bool:
     """Whether the given position status means the trade is still running."""

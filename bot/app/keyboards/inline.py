@@ -12,7 +12,15 @@ from typing import Any, Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app import emojis
-from app.constants import GATEWAYS_BY_MARKET, MARKETS
+from app.constants import (
+  CB_TRADE_DETAIL,
+  CB_TRADE_EXIT,
+  CB_TRADE_EXIT_CANCEL,
+  CB_TRADE_EXIT_CONFIRM,
+  CB_TRADE_SUMMARY,
+  GATEWAYS_BY_MARKET,
+  MARKETS,
+)
 from app.presenters.messages import AdminMessages
 from app.utils.pagination import build_pagination_keyboard, build_pagination_row
 
@@ -70,6 +78,58 @@ def accounts_pagination(page: dict) -> Optional[InlineKeyboardMarkup]:
   return build_pagination_keyboard(page, lambda offset: f"myacc:{offset}")
 
 
+# ── Live trade card ─────────────────────────────────────────────────
+# The broker builds the same two keyboards as raw Bot API dicts when it posts
+# and refreshes a card (``broker/helpers/trade_card.py``); these rebuild them
+# with aiogram types when the bot re-renders the card after a button tap.
+
+
+def trade_card(trade_id: str, *, detailed: bool, closed: bool) -> Optional[InlineKeyboardMarkup]:
+  """Detail/Summary + Exit for a live card, or None once the trade is over.
+
+  Returning None is what strips the buttons: aiogram sends no ``reply_markup``,
+  and the Bot API drops a message's keyboard when the field is absent."""
+  if closed:
+    return None
+  toggle = (
+    InlineKeyboardButton(
+      text=f"{emojis.COLLAPSE} Summary", callback_data=f"{CB_TRADE_SUMMARY}:{trade_id}"
+    )
+    if detailed
+    else InlineKeyboardButton(
+      text=f"{emojis.DETAIL} Detail", callback_data=f"{CB_TRADE_DETAIL}:{trade_id}"
+    )
+  )
+  return InlineKeyboardMarkup(
+    inline_keyboard=[
+      [
+        toggle,
+        InlineKeyboardButton(
+          text=f"{emojis.CYCLE_CLOSED} Close", callback_data=f"{CB_TRADE_EXIT}:{trade_id}"
+        ),
+      ]
+    ]
+  )
+
+
+def trade_exit_confirm(trade_id: str) -> InlineKeyboardMarkup:
+  """Confirm/Cancel pair shown in place of a card's buttons before closing."""
+  return InlineKeyboardMarkup(
+    inline_keyboard=[
+      [
+        InlineKeyboardButton(
+          text=f"{emojis.CHECK} Close it",
+          callback_data=f"{CB_TRADE_EXIT_CONFIRM}:{trade_id}",
+        ),
+        InlineKeyboardButton(
+          text=f"{emojis.CANCEL} Cancel",
+          callback_data=f"{CB_TRADE_EXIT_CANCEL}:{trade_id}",
+        ),
+      ]
+    ]
+  )
+
+
 # ── Admin keyboards ─────────────────────────────────────────────────
 
 
@@ -125,6 +185,59 @@ def aflat_candidates_picker(accounts: list[dict[str, Any]]) -> InlineKeyboardMar
     ]
     for i, a in enumerate(accounts)
   ]
+  return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# "All" sentinel travelling in aflm:/aflg:/afls: callbacks. One byte, keeps
+# well clear of Telegram's 64-byte cap on callback_data, and out of the market
+# / gateway namespaces (they only use A-Z uppercase names).
+AFLAT_ALL = "a"
+
+
+def aflat_strategy_picker(strategies: list[str]) -> InlineKeyboardMarkup:
+  """One button per known strategy (plus an "All" row at the top) → callback
+  ``afls:{index}`` where ``index`` addresses the strategies list held in FSM
+  data. Strategy names are user-supplied and up to 50 chars — dropping them
+  into callback_data risks the 64-byte limit and echoes user text back
+  through Telegram, so the index indirection stays for them too."""
+  rows: list[list[InlineKeyboardButton]] = [
+    [InlineKeyboardButton(text="All strategies", callback_data=f"afls:{AFLAT_ALL}")]
+  ]
+  for i, name in enumerate(strategies):
+    rows.append([InlineKeyboardButton(text=name, callback_data=f"afls:{i}")])
+  return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def aflat_market_picker() -> InlineKeyboardMarkup:
+  """One button per market (plus an "All" row) → callback ``aflm:{market}``
+  or ``aflm:a`` for All."""
+  rows: list[list[InlineKeyboardButton]] = [
+    [InlineKeyboardButton(text="All markets", callback_data=f"aflm:{AFLAT_ALL}")]
+  ]
+  for market in MARKETS:
+    rows.append([InlineKeyboardButton(text=market, callback_data=f"aflm:{market}")])
+  return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def aflat_gateway_picker(market: Optional[str]) -> InlineKeyboardMarkup:
+  """One button per gateway valid for *market* (plus an "All" row) → callback
+  ``aflg:{gateway}`` or ``aflg:a`` for All. When *market* is None (the user
+  picked "All markets") the union of every configured gateway is offered so
+  the admin can still narrow scope."""
+  if market is None:
+    gateways: list[str] = []
+    for lst in GATEWAYS_BY_MARKET.values():
+      for gw in lst:
+        if gw not in gateways:
+          gateways.append(gw)
+  else:
+    gateways = list(GATEWAYS_BY_MARKET.get(market, []))
+
+  rows: list[list[InlineKeyboardButton]] = [
+    [InlineKeyboardButton(text="All gateways", callback_data=f"aflg:{AFLAT_ALL}")]
+  ]
+  for gw in gateways:
+    rows.append([InlineKeyboardButton(text=gw, callback_data=f"aflg:{gw}")])
   return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

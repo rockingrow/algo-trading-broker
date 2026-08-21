@@ -62,6 +62,7 @@ and uv project. It reads the same root `.env`. See
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
 - **Signal replay on reconnect**: Every `WORKER_CONNECTED` handshake is answered with a `retry_signals` list holding every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
 - **Strategy magic map**: The same handshake reply carries a `strategy_magic_map` (both markets) — the strategy → magic-number map from the `strategy_magic_map` setting, filtered to the strategies the worker announced. Editable via `POST /admin/settings/strategy-magic-map` or the Telegram bot's `/admin_magicmap`.
+- **Per-account settings that survive a reconnect**: What an owner sets from the bot (today `/prevent` and `/allow`) is stored on the account as a JSONB `settings` blob and replayed to the worker in the `settings` block of every handshake reply — so a worker that restarts comes back blocked if that is how it was left, instead of silently accepting signals again.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
@@ -187,12 +188,18 @@ Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their lo
 The webhook endpoint is a fast enqueue-only path. Everything else runs from a background handler, with a retry loop that can re-try failed signals a bounded number of times.
 
 1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
+   - That ack is waited for under a hard deadline (`WEBHOOK_ENQUEUE_TIMEOUT`, default `1.0s`). nats-py would otherwise wait `5s` for it, which is longer than TradingView waits for the whole request: one slow ack — a NATS reconnect, a busy file store — and the alert dies as **"request took too long and timed out"**, never to be re-sent.
+   - Past the deadline the envelope goes to the in-memory **`DeferredEnqueuer`**, the response is `202 {"status":"deferred"}`, and a background task keeps re-publishing it every `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` seconds up to `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` times. Giving up (or a full backlog) is logged at `error`. If the queue cannot take the envelope at all, the webhook answers `503` immediately — a refusal TradingView shows in its alert log beats a timeout it can only report as "too slow".
+   - Every enqueue carries a `Nats-Msg-Id` header that stays the same across those retries, and the stream sets a 120s `duplicate_window`. So a first publish whose ack was merely *slow* (the message did land) is de-duplicated by JetStream instead of reaching the workers twice as a second position.
+   - Each webhook response is logged with the elapsed milliseconds — raised to `warning` past the deadline — since TradingView's own timeout leaves no trace on the server.
 2. **`SignalWorker`** (`broker/services/signal_processing_service.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
 3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
 4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.signal.RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
 5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
 
 **Retry-aware notifications**: the Telegram signal / FLAT message carries an `Attempt: N` line on the 2nd and 3rd attempts (not on the fresh first attempt) so the operator sees when the broker is retrying.
+
+**Notifications never sit on the signal path**: the fan-out hands its Telegram message to a `QueuedNotifier` and moves on. `api.telegram.org` is throttled or filtered on many networks — the connection is accepted and no response arrives, so a send hangs for the whole `TELEGRAM_HTTP_TIMEOUT` — and the `SignalWorker` handles envelopes one at a time, so awaiting that send would delay the *next* signal's delivery to the trading workers by the same amount. NATS lifecycle alerts are queued for the same reason: nats-py awaits those callbacks inside its own reconnect loop.
 
 Enable JetStream on your NATS server (`nats-server -js -sd <path>`) — the bundled `docker-compose.yml` already does so and mounts the `nats_data` volume for durability.
 
@@ -224,7 +231,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
 
 | Situation | Reply action | Payload |
 | --------- | ------------ | ------- |
-| Settings loaded | `WORKER_CONNECTED_ACK` | `strategy_magic_map`, `retry_signals`, and `crypto_leverage_init` (crypto only) |
+| Config loaded | `WORKER_CONNECTED_ACK` | `strategy_magic_map`, `retry_signals`, `settings`, and `crypto_leverage_init` (crypto only) |
 | Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
 
 ```json
@@ -234,6 +241,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
   "timestamp": "2026-06-30T00:00:00+00:00",
   "strategy_magic_map": { "wt_cross_v1": 20260617 },
   "retry_signals": [],
+  "settings": { "signal_blocked": true },
   "crypto_leverage_init": {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10
@@ -241,10 +249,11 @@ Because the reply is worker-driven, a worker that connects while the broker is *
 }
 ```
 
-The three blocks are always present, so a worker can parse them unconditionally:
+The four blocks are always present, so a worker can parse them unconditionally:
 
 - **`strategy_magic_map`** — the strategy → magic-number map, see [Strategy magic map](#strategy-magic-map) below. `{}` when nothing matched.
 - **`retry_signals`** — the catch-up replay, see [Signal replay on reconnect](#signal-replay-on-reconnect) below. `[]` when there is nothing to replay.
+- **`settings`** — the account's own settings, see [Account settings](#account-settings) below. Always complete: an account that has never run a command gets the defaults.
 - **`crypto_leverage_init`** — `symbols` + `default_leverage` from the `crypto_allowed_symbol` and `crypto_max_leverage` `BrokerSetting` rows, for a crypto worker. `null` for every other market.
 
 Examples: `examples/nats/system.worker_connected_ack.json` (forex) and `examples/nats/system.worker_connected_ack.crypto.json`.
@@ -274,6 +283,30 @@ The `strategy_magic_map` block of the ACK carries the strategy → magic-number 
 ```
 
 Edit the map with `POST /admin/settings/strategy-magic-map` (or the Telegram bot's `/admin_magicmap`); workers pick up the new map on their next connect (within the ~30s settings cache).
+
+#### Account settings
+
+The `settings` block of the ACK carries what the account's **owner** set from the bot — as opposed to the broker-wide `BrokerSetting` rows behind `strategy_magic_map` and `crypto_leverage_init`. It is the `accounts.settings` JSONB column of that one account, so each worker only ever sees its own.
+
+```json
+{
+  "settings": {
+    "signal_blocked": true
+  }
+}
+```
+
+| Key | Type | Set by | Meaning |
+| --- | ---- | ------ | ------- |
+| `signal_blocked` | bool (default `false`) | bot `/prevent` → `true`, `/allow` → `false` | The owner has blocked new entries for this account. Same state the `BLOCK_SIGNAL` / `ALLOW_SIGNAL` ADMIN messages push live |
+
+**Why it is in the handshake at all.** A command like `/prevent` publishes an ADMIN message, which only reaches a worker that is connected *right now*. Before this block existed, a worker that restarted came back **unblocked** — it had no way to learn that its owner had stopped it while it was away. `POST /v1/telegram/{id}/commands/prevent` now writes `signal_blocked` to the account **before** publishing, and every handshake replays it: the ADMIN message is the live push, the column is the durable state, and a worker reconciles to it on every connect.
+
+Enforcement lives in the worker — the broker records and reports the setting, it does not filter signals per account on its behalf.
+
+The block is read fresh from the row on every handshake (deliberately **not** cached like the broker-wide settings, which are per-broker and shared by every worker): a command run between two connects must reach the second one. Unknown keys in the column are dropped from the payload, so a worker only ever receives keys this broker version knows — they are not erased from the row, since writes merge (`settings || patch`) rather than replace.
+
+Adding a setting is a field on `AccountSettings` (`broker/schemas/account_schema.py`) plus its key in `broker/constants.py`, written from the command's endpoint — no migration, the column is a blob.
 
 #### Fire-and-forget (backward compatible)
 
@@ -356,6 +389,12 @@ WEBHOOK_PORT=80            # docker-compose defaults this to 8080 instead
 # "server closed the connection unexpectedly".
 WEBHOOK_KEEPALIVE_TIMEOUT=120
 
+# Seconds the webhook may wait for JetStream to ack the enqueue before it
+# answers anyway and keeps retrying in the background. Must stay well under
+# TradingView's own patience, or the alert dies as
+# "request took too long and timed out" — and TradingView never re-sends it.
+WEBHOOK_ENQUEUE_TIMEOUT=1.0
+
 # Optional HMAC secret — set the same value in TradingView alert header
 # X-Signature: <sha256-hex-of-body>
 # Leave blank to disable validation.
@@ -384,14 +423,18 @@ DOCS_ENABLED=false
 # ── Telegram notifier (broker → chat, send-only) ─────
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=           # management chat: broker lifecycle events
-TELEGRAM_CHAT_CHANNEL_ID=   # signals channel: published trade alerts
+TELEGRAM_BROKER_LOG_CHAT_IDS=          # management chat: broker lifecycle events
+TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS=   # private signal-cycle broadcast: strategy, signal id + worker table
+# Every chat id (incl. TELEGRAM_LOG_CHAT_ID) accepts a comma-separated list,
+# and an entry may address one topic of a group with Topics enabled:
+# -1002173777783_924584 (see below).
 
 # Forward log records at ERROR level or above to Telegram.
 TELEGRAM_LOG_ERRORS_ENABLED=false
 TELEGRAM_LOG_DEDUP_WINDOW=60   # seconds — suppress identical messages
+TELEGRAM_HTTP_TIMEOUT=5.0      # seconds per Bot API call
 TELEGRAM_LOG_BOT_TOKEN=        # dedicated log bot (falls back to TELEGRAM_BOT_TOKEN)
-TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_CHAT_ID)
+TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_BROKER_LOG_CHAT_IDS)
 
 # ── Telegram bot service (interactive, ./bot) ────────
 # A *second* BotFather bot, separate from TELEGRAM_BOT_TOKEN above.
@@ -403,6 +446,99 @@ BOT_LOG_LEVEL=INFO
 BOT_REQUEST_TIMEOUT=10.0
 ```
 
+### Telegram chat ids: many chats, and group topics
+
+`TELEGRAM_BROKER_LOG_CHAT_IDS`, `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS` and `TELEGRAM_LOG_CHAT_ID` are
+all parsed the same way — none of them is special — so each can reach several
+chats and can address a **topic** inside a group that has the Topics feature
+switched on:
+
+```bash
+# Two groups + one topic inside a third, all from one setting
+TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS="-1001111111111,@public_channel,-1002173777783_924584"
+# The same syntax works for the management chat and the error-log chat
+TELEGRAM_BROKER_LOG_CHAT_IDS="-1001111111111,-1002173777783_100"
+TELEGRAM_LOG_CHAT_ID="-1002173777783_555"
+```
+
+| Entry | Delivered to |
+| ----- | ------------ |
+| `-1001111111111` | The group/channel itself (a group with Topics enabled gets it in **General**) |
+| `@public_channel` | Public channel by username |
+| `-1002173777783_924584` | Topic `924584` of supergroup `-1002173777783` |
+
+The `_<topic id>` suffix makes the broker add
+[`message_thread_id`](https://core.telegram.org/bots/api#sendmessage) to the
+`sendMessage` call — the Bot API's identifier for "the target message thread
+(topic) of a forum", and the only way a bot can post into a specific topic
+rather than General. Both numbers are the ones in the topic's own link:
+`t.me/c/2173777783/924584` → `-1002173777783_924584` (the chat id is the link's
+first number prefixed with `-100`).
+
+Notes:
+
+- Only a **numeric** chat id may carry a topic suffix — usernames may contain
+  underscores themselves (`@my_group_2`), so those are never split.
+- The suffix is sent *only* when configured: Telegram answers
+  `400 Bad Request: message thread not found` if a `message_thread_id` is
+  passed for a chat that has no such topic.
+- Each chat gets its own Bot API call, issued concurrently, and one failing
+  chat (bot kicked, topic deleted) is logged without stopping the others.
+- Whitespace and empty entries are ignored, and a chat listed twice is only
+  notified once.
+- An empty `TELEGRAM_LOG_CHAT_ID` still falls back to `TELEGRAM_BROKER_LOG_CHAT_IDS`,
+  list and topics included.
+- Completed-trade owner DMs take their chat id from the database rather than
+  from `.env`, but run through the same parsing, so nothing has to special-case
+  a plain user id.
+
+### Broadcast update notices: the reply under an edited message
+
+A trade's broadcast message is **edited in place** as the trade progresses, and
+Telegram sends no notification for an edit: a reader who saw the entry would
+never find out that it hit TP1 or closed unless they happened to scroll back.
+So every new action of a cycle does two things in **both** audiences (private
+and public):
+
+1. the cycle's message is rewritten with the full body (levels, timeline,
+   worker table);
+2. a two-line notice is posted as a **reply** to that same message:
+
+```
+[🏁CLOSED]
+🚀 TP2
+```
+
+That is the whole notice — the cycle's status at that point (`RUNNING` /
+`CLOSED`) and the action that produced it (`TP1`, `TP2`, `SL`, `R_SL`,
+`FLAT`, …). It notifies, and being a reply it points straight back at the full
+body, so nothing is duplicated.
+
+Notes:
+
+- The **first** message of a cycle carries no notice — the message that just
+  arrived is the news.
+- One notice per *action*, not per delivery: a dispatch that coalesces two
+  actions posts one reply each, and the intermediate one keeps the status it
+  had at the time (a TP1 announced before the close is not back-dated to
+  `CLOSED`).
+- A worker execution updates the body (the execution table) but announces
+  nothing — no new action happened.
+- `broadcast_message_chats.notified_event_count` records how many actions each
+  chat has been told about, so a redelivery, a sweeper pass or a retried edit
+  never repeats a notice. A reply that fails is simply retried on the next
+  pass, and a notice whose message was meanwhile deleted is sent as a plain
+  message (`allow_sending_without_reply`) rather than lost.
+- Either audience can turn this reply off on its own — the
+  `private_broadcast_reply_notify` / `public_broadcast_reply_notify` broker
+  settings, both **enabled by default**. The cycle's message keeps being
+  edited in place either way; disabling one only silences the reply notice for
+  that audience. Editable via `GET`/`POST /admin/settings/private-reply-notify`
+  and `.../public-reply-notify`, or the bot's `/admin_private_reply_notify` and
+  `/admin_public_reply_notify [enable|disable]` commands. A notice skipped this
+  way still counts as delivered (`notified_event_count` advances), so
+  re-enabling later does not replay the trade's backlog into the chat.
+
 ### Not in `.env`
 
 A few knobs live in [`broker/settings.py`](broker/settings.py) only, because they
@@ -411,6 +547,8 @@ environment if you really need to:
 
 | Env var | In-code path | Default | Effect |
 | ------- | ------------ | ------- | ------ |
+| `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` | `settings.webhook.DEFERRED_ENQUEUE_INTERVAL` | `2.0` | Gap between background re-enqueue attempts after the webhook deadline expired |
+| `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` | `settings.webhook.DEFERRED_ENQUEUE_MAX_ATTEMPTS` | `15` | Re-enqueue attempts spent on one envelope before it is dropped (logged at `error`) |
 | `SIGNAL_MAX_ATTEMPTS` | `settings.signal.MAX_ATTEMPTS` | `3` | Total fan-out attempts before a signal is marked `FAILED` |
 | `SIGNAL_RETRY_INTERVAL_SECONDS` | `settings.signal.RETRY_INTERVAL_SECONDS` | `15` | Retry-job tick, and the minimum gap between two attempts on one row |
 | `JETSTREAM_SIGNAL_CONSUMER` | `settings.jetstream.SIGNAL_CONSUMER` | `broker_signal_handler` | Durable consumer name on the `SIGNALS` stream |
@@ -533,6 +671,9 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `GET /v1/telegram/{telegram_user_id}/accounts` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/active-account` | `X-API-KEY` |
 | `GET /v1/telegram/{telegram_user_id}/trades` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/trades/{trade_id}` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/trades/{trade_id}/exit` | `X-API-KEY` |
+| `GET /v1/telegram/{telegram_user_id}/positions` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/flat` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/commands/prevent` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/unlink` | `X-API-KEY` |
@@ -552,12 +693,15 @@ Returns `{"status": "ok"}`. No authentication required.
 
 Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
 
+The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the response is still `202`, with `status=deferred`, and the enqueue is retried in the background (see [JetStream signal pipeline](#jetstream-signal-pipeline)). `503` means the enqueue failed *and* could not be deferred — the signal was dropped.
+
 **Example Payload:**
 
 ```json
 {
   "token": "your_secure_token",
   "strategy": "wt_cross_v1",
+  "signal_uxid": "9f2c4b7e18a3d605",
   "symbol": "XAUUSD",
   "timeframe": "M5",
   "timestamp": "2024-03-20T10:00:00Z",
@@ -589,6 +733,19 @@ Receives signals from TradingView. Validates the optional HMAC `X-Signature` hea
 ```
 
 **Supported Actions:** `LONG`, `SHORT`, `TP1`, `TP2`, `R_SL`, `SL`, `FLAT`.
+
+**`signal_uxid` (required):** a 16-character lowercase-hex short uuid the
+TradingView strategy generates once per *trade cycle* and reuses across
+every action of that cycle — the `LONG` entry, its `TP1`, `TP2`, `SL`, and
+the closing `FLAT` all carry the same `signal_uxid`. That is what ties the
+whole trade to one edited-in-place Telegram broadcast message (each new
+action also replying a two-line notice under it — see
+[Broadcast update notices](#broadcast-update-notices-the-reply-under-an-edited-message)).
+A payload
+that omits it or sends any other shape is rejected with `422`. The
+per-signal `signal_id` the broker mints on persist is still unique per
+alert (workers keep deduping on it) — the two ids serve different jobs and
+both travel on every downstream NATS payload.
 
 #### Position fields — `tp1`/`tp2`/`sl` vs `scaling`
 
@@ -877,10 +1034,13 @@ broker endpoints with the broker `X-API-KEY`.
 > only covers what the *broker* side needs to know: the data model backing the
 > bot and the endpoints it calls.
 
-Command menus are role-aware (Telegram command **scopes**) and re-initialised on
-every startup: endusers get the default menu; each id in `TELEGRAM_ADMIN_IDS`
-gets an extended admin menu (`/accounts`, `/newaccount`, `/atrades`, `/aflat`,
-`/rotate`, `/settings`).
+Command menus are role-aware **and** link-aware (Telegram command **scopes**): a
+user with no linked account sees `/start` and nothing else — every other
+command, `/help` included, needs an account behind it — and the full menu
+appears the moment they link. Each id in `TELEGRAM_ADMIN_IDS` additionally gets
+the admin menu (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
+`/admin_flat`, `/admin_rotate`, `/admin_settings`, …), which is not gated on
+linking.
 
 **Onboarding / auth flow**
 
@@ -925,21 +1085,35 @@ repairs the row.
 
 **Control commands** publish `ADMIN`-subject directives via the broker:
 
-| Command | Admin action | Notes |
-| ------- | ------------ | ----- |
-| `/flat` | `FLAT` | Close positions for the **active** account. |
-| `/prevent` | `BLOCK_SIGNAL` | Block new signals (worker must honor it). |
-| `/allow` | `ALLOW_SIGNAL` | Re-enable new signals. |
+| Command | Admin action | Persisted on the account | Notes |
+| ------- | ------------ | ------------------------ | ----- |
+| `/flat` | `FLAT` | — (an action, not a state) | Close positions for the **active** account. |
+| `/prevent` | `BLOCK_SIGNAL` | `settings.signal_blocked = true` | Block new signals (worker must honor it). |
+| `/allow` | `ALLOW_SIGNAL` | `settings.signal_blocked = false` | Re-enable new signals. |
 
 > `BLOCK_SIGNAL` / `ALLOW_SIGNAL` are scoped by `account_id` in the `AdminSignal`
 > payload. Enforcement is the **worker's** responsibility — worker code lives
 > outside this repo, so the bot/broker only publish the directive.
+
+> A command that changes state writes it to `accounts.settings` **before**
+> publishing, and the endpoint answers `500` (publishing nothing) if that write
+> fails — a command whose intent was not recorded has not taken effect, since
+> the ADMIN publish only reaches a worker that is connected right now. The
+> stored blob is replayed to the worker in the `settings` block of every
+> `WORKER_CONNECTED_ACK` (see [Account settings](#account-settings)) and echoed
+> back to the bot in the command response's `settings` field.
 
 **Presentation** — list commands reply with monospace tables, and every
 timestamp is rendered in the `notification_timezone` broker setting (read over
 HTTP from `GET /admin/settings/notification-timezone`, since the bot has no DB
 access, falling back to UTC+7). Details in
 [`bot/README.md` → Rendering](bot/README.md#rendering).
+
+`/status` additionally shows an **Open positions** count for the active
+account (backed by `GET /v1/telegram/{telegram_user_id}/positions`, which
+returns the account's currently running — `is_running` — trades), and when
+that count is above zero, the same trade table below it, filtered to just
+those open positions.
 
 Run it with the stack: `docker compose up -d bot`. See
 [`bot/README.md`](bot/README.md) for the full command reference, configuration
@@ -955,6 +1129,7 @@ and local development.
 | ------------------ | ---------------- | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `strategy` | String(50) | Strategy name that generated the signal |
+| `signal_uxid` | String(16) (Nullable) | Cycle correlator — 16-char lowercase-hex short uuid shared by every signal of one trade (entry + TPs + SL + FLAT). Ties a signal to its `broadcast_messages` row so the trade renders as one edited-in-place Telegram message. |
 | `symbol` | String(50) | Trading symbol (e.g., XAUUSD) |
 | `timeframe` | String(20) | Chart timeframe (e.g., M15) |
 | `timestamp` | DateTime | Signal generation time from TradingView |
@@ -1013,8 +1188,11 @@ and local development.
 | `market` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
+| `settings` | JSONB | What the owner set from the bot, e.g. `{"signal_blocked": true}` from `/prevent`. `NOT NULL`, defaults to `{}`; sent to the worker in the `settings` block of every `WORKER_CONNECTED_ACK` — see [Account settings](#account-settings) |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
+
+**Why JSONB and not a column per toggle:** the set of bot commands grows, and each new toggle would otherwise cost a migration — while the whole thing travels to the worker as one object anyway. It also beats JSON-in-`TEXT` (what `broker_settings.value` uses) on two counts: Postgres can merge a single key server-side (`settings || '{"signal_blocked": true}'`), so two commands landing together can't drop each other's key the way a read-modify-write would, and the column stays queryable (`WHERE settings @> '{"signal_blocked": true}'`, GIN-indexable) if an admin view ever needs it.
 
 **Unique constraint:** `(market, gateway, account_id)` — a bare `account_id` can exist under more than one market/gateway (two unrelated real accounts, e.g. an MT5 login and a Binance account, can coincidentally share a number). Endpoints and repository methods that take only `account_id` (`POST /admin/accounts/{account_id}/link-token/rotate`, `GET /v1/{account_id}/trades`, the `account_id` scope on `POST /admin/flat`) resolve/match on that bare id and can be ambiguous if it's reused across gateways — avoid deliberately reusing an `account_id` across gateways until those callers are updated to also pass `market`/`gateway`.
 
@@ -1093,35 +1271,117 @@ the row on the next read.
 ### `trade_broadcast_subscriptions` table
 
 One row per `(platform, bot user)` who has opted in — via the bot's `/subscribe`
-— to a Telegram DM whenever one of their linked accounts **completes (closes) a
-trade**. Unsubscribing (`/unsubscribe`) deletes the row. When a worker's `TRADE`
-event ends a trade, the broker resolves the account's owners as the
-intersection of `account_bot_links` (who is linked) and this table (who opted
-in), then DMs each via the bot-service bot token (`BOT_TELEGRAM_TOKEN`) — the
-bot the user actually started, since a bot can only message users who started
-it. The opt-in spans every account the user holds, which is why it is a per-user
-row here rather than a column on a link.
-
-"Ends a trade" means the event's own status maps to a **terminal** trade status —
-`CLOSED` (TP2 / SL / R_SL / TERMINAL_CLOSED / FORCED_CLOSED) or `FLAT` (an admin
-`POST /admin/flat`). An admin FLAT counts because the position is over and the
-owner did not close it themselves. Gating on the event's status rather than the
-persisted row's keys the DM to the one discrete close event the worker emits, so
-a later touch of an already-closed row does not fire a second one.
-
-A `FLATTED` event reports `closed_price=0` when the worker has no close price to
-give. No instrument closes at 0, so the broker treats it as missing and keeps the
-open price rather than persisting — and DM-ing — a bogus `0`.
+— to **live trade cards**. Unsubscribing (`/unsubscribe`) deletes the row. The
+opt-in spans every account the user holds, which is why it is a per-user row
+here rather than a column on a link.
 
 | Column | Type | Description |
 | ------- | ------------ | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `platform` | Enum | `TELEGRAM` |
-| `platform_user_id` | String(64) | The bot user opted in to broadcasts |
+| `platform_user_id` | String(64) | The bot user opted in to trade cards |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
 **Unique constraint:** `(platform, platform_user_id)`.
+
+### `trade_notifications` table
+
+One row per **live trade card**: the Telegram message a subscriber was sent for
+one trade, remembered so later status changes edit that same message instead of
+posting a new one.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `trade_id` | UUID (FK) | `trades.id`, `ON DELETE CASCADE` |
+| `platform` | Enum | `TELEGRAM` |
+| `chat_id` | String(64) | Recipient's platform user id (their DM chat) |
+| `message_id` | Integer | The Telegram message to edit |
+| `status` | Enum | The trade status the card currently shows |
+| `createdAt` | DateTime | Record insertion time |
+| `updatedAt` | DateTime | Last update time |
+
+**Unique constraint:** `(trade_id, platform, chat_id)` — one card per trade per
+recipient.
+
+The card's status line names the event that moved the trade, in brackets —
+`Status: Closed (TP2)`, `Closed (SL)`, `Closed (R_SL)`,
+`Closed (TERMINAL_CLOSED)`, `Closed (FORCED_CLOSED)` — since five worker events
+collapse onto the one `CLOSED`, while the card's direction stays the entry
+(`LONG` / `SHORT`) the trade was opened with. It comes from `trades.last_action`
+(`TradeStatusPolicy.to_last_action`, which renames only `FLATTED` → `FLAT`), so
+an admin FLAT reads `Status: Flatted`, not `Flatted (FLAT)`. It lives on the
+trade row rather than being passed with the event because the card is
+re-rendered later — by the bot, on a Detail tap — with only the row to go on.
+
+#### How a card lives
+
+Every `TRADE` event, after the `trades` upsert, goes to `TradeCardService`:
+
+1. **First sighting** — the broker posts the card to every subscribed owner of
+   that account (the intersection of `account_bot_links` and
+   `trade_broadcast_subscriptions`), via the bot-service bot token
+   (`BOT_TELEGRAM_TOKEN`) — the bot the user actually started, since a bot can
+   only message users who started it. Below the body sit a **Detail** and an
+   **Exit** button.
+2. **Status change** — `OPENED` → `PARTIALLY_CLOSED` (TP1) → `CLOSED` (TP2 /
+   SL / R_SL / TERMINAL_CLOSED / FORCED_CLOSED) / `FLAT` (an admin
+   `POST /admin/flat`) / `REJECTED` — the broker calls `editMessageText` on the
+   stored `message_id`, so the owner's chat keeps **one** message per trade
+   rather than a stream of them.
+3. **Terminal status** — the card is edited one last time and its buttons are
+   dropped, since there is nothing left to act on. That final state *is* the
+   completed-trade notification.
+
+Nothing Telegram-shaped happens on the `TRADE` path. nats-py awaits the
+consumer's callback before pulling the next message, so `handle_event` only
+*queues* the trade and a single background drain task does the lookups and the
+Bot API calls — the same reason the signal path hides behind `QueuedNotifier`,
+which cannot serve here because a card needs the `message_id` its send returns.
+One drain task means two events for the same trade are never applied out of
+order, and a full queue drops the update with a warning rather than blocking
+the bookkeeping it was meant to stay out of.
+
+Two rules keep the Bot API traffic proportional to what a human would notice:
+
+- **Only status transitions edit.** Workers re-emit `TRADE` events for changes a
+  card doesn't show (an SL nudge, a sync tick); `status` here records what the
+  message currently displays, so those are skipped.
+- **Existing cards are refreshed even after unsubscribing.** The opt-in decides
+  who gets a *new* card; once a card exists it keeps telling the truth, rather
+  than freezing on `OPENED` with a live Exit button.
+
+The *persisted* trade drives the card, not the event — the repository already
+refuses a status downgrade, so a late or out-of-order event cannot reopen a card
+that has closed. A subscriber who opts in mid-trade still gets a card on the next
+event; if that event is the close, the card simply arrives final and buttonless.
+
+When Telegram reports a message as permanently unreachable (the user deleted it,
+or blocked the bot) the row is dropped so later events stop retrying. Transient
+failures keep the row, and the next status change tries again.
+
+A `FLATTED` event reports `closed_price=0` when the worker has no close price to
+give. No instrument closes at 0, so the broker treats it as missing and keeps the
+open price rather than persisting — and showing — a bogus `0`.
+
+#### The buttons
+
+The card is sent with the bot service's token (`TradeCardNotifier`, which
+reuses `BroadcastNotifier`'s send/edit machinery and only overrides the token,
+the body formatting and which errors are unrecoverable), so taps arrive as
+ordinary callback queries on the bot's existing long poll — no webhook, no
+second connection. The bot answers them against two endpoints scoped to a single trade:
+
+| Button | Endpoint | Effect |
+| ------- | ------------ | --------------------------------------- |
+| **Detail** / **Summary** | `GET /v1/telegram/{id}/trades/{trade_id}` | Re-renders the card with (or without) the strategy / account / leverage / risk block |
+| **Exit** | `POST /v1/telegram/{id}/trades/{trade_id}/exit` | After a confirmation tap, publishes a FLAT scoped to that trade's `strategy` + `symbol` + account |
+
+Both authorise against **every** account the caller is linked to, not just the
+active one — a card outlives an account switch. `exit` answers `409` on a trade
+that has already reached a terminal status, so a stale card cannot close a newer
+position on the same symbol.
 
 ### `broker_settings` table
 
@@ -1142,7 +1402,105 @@ open price rather than persisting — and DM-ing — a bogus `0`.
 | `crypto_max_leverage` | `"10"` | `POST /admin/settings/crypto-max-leverage` | Default leverage pushed to workers via `SYSTEM.CRYPTO_LEVERAGE_INIT` |
 | `strategy_magic_map` | `'{"MT5_GOLD_M5_V1": 20260409, …}'` | `POST` / `GET /admin/settings/strategy-magic-map` | JSON-text strategy → magic-number map sent to every worker in its `WORKER_CONNECTED_ACK` on connect, filtered to the strategies it announces |
 | `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
+| `public_broadcast_chat_ids` | `""` | `POST` / `GET /admin/settings/public-broadcast-chat-ids` | Comma-separated chat ids (with the same topic suffix syntax as `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`) that receive the **public** signal-cycle broadcast — the bare price/level/timeline copy, without strategy internals or the worker execution table. Editable at runtime from the admin API and the bot's `/admin_public_chats` command; empty turns the public broadcast off. |
+| `private_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/private-reply-notify` | Whether the **private** broadcast posts a reply notice under the cycle's message on each new action (see "Broadcast update notices" above). `"0"` silences the reply only — the message itself keeps being edited in place. Bot: `/admin_private_reply_notify [enable\|disable]`. |
+| `public_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/public-reply-notify` | Same as above, for the **public** broadcast. Bot: `/admin_public_reply_notify [enable\|disable]`. |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
+
+### `broadcast_messages` table
+
+One row per signal *cycle*: everything the broker has seen for one trade
+(``strategy`` + ``signal_uxid``) rolled up into a single record. The row's
+``events`` list — an ordered JSONB array of the actions in the order they
+arrived — is what the Telegram message body is rendered from every time an
+edit is due, so the operator sees the full timeline in one place instead of
+one message per action.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `strategy` | String(50) | Strategy the cycle belongs to |
+| `signal_uxid` | String(16) | 16-char lowercase-hex cycle correlator (matches `signals.signal_uxid`) |
+| `symbol` | String(50) | Symbol carried on the entry signal |
+| `timeframe` | String(20) (Nullable) | Chart timeframe carried on the entry signal |
+| `status` | Enum | `RUNNING` until a closing action arrives (TP2, R_SL, SL, FLAT); then `CLOSED` |
+| `events` | JSONB | Ordered list of stored action events — action, price/qty/levels, timestamp, attempt number, indicator/input dumps |
+| `last_seq` | Integer | Sequence number of the most recent write-log entry against this cycle (see below) |
+| `last_broadcast_at` | DateTime (Nullable) | Timestamp of the last successful dispatcher run for this cycle |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
+
+**Unique constraint:** `(strategy, signal_uxid)` — the cycle key.
+
+### `broadcast_message_chats` table
+
+Per-chat delivery state for a cycle. Every chat the cycle addressed (private
+audience from `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`, public audience from the
+`public_broadcast_chat_ids` broker setting) has its own row here, so the
+same cycle can carry a different Telegram `message_id` in each chat and can
+render a slightly different body per audience (the private copy carries the
+strategy name, signal id, the worker execution table and the raw dump; the
+public copy is the bare price/level/timeline body only).
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `broadcast_message_id` | UUID | FK → `broadcast_messages.id`, `ON DELETE CASCADE` |
+| `audience` | Enum | `PRIVATE` (operator) or `PUBLIC` (subscribers) |
+| `chat_id` | String(255) | The setting entry the row represents — verbatim, so `-1002173777783_924584` (a group + topic id) is distinct from `-1002173777783_924585` |
+| `message_id` | String(64) (Nullable) | Telegram `message_id` of the chat's cycle message; `NULL` until the first send succeeds |
+| `message` | Text (Nullable) | Last body actually delivered to this chat — kept so the dispatcher can skip a no-op edit |
+| `delivered_seq` | Integer | Highest `last_seq` this chat has been shown; a delivery whose seq is not greater is dropped so a slow edit cannot overwrite a newer body |
+| `notified_event_count` | Integer (Nullable) | How many of the cycle's actions this chat has been told about with a reply notice under its message; `NULL` on rows written before notices existed (caught up silently on the next delivery) |
+| `last_error` | String(500) (Nullable) | Last transient error seen when editing/sending, or `NULL` on success |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
+
+**Unique constraint:** `(broadcast_message_id, chat_id)`.
+
+### `broadcast_message_workers` table
+
+Rows appended by the TRADE consumer for the *public* broadcast's execution
+table (one line per worker per cycle, updated in place as the worker
+progresses through the trade). Account ids are stored verbatim; the
+formatter masks them to their last four characters when rendering
+(`MT5 ****5678`) so the public channel never publishes anyone's full
+account number.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `broadcast_message_id` | UUID | FK → `broadcast_messages.id`, `ON DELETE CASCADE` |
+| `worker_id` | String(255) | `<market>-<gateway>-<account_id>` composed by `compose_worker_id` |
+| `account_id` | String(50) | Worker's raw account id (masked at render time) |
+| `market` | Enum (Nullable) | `FOREX` / `CRYPTO`, copied from the TRADE event or the persisted account |
+| `gateway` | String(50) (Nullable) | Exchange the account trades through |
+| `latest_status` | Enum | Last trade status seen from this worker for this cycle: `OPENED`, `PARTIALLY_CLOSED`, `CLOSED`, `FLAT`, `REJECTED` |
+| `latest_action` | String(20) (Nullable) | Last raw action label the worker reported (e.g. `TP1`, `SL`, `R_SL`) |
+| `reject_reason` | String(255) (Nullable) | Reason if the last event was a rejection |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
+
+**Unique constraint:** `(broadcast_message_id, worker_id)`.
+
+### `broadcast_message_logs` table
+
+Append-only write log that turns a cycle change into a delivery. Every
+recorded event and every worker execution appends one row here *in the same
+transaction*, and a Postgres trigger fires `pg_notify` on the
+`broadcast_message_logs` channel so `BroadcastDispatcher` can wake up and
+edit the affected chats without polling. A sweeper re-drains the log on a
+timer as a safety net for anything appended while the dispatcher was down.
+
+| Column | Type | Description |
+| ------- | ------------ | --------------------------------------- |
+| `id` | UUID (PK) | Unique record identifier |
+| `broadcast_message_id` | UUID | FK → `broadcast_messages.id`, `ON DELETE CASCADE` |
+| `seq` | Integer | Per-cycle sequence handed out under a row lock; strictly increasing |
+| `kind` | Enum | `SIGNAL_EVENT` (a signal folded in) or `WORKER_EXECUTION` (a TRADE event) |
+| `payload` | JSONB | Copy of the event that was recorded — kept so the log is self-contained if the cycle is later purged |
+| `status` | Enum | `PENDING` on insert; `SENDING` while the dispatcher claims it; `DELIVERED` on success; `FAILED` after the retry cap is reached |
+| `attempts` | Integer | Delivery attempts spent on this row |
+| `last_error` | String(500) (Nullable) | Last error seen from the notifier, `NULL` on success |
+| `claimed_at` | DateTime (Nullable) | Set while the row is `SENDING` — a stale claim is reclaimed by the sweeper after 60 s |
+| `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
 
 ---
 

@@ -19,6 +19,9 @@ from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_TIMEZONE_KEY,
+  PRIVATE_REPLY_NOTIFY_KEY,
+  PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_REPLY_NOTIFY_KEY,
   SIGNAL_BLOCKED,
   STRATEGY_MAGIC_MAP_KEY,
 )
@@ -139,9 +142,10 @@ class FakeAccountRepo:
 
 
 class FakeTradeRepo:
-  def __init__(self, trades, total):
+  def __init__(self, trades, total, strategies=None):
     self._trades = trades
     self._total = total
+    self._strategies = list(strategies) if strategies is not None else []
     self.list_kwargs = None
 
   async def list_by_account(self, account_id, *, limit, offset, order, order_by):
@@ -152,6 +156,9 @@ class FakeTradeRepo:
 
   async def count_by_account(self, account_id):
     return self._total
+
+  async def list_distinct_strategies(self):
+    return list(self._strategies)
 
 
 def _make_account(
@@ -217,7 +224,9 @@ def ctx():
   notifier = FakeNotifier()
   publisher = FakePublisher()
   account_repo = FakeAccountRepo([_make_account()])
-  trade_repo = FakeTradeRepo([_make_trade()], total=1)
+  trade_repo = FakeTradeRepo(
+    [_make_trade()], total=1, strategies=["strat_a", "strat_b"]
+  )
 
   app.dependency_overrides[get_signal_service] = lambda: signal_service
   app.dependency_overrides[get_setting_repository] = lambda: setting_repo
@@ -460,6 +469,151 @@ def test_toggle_include_signal_raw(ctx):
   assert resp.json()["value"] == "1"
 
 
+# ── Admin settings — public broadcast chats ─────────────────────────
+
+
+def test_get_public_broadcast_chat_ids_defaults_to_empty(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/public-broadcast-chat-ids", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PUBLIC_BROADCAST_CHAT_IDS_KEY,
+    "value": "",
+  }
+
+
+def test_set_public_broadcast_chat_ids(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/public-broadcast-chat-ids",
+    headers={"X-API-KEY": API_KEY},
+    json={"chat_ids": [" -1001234567890 ", "@my_channel", "-1001234567890", ""]},
+  )
+  assert resp.status_code == 200
+  # Normalised: trimmed, de-duplicated, order preserved.
+  assert resp.json()["value"] == "-1001234567890,@my_channel"
+  assert (
+    ctx["setting_repo"].values[PUBLIC_BROADCAST_CHAT_IDS_KEY]
+    == "-1001234567890,@my_channel"
+  )
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_public_broadcast_chat_ids_accepts_an_empty_list(ctx):
+  """An empty list is how the public broadcast is turned off, so unlike the
+  other list settings it must not be rejected."""
+  ctx["setting_repo"].values[PUBLIC_BROADCAST_CHAT_IDS_KEY] = "-100"
+  resp = ctx["client"].post(
+    "/admin/settings/public-broadcast-chat-ids",
+    headers={"X-API-KEY": API_KEY},
+    json={"chat_ids": []},
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == ""
+  assert ctx["setting_repo"].values[PUBLIC_BROADCAST_CHAT_IDS_KEY] == ""
+
+
+def test_set_public_broadcast_chat_ids_persist_failure_is_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/public-broadcast-chat-ids",
+    headers={"X-API-KEY": API_KEY},
+    json={"chat_ids": ["-100"]},
+  )
+  assert resp.status_code == 500
+
+
+# ── Admin settings — reply notify ────────────────────────────────────
+
+
+def test_get_private_reply_notify_defaults_to_enabled(ctx):
+  """Unset means the reply notice is on."""
+  resp = ctx["client"].get(
+    "/admin/settings/private-reply-notify", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PRIVATE_REPLY_NOTIFY_KEY,
+    "value": "1",
+    "state": "ENABLED",
+  }
+
+
+def test_set_private_reply_notify_disabled(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/private-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": False},
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PRIVATE_REPLY_NOTIFY_KEY,
+    "value": "0",
+    "state": "DISABLED",
+  }
+  assert ctx["setting_repo"].values[PRIVATE_REPLY_NOTIFY_KEY] == "0"
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_private_reply_notify_back_to_enabled(ctx):
+  ctx["setting_repo"].values[PRIVATE_REPLY_NOTIFY_KEY] = "0"
+  resp = ctx["client"].post(
+    "/admin/settings/private-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": True},
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "1"
+  assert ctx["setting_repo"].values[PRIVATE_REPLY_NOTIFY_KEY] == "1"
+
+
+def test_set_private_reply_notify_persist_failure_is_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/private-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": False},
+  )
+  assert resp.status_code == 500
+
+
+def test_get_public_reply_notify_defaults_to_enabled(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/public-reply-notify", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PUBLIC_REPLY_NOTIFY_KEY,
+    "value": "1",
+    "state": "ENABLED",
+  }
+
+
+def test_set_public_reply_notify_disabled(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/public-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": False},
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PUBLIC_REPLY_NOTIFY_KEY,
+    "value": "0",
+    "state": "DISABLED",
+  }
+  assert ctx["setting_repo"].values[PUBLIC_REPLY_NOTIFY_KEY] == "0"
+
+
+def test_set_public_reply_notify_persist_failure_is_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/public-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": True},
+  )
+  assert resp.status_code == 500
+
+
 # ── Admin settings — crypto ─────────────────────────────────────────
 
 
@@ -676,6 +830,7 @@ def test_get_crypto_max_leverage_reflects_stored_value(ctx):
   assert resp.status_code == 200
   assert resp.json()["value"] == "20"
 
+
 # ── Admin settings — strategy magic map ─────────────────────────────
 
 
@@ -841,6 +996,15 @@ def test_get_settings_reflects_enabled(ctx):
   blocked = next(i for i in resp.json() if i["setting"] == SIGNAL_BLOCKED)
   assert blocked["value"] == "1"
   assert blocked["state"] == "ENABLED"
+
+
+# ── Admin strategies ────────────────────────────────────────────────
+
+
+def test_list_strategies_returns_repo_values(ctx):
+  resp = ctx["client"].get("/admin/strategies", headers={"X-API-KEY": API_KEY})
+  assert resp.status_code == 200
+  assert resp.json() == ["strat_a", "strat_b"]
 
 
 # ── Admin flat ──────────────────────────────────────────────────────

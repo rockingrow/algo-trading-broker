@@ -11,13 +11,21 @@ from broker.services.nats_service import SystemEventConsumer
 
 
 class FakeAccountRepo:
-  def __init__(self):
+  def __init__(self, settings: dict | None = None):
     self.upserts: list[tuple[str, MarketTypeEnum, str]] = []
+    self.settings_reads: list[tuple[str, MarketTypeEnum, str]] = []
+    self._settings = settings if settings is not None else {}
 
   async def upsert_gateway(
     self, account_id: str, market: MarketTypeEnum, gateway: str
   ) -> None:
     self.upserts.append((account_id, market, gateway))
+
+  async def get_settings(
+    self, account_id: str, market: MarketTypeEnum, gateway: str
+  ) -> dict:
+    self.settings_reads.append((account_id, market, gateway))
+    return dict(self._settings)
 
   async def get_all(self):
     return []
@@ -442,6 +450,102 @@ async def test_account_repo_failure_does_not_block_the_ack():
   assert publisher.acks[0]["crypto_leverage_init"].default_leverage == 10
 
 
+# ── accounts.settings inside the ACK ───────────────────────────────────────
+#
+# What the owner set from the bot (/prevent & co.) has to reach the worker on
+# connect: the ADMIN push that ran the command only reached a worker that was
+# online at the time.
+
+
+async def test_ack_carries_the_accounts_settings_blob():
+  accounts = FakeAccountRepo(settings={"signal_blocked": True})
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.crypto")
+  )
+
+  # Looked up under the bare account_id, same scoping as the gateway upsert.
+  assert accounts.settings_reads == [("7654321", MarketTypeEnum.CRYPTO, "BINANCE")]
+  assert publisher.acks[0]["settings"].signal_blocked is True
+
+
+async def test_ack_settings_default_for_an_account_that_never_ran_a_command():
+  # {} in the row (or no row at all) → the block is still present, with the
+  # schema defaults, so a worker can read it unconditionally.
+  consumer, _repo, publisher = _make_consumer(accounts=FakeAccountRepo(settings={}))
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert publisher.acks[0]["settings"].signal_blocked is False
+
+
+async def test_ack_settings_ignores_unknown_keys():
+  accounts = FakeAccountRepo(
+    settings={"signal_blocked": True, "written_by_a_newer_broker": 42}
+  )
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  settings = publisher.acks[0]["settings"]
+  assert settings.signal_blocked is True
+  assert settings.model_dump() == {"signal_blocked": True}
+
+
+async def test_ack_settings_fall_back_to_defaults_when_the_blob_is_invalid():
+  accounts = FakeAccountRepo(settings={"signal_blocked": "not-a-bool"})
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.crypto")
+  )
+
+  # A hand-edited row must not cost the worker the rest of its configuration.
+  assert len(publisher.acks) == 1
+  assert publisher.acks[0]["settings"].signal_blocked is False
+  assert publisher.acks[0]["crypto_leverage_init"].default_leverage == 10
+
+
+async def test_settings_lookup_failure_still_sends_the_rest_of_the_config():
+  class ExplodingSettingsRepo(FakeAccountRepo):
+    async def get_settings(self, account_id, market, gateway) -> dict:
+      raise RuntimeError("db down")
+
+  consumer, _repo, publisher = _make_consumer(accounts=ExplodingSettingsRepo())
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.crypto")
+  )
+
+  assert len(publisher.acks) == 1
+  assert publisher.acks[0]["settings"].signal_blocked is False
+  assert publisher.acks[0]["crypto_leverage_init"].default_leverage == 10
+
+
+async def test_rejected_crypto_handshake_skips_the_settings_query():
+  # Same reason as the signals query: nothing to configure on a worker we are
+  # about to reject.
+  accounts = FakeAccountRepo(settings={"signal_blocked": True})
+  consumer, _repo, _pub = _make_consumer(
+    settings={CRYPTO_ALLOWED_SYMBOL_KEY: None, CRYPTO_MAX_LEVERAGE_KEY: None},
+    accounts=accounts,
+  )
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.err")
+  )
+  assert accounts.settings_reads == []
+
+
+async def test_settings_are_read_fresh_on_every_handshake():
+  # Deliberately uncached: a command run between two connects must reach the
+  # second one.
+  accounts = FakeAccountRepo(settings={"signal_blocked": False})
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  accounts._settings = {"signal_blocked": True}
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert len(accounts.settings_reads) == 2
+  assert publisher.acks[0]["settings"].signal_blocked is False
+  assert publisher.acks[1]["settings"].signal_blocked is True
+
+
 # ── Request/reply (worker used nats.request, msg carries a reply inbox) ────────
 
 
@@ -681,10 +785,13 @@ async def test_stop_unsubscribes():
 # ── retry_signals replay inside the ACK ────────────────────────────────────
 
 
-def _webhook_envelope(strategy: str, signal_id: str = "sig-1") -> dict:
+def _webhook_envelope(
+  strategy: str, signal_id: str = "sig-1", signal_uxid: str = "0000111122223333"
+) -> dict:
   return {
     "signal_id": signal_id,
     "payload": {
+      "signal_uxid": signal_uxid,
       "strategy": strategy,
       "symbol": "OANDA:XAUUSD",
       "timeframe": "60",
@@ -840,7 +947,7 @@ async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
   signals = FakeSignalRepo(
     envelopes=[
       {"signal_id": "sig-bad", "payload": {"not": "a webhook"}},
-      _webhook_envelope("wt_cross_v1", signal_id="sig-good"),
+      _webhook_envelope("wt_cross_v1"),
     ]
   )
   consumer, _repo, publisher = _make_consumer(signals=signals)
@@ -850,7 +957,26 @@ async def test_retry_signal_bad_envelope_is_skipped_but_others_replayed():
   assert len(publisher.acks) == 1
   retry = publisher.acks[0]["retry_signals"]
   assert len(retry) == 1
-  assert retry[0].signal_id == "sig-good"
+  assert retry[0].signal_id == "sig-1"
+
+
+async def test_replayed_signal_carries_both_ids():
+  """The replay repeats the id the signal was published with — that is what a
+  worker de-duplicates on — and the cycle id rides along from the payload."""
+  signals = FakeSignalRepo(
+    envelopes=[
+      _webhook_envelope(
+        "wt_cross_v1", signal_id="sig-7", signal_uxid="9f2c4b7e18a3d605"
+      )
+    ]
+  )
+  consumer, _repo, publisher = _make_consumer(signals=signals)
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["wt_cross_v1"]))
+  )
+  replayed = publisher.acks[0]["retry_signals"][0]
+  assert replayed.signal_id == "sig-7"
+  assert replayed.signal_uxid == "9f2c4b7e18a3d605"
 
 
 # ── strategy_magic_map inside the ACK ──────────────────────────────────────

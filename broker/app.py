@@ -1,5 +1,9 @@
 import asyncio
 from contextlib import asynccontextmanager
+import json
+import logging
+import re
+import time
 import traceback
 
 from fastapi import FastAPI, Request
@@ -13,26 +17,35 @@ from broker.db.repository import (
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
   SqlAlchemyTradeBroadcastRepository,
+  SqlAlchemyTradeNotificationRepository,
   SqlAlchemyTradeRepository,
 )
 from broker.helpers import emoji_constants as em
 from broker.logger import get_logger
 from broker.nats import nats_client
 from broker.openapi import fastapi_kwargs
-from broker.providers import make_signals_notifier
+from broker.providers import (
+  make_broadcast_dispatcher,
+  make_signal_broadcaster,
+  make_signals_notifier,
+)
 from broker.router import get_core_router
 from broker.services.nats_service import (
   NatsPublisher,
   SystemEventConsumer,
   TradeEventConsumer,
 )
-from broker.services.notification_service import TelegramNotification
+from broker.services.notification_service import (
+  QueuedNotifier,
+  TelegramNotification,
+)
 from broker.services.signal_processing_service import (
+  DeferredEnqueuer,
   SignalProcessingService,
   SignalWorker,
 )
 from broker.services.signal_retry_job import SignalRetryJob
-from broker.services.trade_broadcast_service import TradeBroadcastService
+from broker.services.trade_card_service import TradeCardService
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -50,20 +63,40 @@ async def lifespan(app: FastAPI):
     telegram_log_handler.start(asyncio.get_running_loop())
 
   await init_db()
-  nats_client.set_notifier(notifier)
+  # NATS lifecycle alerts go through a queue as well: nats-py awaits the
+  # disconnected/reconnected callbacks inside its own reconnect loop, so a
+  # Telegram send that hangs for the full HTTP timeout would hold up the very
+  # reconnect the webhook is waiting on.
+  nats_notifier = QueuedNotifier(notifier)
+  await nats_notifier.start()
+  nats_client.set_notifier(nats_notifier)
   await nats_client.connect()
 
   publisher = NatsPublisher(connection=nats_client)
   setting_repo = SqlAlchemySettingRepository()
   signal_repo = SqlAlchemySignalRepository()
-  trade_broadcast_service = TradeBroadcastService(
+  # Owner trade cards run off their own queue for the same reason as the signal
+  # notifications: nats-py awaits the TRADE callback before pulling the next
+  # event, so a DM to a throttled Telegram would stall the trade bookkeeping
+  # behind it. QueuedNotifier can't serve here — a card needs the message id its
+  # send returns — so the service owns the queue itself.
+  trade_card_service = TradeCardService(
     broadcast_repository=SqlAlchemyTradeBroadcastRepository(),
+    notification_repository=SqlAlchemyTradeNotificationRepository(),
     setting_repository=setting_repo,
   )
+  await trade_card_service.start()
+  # Signal-cycle broadcaster writer + CDC dispatcher: signals and TRADE events
+  # only record cycle changes onto ``broadcast_messages``; a Postgres
+  # LISTEN/NOTIFY listener wakes the dispatcher which then edits the Telegram
+  # message. Keeping them separate takes Telegram off the signal path entirely.
+  signal_broadcaster = make_signal_broadcaster()
+  broadcast_dispatcher = make_broadcast_dispatcher(setting_repo)
   consumer = TradeEventConsumer(
     trade_repository=SqlAlchemyTradeRepository(),
     connection=nats_client,
-    broadcast_service=trade_broadcast_service,
+    card_service=trade_card_service,
+    signal_broadcast_service=signal_broadcaster,
   )
   system_consumer = SystemEventConsumer(
     setting_repository=setting_repo,
@@ -72,12 +105,22 @@ async def lifespan(app: FastAPI):
     signal_repository=signal_repo,
     connection=nats_client,
   )
+  # Signal notifications go out through a queue: the JetStream worker handles
+  # envelopes one at a time, so awaiting a Telegram send that a throttled
+  # network will hold for the full HTTP timeout would delay the *next* signal's
+  # fan-out to the trading workers.
+  signals_notifier = QueuedNotifier(make_signals_notifier(setting_repo))
+  await signals_notifier.start()
+  deferred_enqueuer = DeferredEnqueuer(publisher)
+  await deferred_enqueuer.start()
   signal_service = SignalProcessingService(
     signal_repository=signal_repo,
     setting_repository=setting_repo,
     publisher=publisher,
-    notifier=make_signals_notifier(setting_repo),
+    notifier=signals_notifier,
+    broadcaster=signal_broadcaster,
     webhook_secret=settings.webhook.SECRET,
+    deferred_enqueuer=deferred_enqueuer,
   )
   signal_worker = SignalWorker(service=signal_service, connection=nats_client)
   signal_retry_job = SignalRetryJob(
@@ -89,7 +132,11 @@ async def lifespan(app: FastAPI):
   await system_consumer.start()
   await signal_worker.start()
   await signal_retry_job.start()
+  await broadcast_dispatcher.start()
   app.state.publisher = publisher
+  # The webhook route builds its own request-scoped service, but the deferred
+  # queue must outlive the request that filled it.
+  app.state.deferred_enqueuer = deferred_enqueuer
 
   api_prefix = (
     f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
@@ -113,9 +160,19 @@ async def lifespan(app: FastAPI):
 
   await signal_retry_job.stop()
   await signal_worker.stop()
+  # Broadcast dispatcher stops after the producers: the sweeper's last pass
+  # drains anything the JetStream handler queued on its way out.
+  await broadcast_dispatcher.stop()
+  # Drained after the producers stop, so nothing is still being queued behind
+  # the flush, and before NATS closes, so a pending enqueue can still land.
+  await deferred_enqueuer.stop()
+  await signals_notifier.stop()
   await system_consumer.stop()
   await consumer.stop()
+  # After the TRADE consumer, so nothing is still being queued behind the flush.
+  await trade_card_service.stop()
   await nats_client.close()
+  await nats_notifier.stop()
   await close_db()
 
   if settings.telegram.ENABLED and settings.telegram.LOG_ERRORS_ENABLED:
@@ -125,7 +182,8 @@ async def lifespan(app: FastAPI):
 
 
 def install_webhook_connection_close(app: FastAPI) -> None:
-  """Send ``Connection: close`` on every response to the TradingView webhook.
+  """Send ``Connection: close`` on every response to the TradingView webhook,
+  and time how long each delivery took to answer.
 
   TradingView keeps a per-endpoint TCP pool, but uvicorn drops idle keep-alive
   sockets after ``WEBHOOK_KEEPALIVE_TIMEOUT`` seconds. On any strategy whose
@@ -134,25 +192,121 @@ def install_webhook_connection_close(app: FastAPI) -> None:
   and the delivery fails with "server closed the connection unexpectedly".
   Signalling close per response makes TradingView open a fresh TCP for every
   alert, removing the race entirely at the cost of one extra handshake.
+
+  The timing is what turns the *other* TradingView failure — "request took too
+  long and timed out", reported by TradingView with no server-side trace at
+  all — into something readable in the broker's own log: one line per alert
+  with the elapsed milliseconds, raised to ``warning`` when the handler
+  overruns the enqueue deadline it is supposed to fit inside.
   """
 
   @app.middleware("http")
   async def _force_close_webhook(request: Request, call_next):
+    if not request.url.path.endswith("/secret/webhook"):
+      return await call_next(request)
+
+    started = time.perf_counter()
     response = await call_next(request)
-    if request.url.path.endswith("/secret/webhook"):
-      response.headers["Connection"] = "close"
+    elapsed = time.perf_counter() - started
+    response.headers["Connection"] = "close"
+    level = (
+      logging.WARNING if elapsed > settings.webhook.ENQUEUE_TIMEOUT else logging.INFO
+    )
+    log.log(
+      level,
+      "Webhook answered %s in %.0fms",
+      response.status_code,
+      elapsed * 1000,
+    )
     return response
 
 
-def create_app() -> FastAPI:
-  """Build and return the FastAPI application with all routes wired up."""
-  app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
+_REDACTED = "***"
 
-  install_webhook_connection_close(app)
+# Keys whose value is a shared secret rather than data worth logging. The
+# webhook's ``token`` *is* WEBHOOK_SECRET, and a rejected alert's body — the
+# whole of it, before this — went straight into the 422 log line.
+_SECRET_KEYS = frozenset({"token"})
+
+# Same secret seen inside a raw (unparsed) body. The trailing alternative
+# catches a value the snippet window cut in half.
+_SECRET_IN_TEXT = re.compile(r'("token"\s*:\s*")(?:[^"]*"|[^"]*$)')
+
+
+def redact_secrets(value):
+  """Replace secret values anywhere in *value* — dict, list, or raw body text.
+
+  A validation error carries the offending input back to the caller, so
+  everything the webhook was sent (its ``token`` included) reaches the log and
+  the response body unless it is scrubbed here first.
+  """
+  if isinstance(value, dict):
+    return {
+      key: (_REDACTED if key in _SECRET_KEYS else redact_secrets(item))
+      for key, item in value.items()
+    }
+  if isinstance(value, list):
+    return [redact_secrets(item) for item in value]
+  if isinstance(value, str):
+    return _SECRET_IN_TEXT.sub(rf'\1{_REDACTED}"', value)
+  return value
+
+
+def json_syntax_error(errors: list) -> str | None:
+  """Describe *where* a rejected body stopped being valid JSON, if that is why.
+
+  TradingView parses an alert message itself and, when the parse fails, sends
+  the text as ``text/plain`` instead of ``application/json``. FastAPI then
+  hands the raw body straight to the model, and pydantic reports the generic
+  ``Input should be a valid dictionary or object to extract fields from`` — a
+  message that says nothing about the actual problem, which is a syntax error
+  somewhere in the alert's JSON (a Pine ``str.tostring`` that emitted a
+  thousands separator, an unquoted value, a trailing comma).
+
+  Returns ``None`` when the body is not that case, so ordinary field-level
+  validation errors are reported unchanged.
+  """
+  for error in errors:
+    if tuple(error.get("loc") or ()) != ("body",):
+      continue
+    raw = error.get("input")
+    if isinstance(raw, bytes):
+      raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+      continue
+    try:
+      json.loads(raw)
+    except json.JSONDecodeError as exc:
+      # A window around the offending character — the whole alert body is
+      # hundreds of fields long and unreadable in a log line. Sliced before
+      # redacting so the reported position still matches the body as sent.
+      snippet = redact_secrets(raw[max(0, exc.pos - 40) : exc.pos + 40])
+      return f"{exc.msg} at line {exc.lineno} column {exc.colno} — near: …{snippet}…"
+    except ValueError:
+      continue
+  return None
+
+
+def install_exception_handlers(app: FastAPI) -> None:
+  """Translate validation failures and crashes into logged JSON responses."""
 
   @app.exception_handler(RequestValidationError)
   async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    errors = jsonable_encoder(exc.errors())
+    # Position first (needs the body as sent), secrets scrubbed second.
+    raw_errors = jsonable_encoder(exc.errors())
+    json_error = json_syntax_error(raw_errors)
+    errors = redact_secrets(raw_errors)
+    if json_error:
+      log.warning(
+        "422 Unprocessable Content | %s %s | body is not valid JSON: %s",
+        request.method,
+        request.url.path,
+        json_error,
+      )
+      return JSONResponse(
+        status_code=422, content={"detail": errors, "json_error": json_error}
+      )
+
     log.warning(
       "422 Unprocessable Content | %s %s | %s",
       request.method,
@@ -166,6 +320,14 @@ def create_app() -> FastAPI:
     log.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
     log.error(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
+def create_app() -> FastAPI:
+  """Build and return the FastAPI application with all routes wired up."""
+  app = FastAPI(lifespan=lifespan, **fastapi_kwargs())
+
+  install_webhook_connection_close(app)
+  install_exception_handlers(app)
 
   # Include Core Router — mount under secret prefix if configured
   api_prefix = (

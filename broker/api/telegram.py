@@ -13,12 +13,15 @@ from user-typed text.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from broker.db.models import Account
+from broker.constants import ACCOUNT_SETTING_SIGNAL_BLOCKED
+from broker.db.models import Account, Trade
+from broker.helpers.trade_card import is_terminal
 from broker.interfaces import (
   AccountRepository,
   SignalPublisher,
@@ -40,6 +43,7 @@ from broker.schemas.telegram_schema import (
   FlatCommandRequest,
   LinkedAccountResponse,
   LinkRequest,
+  OpenPositionsResponse,
   PreventCommandRequest,
   SwitchAccountRequest,
 )
@@ -49,6 +53,9 @@ from broker.security.ensure_api_key import ensure_api_key
 log = get_logger(__name__)
 
 NOT_LINKED_RESPONSE = {404: {"description": "No account linked to this Telegram user."}}
+NO_SUCH_TRADE_RESPONSE = {
+  404: {"description": "No such trade, or it belongs to an account you aren't linked to."}
+}
 
 
 async def get_linked_account(
@@ -68,6 +75,27 @@ async def get_linked_account(
       detail="No account linked to this Telegram user",
     )
   return account
+
+
+async def get_own_trade(
+  telegram_user_id: int,
+  trade_id: uuid.UUID,
+  trades_repo: TradeRepository = Depends(get_trade_repository),
+) -> Trade:
+  """Resolve a trade the caller is entitled to act on, or raise 404.
+
+  Unlike :func:`get_linked_account`, this checks the trade against *every*
+  account the user is linked to rather than the active one: a trade card sits
+  in the chat long after its owner has switched accounts, and its buttons must
+  keep working.
+  """
+  trade = await trades_repo.get_for_telegram_user(trade_id, telegram_user_id)
+  if trade is None:
+    raise HTTPException(
+      status_code=status.HTTP_404_NOT_FOUND,
+      detail="Trade not found",
+    )
+  return trade
 
 
 def _scope(account_id: str, *, strategy: str | None, symbol: str | None) -> str:
@@ -210,6 +238,88 @@ def get_telegram_router() -> APIRouter:
       ),
     )
 
+  @router.get(
+    "/{telegram_user_id}/positions",
+    summary="List currently open positions for the caller's linked account",
+    response_model=OpenPositionsResponse,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
+  )
+  async def list_open_positions(
+    account: Account = Depends(get_linked_account),
+    trades_repo: TradeRepository = Depends(get_trade_repository),
+  ) -> OpenPositionsResponse:
+    trades = await trades_repo.list_open_by_account(account.account_id)
+    return OpenPositionsResponse(
+      count=len(trades), data=[TradeResponse.model_validate(t) for t in trades]
+    )
+
+  # ── Single-trade endpoints (the live trade card's buttons) ───────
+  # Keyed by the trade's own id and authorised against every account the
+  # caller is linked to, so a card stays actionable regardless of which
+  # account happens to be active when its buttons are tapped.
+
+  @router.get(
+    "/{telegram_user_id}/trades/{trade_id}",
+    summary="Get one trade the caller owns",
+    response_model=TradeResponse,
+    responses={**AUTH_RESPONSES, **NO_SUCH_TRADE_RESPONSE},
+  )
+  async def get_trade(trade: Trade = Depends(get_own_trade)) -> TradeResponse:
+    return TradeResponse.model_validate(trade)
+
+  @router.post(
+    "/{telegram_user_id}/trades/{trade_id}/exit",
+    summary="Close one specific trade from its card",
+    response_model=CommandResultResponse,
+    responses={
+      **AUTH_RESPONSES,
+      **NO_SUCH_TRADE_RESPONSE,
+      409: {"description": "The trade is already closed."},
+    },
+  )
+  async def exit_trade(
+    trade: Trade = Depends(get_own_trade),
+    publisher: SignalPublisher = Depends(get_publisher),
+  ) -> CommandResultResponse:
+    """Publish a FLAT scoped to this trade's strategy and symbol.
+
+    FLAT is the only close directive the workers understand, and it takes a
+    scope rather than a position id — so the narrowest close available is
+    "this account, this strategy, this symbol", which is the trade itself
+    unless the same strategy holds two positions on one symbol. This trade's
+    own ``ref_id`` — the worker's own unique column, so it stays correct even
+    for a position the worker opened by hand — rides along too, letting a
+    worker that understands it narrow the close to this exact position
+    instead of matching every open position on that scope. Closing an
+    already-terminal trade is refused rather than published: the FLAT would
+    be a no-op at best, and could close a *newer* position on the same symbol
+    at worst.
+    """
+    if is_terminal(trade):
+      raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Trade is already closed",
+      )
+
+    await publisher.publish_admin_signal(
+      action=AdminActionEnum.FLAT,
+      timestamp=datetime.now(timezone.utc),
+      strategy=trade.strategy,
+      symbol=trade.symbol,
+      account_id=trade.account_id,
+      market=trade.market,
+      gateway=trade.gateway,
+      ref_id=trade.ref_id,
+    )
+    scope = _scope(trade.account_id, strategy=trade.strategy, symbol=trade.symbol)
+    log.info(
+      "Telegram trade exit published trade_id=%s scope=%s ref_id=%s",
+      trade.id,
+      scope,
+      trade.ref_id,
+    )
+    return CommandResultResponse(action=AdminActionEnum.FLAT.value, scope=scope)
+
   @router.post(
     "/{telegram_user_id}/commands/flat",
     summary="Flat (close) positions for the caller's account",
@@ -244,10 +354,27 @@ def get_telegram_router() -> APIRouter:
     body: PreventCommandRequest,
     account: Account = Depends(get_linked_account),
     publisher: SignalPublisher = Depends(get_publisher),
+    account_repo: AccountRepository = Depends(get_account_repository),
   ) -> CommandResultResponse:
     action = (
       AdminActionEnum.BLOCK_SIGNAL if body.enabled else AdminActionEnum.ALLOW_SIGNAL
     )
+    # Persist before publishing, not after. The ADMIN signal only reaches a
+    # worker that is connected *right now*; ``accounts.settings`` is what the
+    # WORKER_CONNECTED_ACK replays on every (re)connect, so it — not the
+    # publish — is what makes the command stick. Doing it in this order means a
+    # DB failure fails the command outright (nothing published, nothing half
+    # applied), while a NATS failure still leaves the intent recorded for the
+    # worker to pick up when it comes back.
+    settings = await account_repo.update_settings(
+      account.id, {ACCOUNT_SETTING_SIGNAL_BLOCKED: body.enabled}
+    )
+    if settings is None:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to persist account settings",
+      )
+
     await publisher.publish_admin_signal(
       action=action,
       timestamp=datetime.now(timezone.utc),
@@ -256,17 +383,19 @@ def get_telegram_router() -> APIRouter:
       gateway=account.gateway,
     )
     scope = _scope(account.account_id, strategy=None, symbol=None)
-    log.info("Telegram %s published scope=%s", action.value, scope)
-    return CommandResultResponse(action=action.value, scope=scope)
+    log.info(
+      "Telegram %s published scope=%s settings=%s", action.value, scope, settings
+    )
+    return CommandResultResponse(action=action.value, scope=scope, settings=settings)
 
-  # ── Completed-trade broadcast opt-in ─────────────────────────────
+  # ── Trade-card opt-in ────────────────────────────────────────────
   # A per-user preference (spans every account the user holds), so these are
   # keyed by the path ``telegram_user_id`` alone and need no linked-account
   # resolution — an owner may subscribe before or after linking.
 
   @router.get(
     "/{telegram_user_id}/broadcast",
-    summary="Whether the caller receives completed-trade broadcast DMs",
+    summary="Whether the caller receives live trade-card DMs",
     response_model=BroadcastSubscriptionResponse,
     responses=AUTH_RESPONSES,
   )
@@ -279,7 +408,7 @@ def get_telegram_router() -> APIRouter:
 
   @router.post(
     "/{telegram_user_id}/broadcast/subscribe",
-    summary="Opt in to completed-trade broadcast DMs",
+    summary="Opt in to live trade-card DMs",
     response_model=BroadcastSubscriptionResponse,
     responses=AUTH_RESPONSES,
   )
@@ -297,7 +426,7 @@ def get_telegram_router() -> APIRouter:
 
   @router.post(
     "/{telegram_user_id}/broadcast/unsubscribe",
-    summary="Opt out of completed-trade broadcast DMs",
+    summary="Opt out of live trade-card DMs",
     response_model=BroadcastSubscriptionResponse,
     responses=AUTH_RESPONSES,
   )

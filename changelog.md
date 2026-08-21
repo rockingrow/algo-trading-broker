@@ -5,6 +5,405 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-08-21
+
+### Added
+
+- **Live trade cards** — `/subscribe` now delivers an owner a Telegram message
+  the moment one of their linked accounts **opens** a trade, and that message
+  **edits itself** for the rest of the trade's life: `OPENED` →
+  `PARTIALLY_CLOSED` (TP1) → `CLOSED` / `FLAT` / `REJECTED`. An owner's chat
+  holds one message per trade instead of a stream of them.
+
+  While the trade is running the card carries two inline buttons:
+  - 🔍 **Detail** / ⬆️ **Summary** — expands the card with strategy, account,
+    market/gateway, leverage, risk, reference id and the worker's comment, and
+    collapses it again.
+  - 🛑 **Exit** — asks to confirm, then closes that trade (a FLAT scoped to its
+    strategy + symbol) and notes on the card that the exit is in flight.
+
+  On a terminal status the card is edited one last time and the buttons are
+  dropped, since there is nothing left to act on.
+
+  The card is posted with the *bot service's* token (`BOT_TELEGRAM_TOKEN`),
+  which is what makes the buttons work at all: their taps arrive as ordinary
+  callback queries on the bot's existing long poll, so there is no webhook and
+  no second connection. Two new endpoints back them,
+  `GET /v1/telegram/{id}/trades/{trade_id}` and
+  `POST /v1/telegram/{id}/trades/{trade_id}/exit`, both authorised against
+  **every** account the caller is linked to rather than the active one — a card
+  outlives an account switch. `exit` answers `409` on an already-terminal trade
+  so a stale card cannot close a newer position on the same symbol.
+
+  New `trade_notifications` table (migration `b8c9d0e1f2a3`) maps
+  `(trade_id, platform, chat_id)` → `message_id` plus the status that message
+  currently shows. Only status *transitions* trigger an edit, so the worker
+  re-emitting `TRADE` events for changes a card doesn't show (an SL nudge, a
+  sync tick) costs nothing. A card already posted keeps being refreshed even
+  after its owner unsubscribes — the opt-in gates *new* cards, and a frozen
+  card claiming `OPENED` with a live Exit button would be worse than none.
+  Telegram reporting a message as permanently unreachable (deleted, or the bot
+  blocked) drops the row; transient failures keep it for the next event.
+
+- **Broadcast reply notify toggle, per audience** — The two-line reply notice
+  under a cycle's message (see "Broadcast update notices" below) can now be
+  switched off independently for the private and the public audience, via two
+  new broker settings (`private_broadcast_reply_notify`,
+  `public_broadcast_reply_notify`; both default to **enabled**). Disabling one
+  only silences its reply — the cycle's message keeps being edited in place as
+  before. Editable from the admin API
+  (`GET`/`POST /admin/settings/private-reply-notify` and
+  `.../public-reply-notify`) and from the bot's new
+  `/admin_private_reply_notify` and `/admin_public_reply_notify` commands,
+  each taking `enable` or `disable` as its argument. Migration
+  `0205b8abba12_add_broadcast_reply_notify_settings` seeds both rows as
+  `"1"` (enabled) so they show up explicitly in `broker_settings` from the
+  start.
+- **Broadcast update notices: a two-line reply on every new action** — A
+  cycle's message is edited in place, and Telegram notifies nobody when a
+  message is rewritten: a reader who saw the trade open never learned that it
+  hit TP1 or closed. Every new action of a cycle now *also* posts a short
+  reply under that same message, in **both** audiences (private and public):
+
+  ```
+  [🏁CLOSED]
+  🚀 TP2
+  ```
+
+  The reply carries only the cycle's status at that point and the action that
+  produced it — the full body is one tap away, threaded above it. Notices are
+  per event, so a dispatch that coalesces two actions posts one reply each and
+  an intermediate TP1 is not back-dated to `CLOSED`. Worker executions change
+  the body but announce nothing (no new action happened), and a new
+  `broadcast_message_chats.notified_event_count` column (migration
+  `c4e5f6a7b8d9_broadcast_chat_notified_event_count`) records what each chat
+  has already been told, so a redelivery or a sweeper pass never repeats a
+  notice and a failed reply is retried on the next pass. Rows written before
+  the column existed are caught up silently rather than replaying a running
+  trade's whole history into the channel.
+- **Bot `/status`: open-positions count + table** — The command now shows an
+  **Open positions** line (the number of currently running trades on the
+  active account) beneath the existing account summary, and — whenever that
+  count is above zero — the same monospace trade table `/trades` renders,
+  filtered to just those open positions. Backed by a new broker endpoint,
+  `GET /v1/telegram/{telegram_user_id}/positions`, which returns the
+  account's `is_running` trades (`TradeRepository.list_open_by_account`).
+  `/status` also moved up to the 2nd slot in the command menu, right below
+  `/start`, so the account/positions overview is the first thing a linked
+  user sees.
+- **Signal-cycle broadcast: one Telegram message per trade, edited in place**
+  — Every action the broker sees for one trade (LONG entry, TP1, TP2, SL, or
+  FLAT close) now folds into a **single** Telegram message that is rewritten
+  as the trade progresses, instead of four unrelated messages that a reader
+  had to stitch together by eye. A cycle is keyed by
+  ``strategy`` + ``signal_uxid`` (a strict 16-character lowercase-hex short
+  uuid TradingView must send alongside the existing ``signal_id``): the
+  ``signal_uxid`` is stable across the whole trade so its ``LONG`` entry and
+  its ``TP2`` close land in the same message. The cycle carries a
+  ``RUNNING`` / ``CLOSED`` badge that flips once a closing action arrives, an
+  ``Attempt: N`` marker for any signal that reached workers on a retry, and
+  the full timeline of actions in the order they happened. New
+  ``broadcast_messages`` and ``broadcast_message_chats`` tables persist the
+  cycle text and the per-chat message id (so the same trade can address
+  several chats and keep editing each one) — see the new migration
+  ``a2c3d4e5f6b7_add_broadcast_messages``.
+- **CDC-driven delivery with an append-only write log** — Telegram sends never
+  happen on the signal path any more. A signal (and every worker's TRADE
+  event) commits its change **and** a new write-log entry
+  (``broadcast_message_logs``) in the same transaction; a Postgres trigger
+  fires ``pg_notify`` on the write log's ``broadcast_message_logs``
+  channel; ``BroadcastDispatcher`` LISTENs for it and edits the affected
+  chats. A per-cycle ``last_seq`` handed out under a row lock and a
+  per-chat ``delivered_seq`` guard mean a slow edit can never overwrite a
+  newer body with an older one, so a burst of signals for one trade always
+  renders in order. A 30-second sweeper re-drains the log on a timer as a
+  safety net — anything appended while the broker was down (``NOTIFY`` is
+  fire-and-forget) is still delivered on the next tick.
+- **Worker execution table on the private broadcast** — The private
+  audience's copy of the cycle carries a two-column ``worker | latest
+  status`` table that fills in as each worker acts on the signal. Backed by
+  a new ``broadcast_message_workers`` row (one per worker per cycle, with
+  the latest status the worker reported) written from the TRADE consumer
+  via ``SignalBroadcastService.record_execution``. Account ids are masked
+  to their last four characters (``MT5 ****5678``).
+- **Two audiences, one cycle: private (operator) and public (subscribers)** —
+  The **private** audience is the ``TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`` env
+  var (a deployment concern) and its body carries the strategy name, the
+  signal id, the worker/status table, and — when
+  ``notification_include_signal_raw`` is on — the strategy's raw
+  indicator/input dump. The **public** audience is a new
+  ``public_broadcast_chat_ids`` broker setting, edited **at runtime** from
+  ``POST /admin/settings/public-broadcast-chat-ids`` or the bot's new
+  ``/admin_public_chats`` command; it gets only the bare
+  price/level/timeline body — no strategy internals, no worker table. A
+  chat listed in both audiences is broadcast to once. Both settings use the
+  same comma-separated, topic-suffixed shape ``parse_chat_targets``
+  understands, so either can address a specific topic inside a group with
+  Topics enabled.
+- **Bot ``/admin_public_chats`` command** — Read the current
+  ``public_broadcast_chat_ids`` list, replace it, or clear it, from
+  Telegram. Backed by the broker's new admin endpoint.
+- **``signal_uxid`` on every wire payload** — The webhook, JetStream
+  ``TradingSignal`` and FLAT publish all now carry ``signal_uxid`` alongside
+  ``signal_id``. ``signal_id`` still identifies each individual signal
+  (workers keep deduping on it); ``signal_uxid`` ties a whole trade
+  together. Enforced as strict 16-character lowercase hex — a payload with
+  any other shape is rejected with ``422``. Helper: ``broker/helpers/
+  uxid_helper.py`` (``new_uxid``, ``is_valid_uxid``).
+- **Bot: `/admin_flat` scope pickers (strategy · market · gateway)** —
+  Running `/admin_flat` bare no longer jumps straight to the "confirm FLAT
+  ALL" prompt. It now walks the admin through three sequential
+  inline-keyboard pickers — strategy → market → gateway — each carrying an
+  explicit **All** row so scope can stay broad at every step. Whatever
+  survives is forwarded verbatim to `POST /admin/flat`, so an admin can
+  e.g. FLAT one strategy across every account, or FLAT every strategy on
+  a single market/gateway pair, without having to type raw command args.
+  Selecting a specific market narrows the gateway picker to that market's
+  gateways only (per `GATEWAYS_BY_MARKET`); with **All markets** the
+  gateway picker offers the union of every configured gateway so the admin
+  can still narrow one axis. Confirm shows the resolved scope inline
+  (`strategy=… · market=… · gateway=…`, unset legs read as **ALL**) and
+  Cancel never touches the broker. `/admin_flat <account_id>` (single-
+  account confirm flow — resolves market/gateway from the live account
+  list, ambiguous ids still open the disambiguation picker) is unchanged.
+- **Bot: three new `/admin_flat` callbacks and their state** — `afls:{i|a}`
+  (strategy), `aflm:{market|a}` (market), `aflg:{gateway|a}` (gateway),
+  with `a` as the one-byte **All** sentinel to keep every scheme well
+  clear of Telegram's 64-byte `callback_data` cap. Strategy picks travel
+  as the index into a per-session FSM `aflat_strategies` list so raw
+  strategy names (user-supplied text, up to 50 chars) never ride in
+  callback data or get echoed back through Telegram; markets and gateways
+  travel by name (they are enum-constrained). FSM data grows two new
+  keys, `aflat_strategies` (the cached list) and `aflat_scope` (the
+  running `{strategy, market, gateway}` selection); both are cleared once
+  the confirm/cancel callback fires.
+- **`GET /admin/strategies`** — Returns the distinct `trades.strategy`
+  values the broker has ever recorded, alphabetically. Backs the bot's
+  strategy picker above; an empty list simply means no trade has been
+  observed yet, so the picker offers only **All**. Backed by a new
+  `TradeRepository.list_distinct_strategies()` (added to the protocol in
+  `broker/interfaces/db_protocol.py` and implemented in
+  `SqlAlchemyTradeRepository`). Sourced from the trades table (not
+  signals or accounts) so a strategy that has never traded won't appear
+  in the picker — FLATting one worth nothing is worthless.
+- **Bruno request for the new endpoint** — `bruno/admin/STRATEGIES.yml`
+  covers `GET /admin/strategies` alongside the existing `FLAT.yml`.
+- **Telegram notifications reach several chats, and land in the right group
+  topic** — Every chat-id setting takes a comma-separated list — the signals
+  channel `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`, the management chat `TELEGRAM_BROKER_LOG_CHAT_IDS`
+  and the error-log chat `TELEGRAM_LOG_CHAT_ID` alike, plus the per-call chat
+  ids used for completed-trade owner DMs; none of them is special-cased, since
+  they all resolve through one parser. So one channel can fan out to several
+  groups, and an entry may address
+  a single **topic** of a supergroup that has the Topics feature enabled by
+  suffixing the topic id: `-1002173777783_924584`. Such an entry is split into
+  the chat and its `message_thread_id` — the Bot API field for "the target
+  message thread (topic) of a forum" — which is the only way a bot can post
+  into a specific topic instead of *General*; both numbers are the ones in the
+  topic's link (`t.me/c/2173777783/924584`). The field is sent **only** for
+  topic entries, since Telegram answers `400 Bad Request: message thread not
+  found` when it is passed for a chat without that thread. Only numeric chat ids may carry
+  the suffix, so a username that itself contains underscores (`@my_group_2`)
+  is never mistaken for one; plain ids, user ids and `@username` handles are
+  unchanged. Each chat gets its own Bot API call, all issued concurrently so a
+  slow group costs one `TELEGRAM_HTTP_TIMEOUT` for the batch rather than one
+  each, and a chat that rejects the send (bot kicked, topic deleted) is logged
+  without stopping delivery to the rest.
+- **Webhook response timing in the log** — Every `/secret/webhook` response is
+  logged with its elapsed milliseconds, raised to `warning` when it overruns
+  `WEBHOOK_ENQUEUE_TIMEOUT`. TradingView reports a timeout with nothing on the
+  server side to correlate it with; this is that record.
+- **`WEBHOOK_ENQUEUE_TIMEOUT`** (default `1.0`) — Seconds the webhook may wait
+  for the JetStream ack before deferring. Also
+  `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` (`2.0`) and
+  `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` (`15`) for the background retry, and
+  `TELEGRAM_HTTP_TIMEOUT` (`5.0`) for the Bot API call that was previously
+  hard-coded.
+- **`503` on the webhook** — Returned when the enqueue failed *and* could not
+  be deferred (no queue wired, or its backlog full). A refusal TradingView can
+  show in its alert log is worth more than a request it can only report as too
+  slow.
+- **Bot: `PNL` column on `/trades` and `/atrades`** — Each row now shows the
+  signed realised PnL (`account_balance − account_balance_init`), e.g.
+  `+123.45`, with `—` when either balance is missing so an in-progress trade
+  isn't misread as a break-even close. New `_fmt_pnl` helper in
+  `app/presenters/messages.py`; the column sits between `BALANCE` and `TIME`.
+- **The completed-trade DM names the event that ended the trade** — The
+  subscriber's `Trade completed` notification carries the closing action in
+  brackets after the status: `Status: CLOSED (TP2)`, `CLOSED (SL)`,
+  `CLOSED (R_SL)`, `CLOSED (TERMINAL_CLOSED)`, `CLOSED (FORCED_CLOSED)`. Five
+  different worker events all persist as `CLOSED`, and the row's `Action` line
+  keeps the entry direction (`LONG`/`SHORT`), so until now the DM could not say
+  whether a trade ran to target or was stopped out. The label comes from the
+  `TRADE` event's own status — the row does not record it — via the new
+  `TradeStatusPolicy.to_last_action`, which renames only `FLATTED` → `FLAT`. An
+  admin FLAT already reads `Status: FLAT`, so it is not repeated as
+  `FLAT (FLAT)`.
+
+### Changed
+
+- **Completed-trade broadcasts are now the end state of a live card** — the
+  standalone "Trade completed" DM is gone; a closed trade is the final edit of
+  the card its owner has been watching since it opened. `/subscribe` ·
+  `/unsubscribe` and `trade_broadcast_subscriptions` are unchanged, and so is
+  what counts as a completion, so an owner who was subscribed before still gets
+  told when a trade ends — in the message they already have. An owner who
+  subscribes mid-trade gets their first card on the next event; when that event
+  is the close, the card simply arrives final and buttonless, matching the old
+  behaviour.
+
+  Internally `TradeBroadcastService` is replaced by `TradeCardService`, and
+  `format_completed_trade_message` by `broker/helpers/trade_card.py` (body,
+  keyboard and callback data in one place, mirrored bot-side by
+  `bot/app/presenters/trade_card.py`). Sending reuses the existing
+  `BroadcastNotifier` machinery — `TradeCardNotifier` subclasses it and only
+  overrides the token, the body formatting (a card carries its own markup, so
+  no `<pre>` box) and which errors count as unrecoverable, since a DM that
+  can't be edited can't be re-sent either. `BroadcastNotifier` gained an
+  optional `reply_markup` on send/edit, absent-not-null so the Bot API drops a
+  card's keyboard when the trade ends.
+
+  A new `trades.last_action` column (same migration) records the event that
+  last moved a trade, so the card can say `Closed (SL)` — TP2, SL and R_SL all
+  persist as `CLOSED` and `action` keeps the entry direction, so the row alone
+  never said *how* a trade ended. It is persisted rather than passed alongside
+  the event because the card is re-rendered later, by the bot on a Detail tap,
+  with only the row to go on; that also puts it on `TradeResponse`, so both
+  renderers show the same line.
+
+  Like the signal path, nothing Telegram-shaped happens on the TRADE callback:
+  `handle_event` only queues the trade and a single drain task does the Bot API
+  work, so a throttled Telegram can't stall trade bookkeeping. `QueuedNotifier`
+  couldn't serve here — a card needs the `message_id` its send returns — so the
+  service owns the same bounded-queue shape one level up. One drain task means
+  two events for the same trade can never be applied out of order.
+
+- **Bot: `/admin_flat` bare-invocation semantics** — Was: immediately
+  presented the "Confirm FLAT for **ALL** accounts?" prompt. Now: opens
+  the strategy/market/gateway picker sequence described above. Picking
+  All at every step reproduces the old flat-everything behaviour with
+  three extra taps; anything else scopes the FLAT. `/admin_help` and the
+  `/admin_flat` command description in the menu are updated to reflect
+  the pickers.
+- **Bot: `_aflat_confirm_text` renamed to `_aflat_target_confirm_text`**
+  and joined by `_aflat_scope_confirm_text` / `_aflat_scope_text` — the
+  single-account confirm path was the only shape the old helper needed
+  to render; splitting the two makes each render exactly the fields it
+  scopes on and keeps the picker's scope summary out of the account
+  confirm text.
+- **Bot: an unlinked user is shown `/start` and nothing else** — The command
+  menu of a Telegram user with no linked account is now trimmed to `/start`;
+  `/help` goes with the rest, since it is a tour of commands that all need an
+  account behind them (and is refused with them until one is linked). Link
+  status is re-checked on **every** update, so the menu also corrects itself
+  after a change made elsewhere — an `/admin_rotate` that unlinked the user, an
+  `/admin_linkaccount` that linked them — and it is re-applied the moment they
+  link or `/unlink`, rather than on their next message. The full menu comes
+  back exactly when an account is linked. Admins keep their `admin_` commands
+  either way (those never needed a linked account) and lose only the user half
+  of the menu while unlinked. A broker that can't be reached leaves the menu
+  untouched: an outage is not evidence that anyone unlinked. The menu last
+  applied to each chat is remembered in-process, so a linked user chatting
+  away costs no extra Telegram calls, and the account resolved for the menu is
+  handed to `AuthMiddleware`, so the check costs no extra broker calls either.
+- **Per-account settings, stored on the account and replayed to the worker on
+  connect** — New `accounts.settings` JSONB column (`NOT NULL`, default `{}`)
+  holding what an owner set from the bot. It is sent to the worker in a new
+  `settings` block of every `WORKER_CONNECTED_ACK`, alongside
+  `strategy_magic_map`, `retry_signals` and `crypto_leverage_init`. Always
+  present and always complete — an account that has never run a command gets
+  the schema defaults (`{"signal_blocked": false}`) — so a worker can read
+  `settings.signal_blocked` unconditionally.
+
+  The first setting is `signal_blocked`, written by
+  `POST /v1/telegram/{id}/commands/prevent` (the bot's `/prevent` and
+  `/allow`). Until now that command only published a `BLOCK_SIGNAL` /
+  `ALLOW_SIGNAL` ADMIN message, which reaches **only a worker that is
+  connected at that moment**: a worker that restarted afterwards came back
+  unblocked, with nothing to tell it its owner had stopped it. The ADMIN
+  publish stays the live push; the column is the durable state the handshake
+  reconciles the worker to on every connect. Enforcement remains the worker's
+  responsibility — the broker records and reports the setting, it does not
+  filter per account on the worker's behalf.
+
+  The endpoint persists **before** publishing and answers `500` (publishing
+  nothing) when the write fails: a command whose intent was not recorded has
+  not taken effect. The response now echoes the stored blob in a `settings`
+  field. The write is a server-side JSONB merge (`settings || patch`), not a
+  read-modify-write, so two commands landing together cannot drop each other's
+  key, and a key written by a newer broker version survives a round trip
+  through an older one (unknown keys are dropped from the ACK payload, not
+  from the row). The per-account read is deliberately **not** cached the way
+  the broker-wide settings are — a command run between two connects has to
+  reach the second one.
+
+  JSONB rather than a column per toggle so a new command costs no migration;
+  adding a setting is a field on `AccountSettings` plus its key in
+  `broker/constants.py`, written from that command's endpoint. Migration
+  `a7b8c9d0e1f2` adds the column, and both
+  [`examples/nats/system.worker_connected_ack.json`](examples/nats/system.worker_connected_ack.json)
+  and its crypto counterpart document the new block.
+
+### Fixed
+
+- **TradingView webhook: `request took too long and timed out`** — The webhook
+  waited for JetStream's `PubAck` with nats-py's default timeout of **5s**,
+  longer than TradingView waits for the entire request. One slow ack (a NATS
+  reconnect, a busy file store) held the response past TradingView's patience
+  and the alert was lost, since TradingView never re-sends a timed-out
+  delivery. The wait is now capped at `WEBHOOK_ENQUEUE_TIMEOUT` (default
+  `1.0s`, tunable): past it the envelope is handed to the new
+  `DeferredEnqueuer` and the alert still gets its `202`, now with
+  `status=deferred`. A publish attempted while the NATS client is disconnected
+  raises immediately instead of buffering the write and waiting out a timeout
+  for an ack that cannot arrive.
+- **Telegram no longer delays signal delivery to the workers** — A send to a
+  throttled or filtered `api.telegram.org` is accepted at the TCP level and
+  then never answered, so it hangs for the full HTTP timeout before raising
+  `httpx.ReadTimeout`. The JetStream `SignalWorker` processes envelopes one at
+  a time, so the fan-out awaiting that send delayed the *next* signal's
+  delivery by the same 5s. Signal/FLAT notifications now go through a
+  `QueuedNotifier` — the fan-out queues the text and moves on, a single
+  background task does the sending, in order. Completed-trade owner DMs and
+  NATS lifecycle alerts are queued the same way: nats-py awaits a
+  subscription's callback before pulling the next message, so a stuck DM
+  stalled the trade bookkeeping behind it, and a stuck lifecycle alert slowed
+  the very reconnect the webhook was waiting on.
+- **An enqueue retry can no longer open a second position** — Webhook
+  envelopes are published with a `Nats-Msg-Id` that stays the same across
+  deferred retries, and the `SIGNALS` stream now sets a 120s
+  `duplicate_window` (nats-py sends `duplicate_window: 0`, i.e. de-duplication
+  off, unless it is set explicitly). A first publish whose ack was merely slow
+  is therefore dropped by JetStream rather than replayed to the workers.
+  `ensure_signal_stream` reconciles an existing stream with `update_stream`
+  instead of only logging the config mismatch, so deployments created before
+  this change pick the window up on their next start.
+- **The webhook token no longer leaks into the logs** — A rejected alert is
+  reported with the offending input attached, so the entire body — `token`
+  included, which *is* `WEBHOOK_SECRET` — was written to the `422` log line
+  and returned in the response. Secret values are now redacted in both,
+  whether the body arrived parsed (a field-level error) or as raw text (a JSON
+  syntax error). Anyone whose logs already carry a rejected alert should
+  rotate the secret.
+- **A malformed alert body now says where it broke** — TradingView parses an
+  alert message itself and, when that fails, posts it as `text/plain`; FastAPI
+  then hands the raw body to the model and pydantic answers `Input should be a
+  valid dictionary or object to extract fields from`, which never mentions the
+  syntax error that caused it. The `422` handler now re-parses such a body and
+  logs (and returns, as `json_error`) the real reason with its position and a
+  window around it — e.g. `Expecting property name enclosed in double quotes at
+  line 1 column 230 — near: …"bar_index": 16,222}…` for a Pine
+  `str.tostring` that emitted a thousands separator. Ordinary field-level
+  validation errors are reported unchanged.
+- **Signal-cycle broadcasts now render in the same ``<pre>`` box as every
+  other Telegram notification** — `BroadcastNotifier` had started sending the
+  cycle body as plain text, so the message rendered as floating text instead
+  of the monospace box `TelegramNotification` wraps every other send in.
+  Both the `PRIVATE` and `PUBLIC` audiences are boxed again. The public
+  audience's worker/status table no longer opens its own nested `<pre>` (the
+  outer box now covers it, and Telegram's HTML parser rejects a `<pre>`
+  nested inside another).
+
 ## [1.1.2] - 2026-08-10
 
 ### Added
@@ -750,6 +1149,7 @@ First stable release of **Algo Trading Broker** — a high-performance, decentra
 - NATS token-based authentication shared between broker and workers.
 - `DOCS_ENABLED` toggle to hide Swagger UI / ReDoc / OpenAPI schema in production (default `false`).
 
+[Unreleased]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.2...HEAD
 [1.1.2]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/rockingrow/algo-trading-broker/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/rockingrow/algo-trading-broker/compare/v1.0.7...v1.1.0

@@ -4,6 +4,7 @@
     "symbol": "BTCUSDT",
     "timeframe": "15",
     "timestamp": "2026-06-02T10:15:00Z",
+    "signal_uxid": "9f2c4b7e18a3d605",
     "position": {
       "action": "LONG",
       "price": 68250.5,

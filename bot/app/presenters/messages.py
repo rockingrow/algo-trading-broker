@@ -46,6 +46,18 @@ def _fmt_num(value: Optional[float]) -> str:
     return _esc(value)
 
 
+def _fmt_pnl(balance: Any, balance_init: Any) -> str:
+  """Signed realised PnL from a trade's balance pair, or ``—`` when unknown."""
+  if balance is None or balance_init is None:
+    return "—"
+  try:
+    pnl = float(balance) - float(balance_init)
+  except (TypeError, ValueError):
+    return "—"
+  sign = "+" if pnl >= 0 else ""
+  return f"{sign}{pnl:,.2f}"
+
+
 def _page_range(page: dict[str, Any], shown: int) -> str:
   """``"1–8 / 23"`` — which slice of a paged list this message is showing.
 
@@ -67,9 +79,21 @@ def _trade_row(trade: dict[str, Any], tz_offset_hours: float) -> tuple[str, ...]
     _fmt_num(trade.get("price")),
     _fmt_num(trade.get("quantity")),
     _fmt_num(trade.get("account_balance")),
+    _fmt_pnl(trade.get("account_balance"), trade.get("account_balance_init")),
     format_local_time(
       trade.get("updatedAt"), tz_offset_hours, fmt=SHORT_TIME_FMT, with_label=False
     ),
+  )
+
+
+def _trades_table(data: list[dict[str, Any]], tz_offset_hours: float) -> str:
+  """The monospace trade table shared by ``/trades`` and the ``/status``
+  open-positions section."""
+  return render_table(
+    headers=("SYMBOL", "ACTION", "STATUS", "PRICE", "QTY", "BALANCE", "PNL", "TIME"),
+    rows=[_trade_row(t, tz_offset_hours) for t in data],
+    aligns=("l", "l", "l", "r", "r", "r", "r", "l"),
+    max_widths=(12, 6, 7, None, None, None, None, None),
   )
 
 
@@ -93,13 +117,13 @@ class UserMessages:
     "/flat — Close all positions\n"
     "/prevent — Block new orders\n"
     "/allow — Allow new orders\n"
-    "/status — Account info\n"
+    "/status — Account info + open positions\n"
     "/myaccounts — List linked accounts\n"
     "/link — Add another account\n"
     "/switch — Change active account\n"
     "/unlink — Unlink active account\n"
-    "/subscribe — Receive trade broadcasts\n"
-    "/unsubscribe — Stop trade broadcasts"
+    "/subscribe — Live trade alerts\n"
+    "/unsubscribe — Stop trade alerts"
   )
 
   @staticmethod
@@ -107,13 +131,17 @@ class UserMessages:
     if subscribed:
       return (
         f"{emojis.CHECK} <b>Subscribed.</b>\n\n"
-        "You'll now get a DM here whenever one of your linked accounts "
-        "completes (closes) a trade. Use /unsubscribe to stop."
+        "You'll now get a message here the moment one of your linked accounts "
+        "opens a trade. Each message updates itself as the trade moves — "
+        "partial close, close, flat — and carries "
+        f"{emojis.DETAIL} <b>Detail</b> and {emojis.CYCLE_CLOSED} <b>Close</b> buttons "
+        "while the trade is still running.\n\n"
+        "Use /unsubscribe to stop."
       )
     return (
       f"{emojis.CHECK} <b>Unsubscribed.</b>\n\n"
-      "You'll no longer get completed-trade alerts. Use /subscribe to turn "
-      "them back on."
+      "You'll no longer get trade alerts. Trades already showing in this chat "
+      "keep updating until they close. Use /subscribe to turn them back on."
     )
 
   HELP_TEXT = (
@@ -189,13 +217,35 @@ class UserMessages:
       f"<b>{emojis.CHART} Trades</b> ({_page_range(page, len(data))}) · "
       f"times in {format_utc_label(tz_offset_hours)}"
     )
-    table = render_table(
-      headers=("SYMBOL", "ACTION", "STATUS", "PRICE", "QTY", "BALANCE", "TIME"),
-      rows=[_trade_row(t, tz_offset_hours) for t in data],
-      aligns=("l", "l", "l", "r", "r", "r", "l"),
-      max_widths=(12, 6, 7, None, None, None, None),
-    )
-    return header + "\n\n" + table
+    return header + "\n\n" + _trades_table(data, tz_offset_hours)
+
+  @staticmethod
+  def format_status(
+    account: dict[str, Any],
+    positions: Optional[dict[str, Any]],
+    tz_offset_hours: float,
+  ) -> str:
+    """``/status``: the account block plus an open-positions count line, and —
+    when at least one position is open — the same table ``/trades`` renders,
+    filtered to positions that are still running.
+
+    ``positions`` is None when the broker call failed; the count line then
+    says so instead of showing a wrong number.
+    """
+    if positions is None:
+      count_line = f"• Open positions: {emojis.WARNING} failed to load"
+      data: list[dict[str, Any]] = []
+    else:
+      data = positions.get("data") or []
+      count_line = f"• Open positions: <b>{positions.get('count', len(data))}</b>"
+
+    blocks = [UserMessages.format_account(account) + "\n" + count_line]
+    if data:
+      blocks.append(
+        f"<b>{emojis.CHART} Open positions</b> · times in "
+        f"{format_utc_label(tz_offset_hours)}\n\n" + _trades_table(data, tz_offset_hours)
+      )
+    return "\n\n".join(blocks)
 
 
 class AdminMessages:
@@ -338,12 +388,15 @@ class AdminMessages:
     "/admin_accounts — Account list\n"
     "/admin_newaccount — Register a new account\n"
     "/admin_trades — Trades for an account\n"
-    "/admin_flat — FLAT system-wide / account\n"
+    "/admin_flat — FLAT with strategy/market/gateway pickers (each has All) / one account\n"
     "/admin_rotate — Rotate token + unlink users\n"
     "/admin_settings — Broker settings\n"
     "/admin_magicmap — Edit strategy magic map\n"
     "/admin_crypto_symbols — Set crypto allowed symbols\n"
     "/admin_crypto_leverage — Set crypto max leverage\n"
+    "/admin_public_chats — Public broadcast chats\n"
+    "/admin_private_reply_notify — Toggle private broadcast reply notify\n"
+    "/admin_public_reply_notify — Toggle public broadcast reply notify\n"
     "/admin_linkaccount — Link a Telegram user to an account\n"
     "/admin_invite_url — One-tap invite link for an account"
   )

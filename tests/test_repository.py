@@ -10,6 +10,7 @@ own logic (field mapping, lifecycle rules), not SQLAlchemy itself.
 from __future__ import annotations
 
 import contextlib
+import uuid
 from datetime import datetime, timezone
 
 
@@ -19,18 +20,30 @@ from broker.db.models import (
   AccountBotLink,
   AccountLinkToken,
   BotSession,
+  BroadcastMessage,
+  BroadcastMessageChat,
+  BroadcastMessageLog,
+  BroadcastMessageWorker,
   BrokerSetting,
   Trade,
   TradeBroadcastSubscription,
 )
 from broker.db.repository import (
   SqlAlchemyAccountRepository,
+  SqlAlchemyBroadcastMessageRepository,
   SqlAlchemySettingRepository,
   SqlAlchemySignalRepository,
   SqlAlchemyTradeBroadcastRepository,
   SqlAlchemyTradeRepository,
 )
-from broker.schemas.core import BotPlatformTypeEnum, SignalActionEnum
+from broker.schemas.core import (
+  BotPlatformTypeEnum,
+  BroadcastAudienceEnum,
+  BroadcastLogKindEnum,
+  BroadcastLogStatusEnum,
+  BroadcastStatusEnum,
+  SignalActionEnum,
+)
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.trade_schema import TradeStatusEnum
 from broker.schemas.account_schema import MarketTypeEnum
@@ -114,6 +127,16 @@ async def test_log_signal_persists_row_and_returns_id(monkeypatch):
   assert row.symbol == "OANDA:XAUUSD"
   assert row.action == SignalActionEnum.LONG
   assert str(row.id) == result
+
+
+async def test_log_signal_persists_the_cycle_id(monkeypatch):
+  session = FakeSession(results=[])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemySignalRepository().log_signal(
+    _payload(signal_uxid="9f2c4b7e18a3d605")
+  )
+  assert session.added[0].signal_uxid == "9f2c4b7e18a3d605"
 
 
 async def test_log_signal_risk_percent_prefers_position(monkeypatch):
@@ -612,6 +635,105 @@ async def test_upsert_gateway_swallows_db_error(monkeypatch):
   )
 
 
+# ── AccountRepository settings (accounts.settings JSONB) ──────────────
+
+
+async def test_get_settings_returns_the_blob(monkeypatch):
+  session = FakeSession(results=[[{"signal_blocked": True}]])
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().get_settings(
+    "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+  assert result == {"signal_blocked": True}
+
+
+async def test_get_settings_empty_for_unknown_account(monkeypatch):
+  _patch_session(monkeypatch, FakeSession(results=[[]]))
+
+  result = await SqlAlchemyAccountRepository().get_settings(
+    "nope", MarketTypeEnum.FOREX, "MT5"
+  )
+  # The worker gets the schema defaults rather than a failed handshake.
+  assert result == {}
+
+
+async def test_get_settings_swallows_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+
+  result = await SqlAlchemyAccountRepository().get_settings(
+    "acc-1", MarketTypeEnum.FOREX, "MT5"
+  )
+  assert result == {}
+
+
+async def test_update_settings_returns_the_merged_blob(monkeypatch):
+  # The merge itself is Postgres' `||`, so what the repository must get right
+  # is returning what came back rather than what it sent.
+  session = FakeSession(
+    results=[[{"signal_blocked": True, "kept_by_the_merge": "yes"}]]
+  )
+  _patch_session(monkeypatch, session)
+
+  result = await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+  assert result == {"signal_blocked": True, "kept_by_the_merge": "yes"}
+
+
+async def test_update_settings_none_for_unknown_account(monkeypatch):
+  # UPDATE ... RETURNING matched no row.
+  _patch_session(monkeypatch, FakeSession(results=[[]]))
+
+  result = await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+  # None is what makes the command endpoint answer 500 instead of silently
+  # dropping the user's setting.
+  assert result is None
+
+
+async def test_update_settings_none_on_db_error(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+
+  result = await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+  assert result is None
+
+
+async def test_update_settings_merges_server_side(monkeypatch):
+  """The statement must be a jsonb merge, not a read-modify-write: two
+  commands landing together would otherwise drop each other's keys."""
+  captured: list[str] = []
+
+  class CapturingSession(FakeSession):
+    async def execute(self, stmt):
+      captured.append(str(stmt))
+      return await super().execute(stmt)
+
+  session = CapturingSession(results=[[{"signal_blocked": True}]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().update_settings(
+    uuid.uuid4(), {"signal_blocked": True}
+  )
+
+  assert len(captured) == 1
+  sql = captured[0]
+  assert sql.startswith("UPDATE accounts SET settings=")
+  assert "||" in sql
+  assert "RETURNING accounts.settings" in sql
+
+
 # ── AccountRepository.create_account (admin manual registration) ──────
 
 
@@ -674,7 +796,7 @@ async def test_create_account_swallows_db_error(monkeypatch):
 # ``platform_user_id`` is a *string* on the row even though callers pass an int.
 
 
-import uuid  # noqa: E402
+from sqlalchemy.exc import IntegrityError  # noqa: E402
 
 
 def _linked(account: Account, platform_user_id: str = "555") -> AccountBotLink:
@@ -1122,3 +1244,496 @@ async def test_get_link_summaries_short_circuits_on_empty(monkeypatch):
   session = FakeSession(results=[])
   _patch_session(monkeypatch, session)
   assert await SqlAlchemyAccountRepository().get_link_summaries([]) == {}
+
+
+# ── BroadcastMessageRepository ──────────────────────────────────────
+
+
+def _cycle(**overrides) -> BroadcastMessage:
+  base = dict(
+    id=uuid.uuid4(),
+    strategy="strat",
+    signal_uxid="9f2c4b7e18a3d605",
+    symbol="XAUUSD",
+    timeframe="60",
+    actions="LONG",
+    latest_action=SignalActionEnum.LONG,
+    status=BroadcastStatusEnum.RUNNING,
+    events=[{"action": "LONG", "timestamp": "2026-01-01T00:00:00+00:00"}],
+    last_seq=1,
+  )
+  base.update(overrides)
+  return BroadcastMessage(**base)
+
+
+def _added_logs(session: FakeSession) -> list:
+  return [row for row in session.added if isinstance(row, BroadcastMessageLog)]
+
+
+async def _record(monkeypatch, session, action=SignalActionEnum.TP1, **event_overrides):
+  _patch_session(monkeypatch, session)
+  event = {"action": action.value, "timestamp": "2026-01-01T01:00:00+00:00"}
+  event.update(event_overrides)
+  return await SqlAlchemyBroadcastMessageRepository().record_event(
+    strategy="strat",
+    signal_uxid="9f2c4b7e18a3d605",
+    symbol="XAUUSD",
+    timeframe="60",
+    action=action,
+    event=event,
+  )
+
+
+async def test_record_event_opens_a_new_cycle(monkeypatch):
+  session = FakeSession(results=[[]])  # no existing row
+  row = await _record(monkeypatch, session, action=SignalActionEnum.LONG)
+
+  assert row is session.added[0]
+  assert row.strategy == "strat"
+  assert row.signal_uxid == "9f2c4b7e18a3d605"
+  assert row.actions == "LONG"
+  assert row.latest_action == SignalActionEnum.LONG
+  assert row.status == BroadcastStatusEnum.RUNNING
+  assert len(row.events) == 1
+  assert row.last_seq == 1
+
+
+async def test_record_event_appends_to_an_open_cycle(monkeypatch):
+  existing = _cycle()
+  session = FakeSession(results=[[existing]])
+  row = await _record(monkeypatch, session)
+
+  assert row is existing  # updated in place, not re-inserted
+  assert row.actions == "LONG,TP1"
+  assert row.latest_action == SignalActionEnum.TP1
+  assert row.status == BroadcastStatusEnum.RUNNING
+  assert len(row.events) == 2
+
+
+async def test_record_event_appends_a_write_log_entry(monkeypatch):
+  """The change and its log entry are committed together — that is what makes
+  the Telegram delivery recoverable."""
+  existing = _cycle()
+  session = FakeSession(results=[[existing]])
+  await _record(monkeypatch, session)
+
+  logs = _added_logs(session)
+  assert len(logs) == 1
+  entry = logs[0]
+  assert entry.broadcast_message_id == existing.id
+  assert entry.kind == BroadcastLogKindEnum.SIGNAL
+  assert entry.status == BroadcastLogStatusEnum.PENDING
+  # The cycle's version and the entry's sequence are the same number.
+  assert entry.seq == existing.last_seq == 2
+
+
+async def test_opening_a_cycle_also_logs_it(monkeypatch):
+  session = FakeSession(results=[[]])
+  await _record(monkeypatch, session, action=SignalActionEnum.LONG)
+  logs = _added_logs(session)
+  assert len(logs) == 1
+  assert logs[0].seq == 1
+
+
+async def test_record_event_closes_the_cycle_on_a_terminal_action(monkeypatch):
+  session = FakeSession(results=[[_cycle()]])
+  row = await _record(monkeypatch, session, action=SignalActionEnum.SL)
+  assert row.status == BroadcastStatusEnum.CLOSED
+
+
+async def test_record_event_never_reopens_a_closed_cycle(monkeypatch):
+  closed = _cycle(status=BroadcastStatusEnum.CLOSED, actions="LONG,SL")
+  session = FakeSession(results=[[closed]])
+  row = await _record(monkeypatch, session, action=SignalActionEnum.TP1)
+  assert row.status == BroadcastStatusEnum.CLOSED
+
+
+async def test_record_event_ignores_a_replayed_signal(monkeypatch):
+  """A JetStream redelivery repeats action + timestamp; the timeline must not
+  grow a duplicate line, and nothing needs re-delivering."""
+  existing = _cycle(
+    events=[{"action": "TP1", "timestamp": "2026-01-01T01:00:00+00:00"}],
+    actions="LONG,TP1",
+  )
+  session = FakeSession(results=[[existing]])
+  row = await _record(monkeypatch, session, action=SignalActionEnum.TP1)
+
+  assert len(row.events) == 1
+  assert row.actions == "LONG,TP1"
+  assert row.last_seq == 1  # unchanged
+  assert _added_logs(session) == []
+
+
+async def test_record_event_retries_once_when_another_writer_wins(monkeypatch):
+  """Two signals of one cycle can race; the loser re-reads and updates."""
+  existing = _cycle()
+
+  class _RacingSession(FakeSession):
+    async def flush(self):
+      raise IntegrityError("insert", None, Exception("duplicate key"))
+
+  sessions = [_RacingSession(results=[[]]), FakeSession(results=[[existing]])]
+
+  @contextlib.asynccontextmanager
+  async def fake_get_session():
+    yield sessions.pop(0)
+
+  monkeypatch.setattr(repo_mod, "get_session", fake_get_session)
+
+  event = {"action": "TP1", "timestamp": "2026-01-01T01:00:00+00:00"}
+  row = await SqlAlchemyBroadcastMessageRepository().record_event(
+    strategy="strat",
+    signal_uxid="9f2c4b7e18a3d605",
+    symbol="XAUUSD",
+    timeframe="60",
+    action=SignalActionEnum.TP1,
+    event=event,
+  )
+
+  assert row is existing
+  assert row.actions == "LONG,TP1"
+  assert sessions == []
+
+
+async def test_record_event_returns_none_on_error(monkeypatch):
+  @contextlib.asynccontextmanager
+  async def boom():
+    raise RuntimeError("db down")
+    yield
+
+  monkeypatch.setattr(repo_mod, "get_session", boom)
+
+  assert (
+    await SqlAlchemyBroadcastMessageRepository().record_event(
+      strategy="strat",
+      signal_uxid="9f2c4b7e18a3d605",
+      symbol="XAUUSD",
+      timeframe="60",
+      action=SignalActionEnum.LONG,
+      event={},
+    )
+    is None
+  )
+
+
+async def test_upsert_chat_inserts_a_new_chat_row(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  cycle_id = uuid.uuid4()
+
+  ok = await SqlAlchemyBroadcastMessageRepository().upsert_chat(
+    cycle_id,
+    audience=BroadcastAudienceEnum.PUBLIC,
+    chat_id="-100",
+    message_id="55",
+    message="body",
+    delivered_seq=3,
+  )
+
+  assert ok is True
+  row = session.added[0]
+  assert row.broadcast_message_id == cycle_id
+  assert row.audience == BroadcastAudienceEnum.PUBLIC
+  assert row.message_id == "55"
+  assert row.message == "body"
+  assert row.delivered_seq == 3
+
+
+async def test_upsert_chat_never_moves_delivered_seq_backwards(monkeypatch):
+  """The guard against a slow delivery replacing a newer body with an older
+  one: an out-of-order write cannot pull the chat back."""
+  existing = BroadcastMessageChat(
+    id=uuid.uuid4(),
+    broadcast_message_id=uuid.uuid4(),
+    audience=BroadcastAudienceEnum.PRIVATE,
+    chat_id="-100",
+    message_id="55",
+    message="new body",
+    delivered_seq=7,
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyBroadcastMessageRepository().upsert_chat(
+    existing.broadcast_message_id,
+    audience=BroadcastAudienceEnum.PRIVATE,
+    chat_id="-100",
+    message_id="55",
+    message="older body",
+    delivered_seq=3,
+  )
+
+  assert existing.delivered_seq == 7
+
+
+async def test_upsert_chat_updates_the_existing_row(monkeypatch):
+  existing = BroadcastMessageChat(
+    id=uuid.uuid4(),
+    broadcast_message_id=uuid.uuid4(),
+    audience=BroadcastAudienceEnum.PRIVATE,
+    chat_id="-100",
+    message_id="55",
+    message="old",
+    last_error="boom",
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyBroadcastMessageRepository().upsert_chat(
+    existing.broadcast_message_id,
+    audience=BroadcastAudienceEnum.PRIVATE,
+    chat_id="-100",
+    message_id="66",
+    message="new",
+  )
+
+  assert session.added == []
+  assert existing.message_id == "66"
+  assert existing.message == "new"
+  assert existing.last_error is None
+
+
+async def test_upsert_chat_keeps_the_message_id_when_none_is_passed(monkeypatch):
+  """A failed edit passes message_id=None; losing the id would strand the
+  message and force a duplicate send on the next action."""
+  existing = BroadcastMessageChat(
+    id=uuid.uuid4(),
+    broadcast_message_id=uuid.uuid4(),
+    audience=BroadcastAudienceEnum.PRIVATE,
+    chat_id="-100",
+    message_id="55",
+    message="body",
+  )
+  session = FakeSession(results=[[existing]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyBroadcastMessageRepository().upsert_chat(
+    existing.broadcast_message_id,
+    audience=BroadcastAudienceEnum.PRIVATE,
+    chat_id="-100",
+    message_id=None,
+    message=None,
+    last_error="send failed",
+  )
+
+  assert existing.message_id == "55"
+  assert existing.message == "body"
+  assert existing.last_error == "send failed"
+
+
+async def test_load_cycle_returns_message_chats_and_workers(monkeypatch):
+  cycle = _cycle()
+  chats = [
+    BroadcastMessageChat(
+      id=uuid.uuid4(),
+      broadcast_message_id=cycle.id,
+      audience=BroadcastAudienceEnum.PRIVATE,
+      chat_id="-100",
+    )
+  ]
+  workers = [
+    BroadcastMessageWorker(
+      id=uuid.uuid4(),
+      broadcast_message_id=cycle.id,
+      worker_id="FOREX-MT5-12345678",
+      account_id="12345678",
+      latest_status=TradeStatusEnum.OPENED,
+    )
+  ]
+  session = FakeSession(results=[[cycle], chats, workers])
+  _patch_session(monkeypatch, session)
+
+  view = await SqlAlchemyBroadcastMessageRepository().load_cycle(cycle.id)
+  assert view is not None
+  assert view.message is cycle
+  assert view.chats == chats
+  assert view.workers == workers
+
+
+async def test_load_cycle_missing_returns_none(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  assert await SqlAlchemyBroadcastMessageRepository().load_cycle(uuid.uuid4()) is None
+
+
+# ── Worker executions ───────────────────────────────────────────────
+
+
+async def _record_worker(monkeypatch, session, **overrides):
+  _patch_session(monkeypatch, session)
+  kwargs = dict(
+    strategy="strat",
+    signal_uxid="9f2c4b7e18a3d605",
+    worker_id="FOREX-MT5-12345678",
+    account_id="12345678",
+    market=MarketTypeEnum.FOREX,
+    gateway="MT5",
+    latest_status=TradeStatusEnum.OPENED,
+    latest_action="OPENED",
+  )
+  kwargs.update(overrides)
+  return await SqlAlchemyBroadcastMessageRepository().record_worker_execution(**kwargs)
+
+
+async def test_record_worker_execution_inserts_and_logs(monkeypatch):
+  cycle = _cycle()
+  session = FakeSession(results=[[cycle], []])  # cycle found, no worker row yet
+  row = await _record_worker(monkeypatch, session)
+
+  assert row is cycle
+  worker = [r for r in session.added if isinstance(r, BroadcastMessageWorker)][0]
+  assert worker.worker_id == "FOREX-MT5-12345678"
+  assert worker.latest_status == TradeStatusEnum.OPENED
+  logs = _added_logs(session)
+  assert len(logs) == 1
+  assert logs[0].kind == BroadcastLogKindEnum.EXECUTION
+  assert logs[0].seq == cycle.last_seq == 2
+
+
+async def test_record_worker_execution_updates_an_existing_worker(monkeypatch):
+  cycle = _cycle()
+  worker = BroadcastMessageWorker(
+    id=uuid.uuid4(),
+    broadcast_message_id=cycle.id,
+    worker_id="FOREX-MT5-12345678",
+    account_id="12345678",
+    latest_status=TradeStatusEnum.OPENED,
+    latest_action="OPENED",
+  )
+  session = FakeSession(results=[[cycle], [worker]])
+  await _record_worker(
+    monkeypatch,
+    session,
+    latest_status=TradeStatusEnum.CLOSED,
+    latest_action="TP2",
+  )
+
+  assert worker.latest_status == TradeStatusEnum.CLOSED
+  assert worker.latest_action == "TP2"
+  assert len(_added_logs(session)) == 1
+
+
+async def test_record_worker_execution_ignores_an_unchanged_status(monkeypatch):
+  """TRADE events are chatty; re-rendering an identical table would spend a
+  Telegram edit per event for no visible change."""
+  cycle = _cycle()
+  worker = BroadcastMessageWorker(
+    id=uuid.uuid4(),
+    broadcast_message_id=cycle.id,
+    worker_id="FOREX-MT5-12345678",
+    account_id="12345678",
+    latest_status=TradeStatusEnum.OPENED,
+    latest_action="OPENED",
+  )
+  session = FakeSession(results=[[cycle], [worker]])
+  await _record_worker(monkeypatch, session)
+
+  assert cycle.last_seq == 1  # not bumped
+  assert _added_logs(session) == []
+
+
+async def test_record_worker_execution_without_a_cycle_is_a_noop(monkeypatch):
+  """A worker can report a trade for a signal that was never broadcast."""
+  session = FakeSession(results=[[]])
+  assert await _record_worker(monkeypatch, session) is None
+  assert session.added == []
+
+
+# ── Write log claim / finish ────────────────────────────────────────
+
+
+def _log(cycle_id, seq=1, **overrides) -> BroadcastMessageLog:
+  base = dict(
+    id=uuid.uuid4(),
+    broadcast_message_id=cycle_id,
+    seq=seq,
+    kind=BroadcastLogKindEnum.SIGNAL,
+    payload={},
+    status=BroadcastLogStatusEnum.PENDING,
+    attempts=0,
+  )
+  base.update(overrides)
+  return BroadcastMessageLog(**base)
+
+
+async def test_claim_pending_logs_marks_them_sending(monkeypatch):
+  cycle = _cycle()
+  entries = [_log(cycle.id, 1), _log(cycle.id, 2)]
+  session = FakeSession(results=[[cycle], entries])
+  _patch_session(monkeypatch, session)
+
+  claimed = await SqlAlchemyBroadcastMessageRepository().claim_pending_logs(
+    cycle.id, max_attempts=5
+  )
+
+  assert claimed == entries
+  assert all(e.status == BroadcastLogStatusEnum.SENDING for e in entries)
+  assert all(e.attempts == 1 for e in entries)
+
+
+async def test_finish_logs_marks_delivered(monkeypatch):
+  entry = _log(uuid.uuid4(), status=BroadcastLogStatusEnum.SENDING, attempts=1)
+  session = FakeSession(results=[[entry]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyBroadcastMessageRepository().finish_logs([entry.id], delivered=True)
+
+  assert entry.status == BroadcastLogStatusEnum.DELIVERED
+  assert entry.delivered_at is not None
+
+
+async def test_finish_logs_returns_a_failed_entry_to_pending(monkeypatch):
+  entry = _log(uuid.uuid4(), status=BroadcastLogStatusEnum.SENDING, attempts=1)
+  session = FakeSession(results=[[entry]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyBroadcastMessageRepository().finish_logs(
+    [entry.id], delivered=False, error="telegram down", max_attempts=5
+  )
+
+  assert entry.status == BroadcastLogStatusEnum.PENDING
+  assert entry.last_error == "telegram down"
+
+
+async def test_finish_logs_fails_an_entry_that_used_up_its_attempts(monkeypatch):
+  entry = _log(uuid.uuid4(), status=BroadcastLogStatusEnum.SENDING, attempts=5)
+  session = FakeSession(results=[[entry]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyBroadcastMessageRepository().finish_logs(
+    [entry.id], delivered=False, error="gone", max_attempts=5
+  )
+
+  assert entry.status == BroadcastLogStatusEnum.FAILED
+
+
+async def test_reclaim_stale_logs_returns_them_to_pending(monkeypatch):
+  """A dispatcher that died mid-delivery leaves entries in SENDING; nothing
+  else would ever pick them up again."""
+  entry = _log(uuid.uuid4(), status=BroadcastLogStatusEnum.SENDING, attempts=1)
+  session = FakeSession(results=[[entry]])
+  _patch_session(monkeypatch, session)
+
+  count = await SqlAlchemyBroadcastMessageRepository().reclaim_stale_logs(
+    stale_after_seconds=60
+  )
+
+  assert count == 1
+  assert entry.status == BroadcastLogStatusEnum.PENDING
+
+
+async def test_mark_broadcast_stamps_the_cycle(monkeypatch):
+  cycle = _cycle()
+  session = FakeSession(results=[[cycle]])
+  _patch_session(monkeypatch, session)
+
+  assert await SqlAlchemyBroadcastMessageRepository().mark_broadcast(cycle.id) is True
+  assert cycle.last_broadcast_at is not None
+
+
+async def test_mark_broadcast_missing_row_is_false(monkeypatch):
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  assert (
+    await SqlAlchemyBroadcastMessageRepository().mark_broadcast(uuid.uuid4()) is False
+  )
