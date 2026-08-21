@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import html
 import json
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -1073,4 +1073,88 @@ async def receive_admin_public_chats(
 async def prompt_admin_public_chats_text(message: Message) -> None:
   await message.answer(
     f"{emojis.WARNING} Please send the chat ids as text, comma-separated."
+  )
+
+
+# ── /admin_private_reply_notify, /admin_public_reply_notify ─────────
+# Each audience's broadcast message is edited in place, and an edit never
+# notifies Telegram users on its own — a two-line reply under the message is
+# what actually does (see broker/services/broadcast_service.py's module
+# docstring). These commands enable/disable that reply per audience; the
+# broadcast message itself keeps being edited either way. Default is enabled.
+
+
+def _parse_enable_disable(raw: str) -> Optional[bool]:
+  value = raw.strip().lower()
+  if value == "enable":
+    return True
+  if value == "disable":
+    return False
+  return None
+
+
+async def _handle_reply_notify_command(
+  message: Message,
+  command: CommandObject,
+  *,
+  label: str,
+  command_name: str,
+  get: Callable[[], Awaitable[Optional[dict]]],
+  setter: Callable[[bool], Awaitable[Optional[dict]]],
+) -> None:
+  arg = (command.args or "").strip()
+  if not arg:
+    current = await get()
+    state = str(current.get("state")) if current else "UNKNOWN"
+    await message.answer(
+      f"{emojis.GEAR} <b>{label} reply notify</b>\n\n"
+      f"Current: <b>{state}</b>\n\n"
+      f"Usage: <code>/{command_name} enable</code> or "
+      f"<code>/{command_name} disable</code>"
+    )
+    return
+
+  parsed = _parse_enable_disable(arg)
+  if parsed is None:
+    await message.answer(
+      f"{emojis.WARNING} Send <code>enable</code> or <code>disable</code>."
+    )
+    return
+
+  result = await setter(parsed)
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update {label.lower()} reply notify. "
+      f"Run /{command_name} to retry."
+    )
+    return
+  state = str(result.get("state"))
+  await message.answer(f"{emojis.CHECK} <b>{label} reply notify</b>: <b>{state}</b>")
+
+
+@router.message(Command("admin_private_reply_notify", "private_reply_notify"))
+async def cmd_private_reply_notify(
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
+) -> None:
+  await _handle_reply_notify_command(
+    message,
+    command,
+    label="Private broadcast",
+    command_name="admin_private_reply_notify",
+    get=broker_admin.get_private_reply_notify,
+    setter=broker_admin.set_private_reply_notify,
+  )
+
+
+@router.message(Command("admin_public_reply_notify", "public_reply_notify"))
+async def cmd_public_reply_notify(
+  message: Message, command: CommandObject, broker_admin: BrokerClientAdmin
+) -> None:
+  await _handle_reply_notify_command(
+    message,
+    command,
+    label="Public broadcast",
+    command_name="admin_public_reply_notify",
+    get=broker_admin.get_public_reply_notify,
+    setter=broker_admin.set_public_reply_notify,
   )

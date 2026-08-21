@@ -333,6 +333,8 @@ class BrokerClientAdmin(BrokerClient):
     CRYPTO_ALLOWED_SYMBOL = "settings/crypto-allowed-symbol"
     CRYPTO_MAX_LEVERAGE = "settings/crypto-max-leverage"
     PUBLIC_BROADCAST_CHAT_IDS = "settings/public-broadcast-chat-ids"
+    PRIVATE_REPLY_NOTIFY = "settings/private-reply-notify"
+    PUBLIC_REPLY_NOTIFY = "settings/public-reply-notify"
 
   async def admin_list_accounts(self) -> Optional[list[dict[str, Any]]]:
     """All trading accounts (includes link_token + linked_user_ids)."""
@@ -527,5 +529,39 @@ class BrokerClientAdmin(BrokerClient):
         "POST",
         self._path(self.ENDPOINTS.PUBLIC_BROADCAST_CHAT_IDS),
         json={"chat_ids": chat_ids},
+      )
+    )
+
+  async def get_private_reply_notify(self) -> Optional[dict[str, Any]]:
+    """Whether private broadcast events currently get a reply notice under
+    the cycle's message (unset on the broker side = enabled)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.PRIVATE_REPLY_NOTIFY))
+    )
+
+  async def set_private_reply_notify(self, enabled: bool) -> Optional[dict[str, Any]]:
+    """Enable/disable the reply notice for private broadcast events."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.PRIVATE_REPLY_NOTIFY),
+        json={"enabled": enabled},
+      )
+    )
+
+  async def get_public_reply_notify(self) -> Optional[dict[str, Any]]:
+    """Whether public broadcast events currently get a reply notice under
+    the cycle's message (unset on the broker side = enabled)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.PUBLIC_REPLY_NOTIFY))
+    )
+
+  async def set_public_reply_notify(self, enabled: bool) -> Optional[dict[str, Any]]:
+    """Enable/disable the reply notice for public broadcast events."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.PUBLIC_REPLY_NOTIFY),
+        json={"enabled": enabled},
       )
     )

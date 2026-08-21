@@ -19,7 +19,9 @@ from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
   NOTIFICATION_TIMEZONE_KEY,
+  PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_REPLY_NOTIFY_KEY,
   SIGNAL_BLOCKED,
   STRATEGY_MAGIC_MAP_KEY,
 )
@@ -517,6 +519,97 @@ def test_set_public_broadcast_chat_ids_persist_failure_is_500(ctx):
     "/admin/settings/public-broadcast-chat-ids",
     headers={"X-API-KEY": API_KEY},
     json={"chat_ids": ["-100"]},
+  )
+  assert resp.status_code == 500
+
+
+# ── Admin settings — reply notify ────────────────────────────────────
+
+
+def test_get_private_reply_notify_defaults_to_enabled(ctx):
+  """Unset means the reply notice is on."""
+  resp = ctx["client"].get(
+    "/admin/settings/private-reply-notify", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PRIVATE_REPLY_NOTIFY_KEY,
+    "value": "1",
+    "state": "ENABLED",
+  }
+
+
+def test_set_private_reply_notify_disabled(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/private-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": False},
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PRIVATE_REPLY_NOTIFY_KEY,
+    "value": "0",
+    "state": "DISABLED",
+  }
+  assert ctx["setting_repo"].values[PRIVATE_REPLY_NOTIFY_KEY] == "0"
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_private_reply_notify_back_to_enabled(ctx):
+  ctx["setting_repo"].values[PRIVATE_REPLY_NOTIFY_KEY] = "0"
+  resp = ctx["client"].post(
+    "/admin/settings/private-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": True},
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "1"
+  assert ctx["setting_repo"].values[PRIVATE_REPLY_NOTIFY_KEY] == "1"
+
+
+def test_set_private_reply_notify_persist_failure_is_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/private-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": False},
+  )
+  assert resp.status_code == 500
+
+
+def test_get_public_reply_notify_defaults_to_enabled(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/public-reply-notify", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PUBLIC_REPLY_NOTIFY_KEY,
+    "value": "1",
+    "state": "ENABLED",
+  }
+
+
+def test_set_public_reply_notify_disabled(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/public-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": False},
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PUBLIC_REPLY_NOTIFY_KEY,
+    "value": "0",
+    "state": "DISABLED",
+  }
+  assert ctx["setting_repo"].values[PUBLIC_REPLY_NOTIFY_KEY] == "0"
+
+
+def test_set_public_reply_notify_persist_failure_is_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/public-reply-notify",
+    headers={"X-API-KEY": API_KEY},
+    json={"enabled": True},
   )
   assert resp.status_code == 500
 

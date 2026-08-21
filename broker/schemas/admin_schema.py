@@ -106,6 +106,23 @@ class PublicBroadcastChatIdsRequest(BaseModel):
   )
 
 
+class ReplyNotifyRequest(BaseModel):
+  """Request body for POST /settings/private-reply-notify and
+  /settings/public-reply-notify.
+
+  Explicit set rather than a toggle — the bot passes the admin's literal
+  enable/disable input straight through.
+  """
+
+  enabled: bool = Field(
+    ...,
+    description=(
+      "Whether a reply notice is posted under the broadcast message for each "
+      "new event (entry, TP1, SL, FLAT, ...) in this audience."
+    ),
+  )
+
+
 class CryptoMaxLeverageRequest(BaseModel):
   """Request body for POST /settings/crypto-max-leverage."""
 

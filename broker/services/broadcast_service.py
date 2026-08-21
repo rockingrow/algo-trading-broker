@@ -24,6 +24,9 @@ The module has two halves, and they never call each other directly:
   that same message, so a reader who saw the trade open finds out that it hit
   TP1 or closed. ``broadcast_message_chats.notified_event_count`` records how
   many events a chat has been told about, so a redelivery never repeats one.
+  Either audience can turn this reply off (``private_broadcast_reply_notify`` /
+  ``public_broadcast_reply_notify``, both enabled by default) — the message
+  keeps being edited in place either way, only the reply notice is silenced.
 
 What ties a cycle together is the pair ``strategy`` + ``signal_uxid`` (see
 ``WebhookPayload``): the unique key of a ``broadcast_messages`` row. Ordering
@@ -50,7 +53,9 @@ from typing import Optional
 from broker.constants import (
   NOTIFICATION_INCLUDE_SIGNAL_RAW,
   NOTIFICATION_TIMEZONE_KEY,
+  PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_REPLY_NOTIFY_KEY,
   SILENT_SIGNAL,
 )
 from broker.db.listener import BROADCAST_LOG_CHANNEL, PostgresChangeListener
@@ -402,6 +407,8 @@ class BroadcastDispatcher:
         NOTIFICATION_TIMEZONE_KEY,
         NOTIFICATION_INCLUDE_SIGNAL_RAW,
         PUBLIC_BROADCAST_CHAT_IDS_KEY,
+        PRIVATE_REPLY_NOTIFY_KEY,
+        PUBLIC_REPLY_NOTIFY_KEY,
       ]
     )
     if settings_values.get(SILENT_SIGNAL) == "1":
@@ -496,12 +503,17 @@ class BroadcastDispatcher:
 
     # One notice per event of the cycle, same for both audiences: an edit is
     # silent, so every event a chat has not been told about yet also gets a
-    # two-line reply under that chat's message (see ``_notify_updates``).
+    # two-line reply under that chat's message (see ``_notify_updates``) —
+    # unless that audience has turned reply notices off.
     events = [event for event in (view.message.events or []) if isinstance(event, dict)]
     notices = [
       format_broadcast_update_notice(view.message, index)
       for index in range(len(events))
     ]
+    reply_enabled = {
+      BroadcastAudienceEnum.PRIVATE: settings_values.get(PRIVATE_REPLY_NOTIFY_KEY) != "0",
+      BroadcastAudienceEnum.PUBLIC: settings_values.get(PUBLIC_REPLY_NOTIFY_KEY) != "0",
+    }
 
     results = []
     for audience, chat in targets:
@@ -514,6 +526,7 @@ class BroadcastDispatcher:
           seq=seq,
           notices=notices,
           existing=chats.get(_raw_id(chat)),
+          notify_enabled=reply_enabled[audience],
         )
       )
     return all(results)
@@ -528,6 +541,7 @@ class BroadcastDispatcher:
     seq: int,
     notices: list[str | None],
     existing,
+    notify_enabled: bool = True,
   ) -> bool:
     """Edit this chat's message, or send it a new one when there is none.
 
@@ -541,7 +555,9 @@ class BroadcastDispatcher:
     An edit that lands also posts a reply notice for every event this chat has
     not been told about yet: the edit alone changes the message silently, so a
     reader who saw the trade open would otherwise never learn that it hit TP1
-    or closed.
+    or closed. ``notify_enabled`` is this audience's reply-notify setting —
+    when it is off, notices are still tracked as delivered (see
+    ``_notify_updates``) but nothing is sent.
     """
     if existing is not None and (existing.delivered_seq or 0) >= seq:
       # Another dispatcher (or an earlier pass) already showed this chat a body
@@ -560,6 +576,7 @@ class BroadcastDispatcher:
           message_id=message_id,
           notices=notices,
           already_notified=getattr(existing, "notified_event_count", None),
+          enabled=notify_enabled,
         )
         await self._repository.upsert_chat(
           record_id,
@@ -627,6 +644,7 @@ class BroadcastDispatcher:
     message_id: str,
     notices: list[str | None],
     already_notified: int | None,
+    enabled: bool = True,
   ) -> int:
     """Reply to *message_id* once per event this chat has not seen announced.
 
@@ -637,8 +655,14 @@ class BroadcastDispatcher:
     ``already_notified`` is None for a chat row written before notices existed:
     what it announced is unknowable, so it is caught up silently rather than
     replaying the trade's whole history into the channel at once.
+
+    ``enabled`` is this audience's reply-notify setting. When it is off, every
+    outstanding notice is treated as caught up without sending anything — so
+    re-enabling it later does not dump the trade's backlog into the chat.
     """
     if already_notified is None:
+      return len(notices)
+    if not enabled:
       return len(notices)
 
     sent = already_notified

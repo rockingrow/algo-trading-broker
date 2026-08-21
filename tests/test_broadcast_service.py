@@ -25,7 +25,9 @@ import pytest
 from broker.constants import (
   NOTIFICATION_INCLUDE_SIGNAL_RAW,
   NOTIFICATION_TIMEZONE_KEY,
+  PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_REPLY_NOTIFY_KEY,
   SILENT_SIGNAL,
 )
 from broker.domain.broadcast_status import merge_status, status_for_action
@@ -762,6 +764,49 @@ async def test_a_chat_from_before_notices_existed_is_caught_up_silently():
 
   assert channel.replied == []
   assert repo.chats[cycle.id]["-100"].notified_event_count == 2
+
+
+async def test_reply_notify_disabled_for_private_skips_only_that_audience():
+  """Turning the private toggle off silences its reply; public is unaffected,
+  and the message body itself is still edited for both."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(
+    repo,
+    private=("-100",),
+    public="-300",
+    settings_values={PRIVATE_REPLY_NOTIFY_KEY: "0"},
+  )
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+
+  assert [chat_id for chat_id, _, _ in channel.replied] == ["-300"]
+  assert {chat_id for chat_id, _, _ in channel.edited} == {"-100", "-300"}
+  # The skipped notice is still tracked as delivered, so re-enabling later
+  # does not replay the trade's backlog into the chat.
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 2
+
+
+async def test_reply_notify_disabled_for_public_skips_only_that_audience():
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(
+    repo,
+    private=("-100",),
+    public="-300",
+    settings_values={PUBLIC_REPLY_NOTIFY_KEY: "0"},
+  )
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+
+  assert [chat_id for chat_id, _, _ in channel.replied] == ["-100"]
+  assert repo.chats[cycle.id]["-300"].notified_event_count == 2
 
 
 async def test_a_failed_edit_announces_nothing():

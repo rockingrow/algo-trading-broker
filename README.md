@@ -529,6 +529,15 @@ Notes:
   never repeats a notice. A reply that fails is simply retried on the next
   pass, and a notice whose message was meanwhile deleted is sent as a plain
   message (`allow_sending_without_reply`) rather than lost.
+- Either audience can turn this reply off on its own — the
+  `private_broadcast_reply_notify` / `public_broadcast_reply_notify` broker
+  settings, both **enabled by default**. The cycle's message keeps being
+  edited in place either way; disabling one only silences the reply notice for
+  that audience. Editable via `GET`/`POST /admin/settings/private-reply-notify`
+  and `.../public-reply-notify`, or the bot's `/admin_private_reply_notify` and
+  `/admin_public_reply_notify [enable|disable]` commands. A notice skipped this
+  way still counts as delivered (`notified_event_count` advances), so
+  re-enabling later does not replay the trade's backlog into the chat.
 
 ### Not in `.env`
 
@@ -1394,6 +1403,8 @@ position on the same symbol.
 | `strategy_magic_map` | `'{"MT5_GOLD_M5_V1": 20260409, …}'` | `POST` / `GET /admin/settings/strategy-magic-map` | JSON-text strategy → magic-number map sent to every worker in its `WORKER_CONNECTED_ACK` on connect, filtered to the strategies it announces |
 | `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
 | `public_broadcast_chat_ids` | `""` | `POST` / `GET /admin/settings/public-broadcast-chat-ids` | Comma-separated chat ids (with the same topic suffix syntax as `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`) that receive the **public** signal-cycle broadcast — the bare price/level/timeline copy, without strategy internals or the worker execution table. Editable at runtime from the admin API and the bot's `/admin_public_chats` command; empty turns the public broadcast off. |
+| `private_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/private-reply-notify` | Whether the **private** broadcast posts a reply notice under the cycle's message on each new action (see "Broadcast update notices" above). `"0"` silences the reply only — the message itself keeps being edited in place. Bot: `/admin_private_reply_notify [enable\|disable]`. |
+| `public_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/public-reply-notify` | Same as above, for the **public** broadcast. Bot: `/admin_public_reply_notify [enable\|disable]`. |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
 
 ### `broadcast_messages` table
