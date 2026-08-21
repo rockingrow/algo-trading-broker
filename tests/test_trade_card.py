@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from broker.db.models import Account, Trade
+from broker.helpers import emoji_constants as em
 from broker.helpers.trade_card import (
   CALLBACK_DETAIL,
   CALLBACK_EXIT,
@@ -185,7 +186,7 @@ def _make_account() -> Account:
   )
 
 
-def _make_trade(status=TradeStatusEnum.CLOSED) -> Trade:
+def _make_trade(status=TradeStatusEnum.CLOSED, last_action=None) -> Trade:
   return Trade(
     id=uuid.uuid4(),
     account_id="acc-1",
@@ -207,6 +208,7 @@ def _make_trade(status=TradeStatusEnum.CLOSED) -> Trade:
     is_running=False,
     risk_percent=1.0,
     status=status,
+    last_action=last_action,
     createdAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
     updatedAt=datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc),
   )
@@ -275,14 +277,19 @@ async def test_existing_card_is_edited_not_reposted_on_partial_close():
   notifier = FakeCardNotifier()
   svc = _service(targets=["111"], cards=[card], notifier=notifier)
 
-  await _deliver(svc, _event("TP1"), _make_trade(TradeStatusEnum.PARTIALLY_CLOSED))
+  await _deliver(
+    svc,
+    _event("TP1"),
+    _make_trade(TradeStatusEnum.PARTIALLY_CLOSED, last_action="TP1"),
+  )
 
   assert notifier.sent == []
   assert len(notifier.edits) == 1
   chat_id, message_id, body, markup = notifier.edits[0]
   # The Bot API takes the id as a string; the row stores it as an int.
   assert (chat_id, message_id) == ("111", "42")
-  assert "Partially closed" in body
+  assert "[" + em.CYCLE_RUNNING + "RUNNING]" in body
+  assert f"{em.TP1} TP1" in body
   # Still running, so the buttons stay.
   assert markup is not None
 
@@ -297,11 +304,14 @@ async def test_closing_edits_the_card_and_drops_its_buttons():
   notifier = FakeCardNotifier()
   svc = _service(targets=["111"], cards=[card], notifier=notifier)
 
-  await _deliver(svc, _event("TP2"), _make_trade(TradeStatusEnum.CLOSED))
+  await _deliver(
+    svc, _event("TP2"), _make_trade(TradeStatusEnum.CLOSED, last_action="TP2")
+  )
 
   assert notifier.sent == []
   _, _, body, markup = notifier.edits[0]
-  assert "Closed" in body
+  assert "[" + em.CYCLE_CLOSED + "CLOSED]" in body
+  assert f"{em.TP2} TP2" in body
   assert markup is None
 
 
@@ -312,10 +322,13 @@ async def test_admin_flat_closes_the_card_too():
   notifier = FakeCardNotifier()
   svc = _service(targets=["111"], cards=[card], notifier=notifier)
 
-  await _deliver(svc, _event("FLATTED"), _make_trade(TradeStatusEnum.FLAT))
+  await _deliver(
+    svc, _event("FLATTED"), _make_trade(TradeStatusEnum.FLAT, last_action="FLAT")
+  )
 
   _, _, body, markup = notifier.edits[0]
-  assert "Flatted" in body
+  assert "[" + em.CYCLE_CLOSED + "CLOSED]" in body
+  assert f"{em.FLAT} FLAT" in body
   assert markup is None
 
 
@@ -481,33 +494,59 @@ def test_card_renders_decimals_plainly():
   assert "E-8" not in body
 
 
+def test_card_header_matches_the_broadcast_style():
+  """Same [STATUS] bracket, divider and entry-icon shape as the public
+  broadcast message, so the two read as one visual system."""
+  trade = _make_trade(TradeStatusEnum.OPENED, last_action="OPENED")
+  lines = format_trade_card(trade).splitlines()
+  assert lines[0] == f"[{em.CYCLE_RUNNING}RUNNING]"
+  assert lines[1] == f"{em.LONG} <b>LONG</b> <b>BTCUSDT</b>"
+  assert lines[2] == "-----------"
+
+
 def test_card_says_how_a_trade_ended():
-  """TP2 / SL / R_SL all persist as CLOSED, so the status alone is not enough."""
+  """TP2 / SL / R_SL all persist as CLOSED, so the bracket status alone is not
+  enough — the "Actions:" box is what says how a trade ended."""
   trade = _make_trade()
   trade.last_action = "SL"
-  assert "Status: <b>Closed</b> (SL)" in format_trade_card(trade)
-
-
-def test_card_does_not_repeat_the_status_as_its_own_last_action():
-  trade = _make_trade(TradeStatusEnum.FLAT)
-  trade.last_action = "FLAT"
   body = format_trade_card(trade)
-  assert "Status: <b>Flatted</b>\n" in body + "\n"
-  assert "(FLAT)" not in body
+  assert "Actions:" in body
+  assert f"{em.SL} SL" in body
 
 
-def test_card_omits_the_last_action_when_the_row_predates_the_column():
+def test_fresh_trade_has_no_actions_box():
+  """Nothing has happened yet beyond the entry, so there is nothing to box."""
+  trade = _make_trade(TradeStatusEnum.OPENED, last_action="OPENED")
+  assert "Actions:" not in format_trade_card(trade)
+
+
+def test_flat_trade_shows_flat_in_the_actions_box():
+  trade = _make_trade(TradeStatusEnum.FLAT, last_action="FLAT")
+  body = format_trade_card(trade)
+  assert "[" + em.CYCLE_CLOSED + "CLOSED]" in body
+  assert f"{em.FLAT} FLAT" in body
+
+
+def test_rejected_trade_shows_rejected_in_the_actions_box():
+  """REJECTED collapses to the same [CLOSED] bracket as every other terminal
+  status, so the box is the only place this trade never actually opened."""
+  trade = _make_trade(TradeStatusEnum.REJECTED, last_action="REJECTED")
+  body = format_trade_card(trade)
+  assert "[" + em.CYCLE_CLOSED + "CLOSED]" in body
+  assert f"{em.TRADE_REJECTED} REJECTED" in body
+
+
+def test_card_omits_the_actions_box_when_the_row_predates_the_column():
   trade = _make_trade()
   trade.last_action = None
-  assert "Status: <b>Closed</b>" in format_trade_card(trade)
-  assert "(" not in format_trade_card(trade).splitlines()[1]
+  assert "Actions:" not in format_trade_card(trade)
 
 
 def test_summary_card_has_pnl_and_hides_the_detail_block():
   body = format_trade_card(_make_trade())
   assert "BTCUSDT" in body
   assert "+120.00" in body  # 1120 - 1000
-  assert "Closed" in body
+  assert "[" + em.CYCLE_CLOSED + "CLOSED]" in body
   assert "Strategy" not in body
   assert "Account:" not in body
 
@@ -516,11 +555,14 @@ def test_detailed_card_adds_the_bookkeeping_block():
   body = format_trade_card(_make_trade(TradeStatusEnum.OPENED), detailed=True)
   assert "Strategy: <b>BTC-M15</b>" in body
   assert "Account: <code>acc-1</code>" in body
+  assert "Market: <b>FOREX</b> / <b>MT5</b>" in body
   assert "Leverage: <b>100</b>" in body
   assert "Ref: <code>ref-1</code>" in body
   assert "Opened:" in body
   # An open trade shows the live price, not a close price.
   assert "Price: <code>65000</code>" in body
+  # Risk sits in the always-visible entry block now, not the detail-only one.
+  assert "Risk: <code>1%</code>" in body
 
 
 def test_card_escapes_worker_supplied_text():
@@ -605,6 +647,10 @@ def test_get_trade_returns_the_owners_trade(trade_ctx):
   assert r.status_code == 200
   assert r.json()["symbol"] == "BTCUSDT"
   assert r.json()["status"] == "OPENED"
+  # Regression: these dropped out of the response entirely, so the card's
+  # Detail view showed "Market: — / —" no matter what the row held.
+  assert r.json()["market"] == "FOREX"
+  assert r.json()["gateway"] == "MT5"
 
 
 def test_get_trade_404s_for_another_users_trade(trade_ctx):
@@ -629,6 +675,9 @@ def test_exit_publishes_a_flat_scoped_to_the_trade(trade_ctx):
   assert published[0]["symbol"] == "BTCUSDT"
   assert published[0]["account_id"] == "acc-1"
   assert published[0]["gateway"] == "MT5"
+  # The trade's own ref_id rides along so a worker can scope the FLAT to this
+  # exact position instead of matching every open position on the scope.
+  assert published[0]["ref_id"] == "ref-1"
 
 
 def test_exit_404s_for_another_users_trade(trade_ctx):

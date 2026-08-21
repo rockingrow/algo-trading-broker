@@ -22,6 +22,9 @@ from app import emojis
 from app.constants import TERMINAL_TRADE_STATUSES
 from app.utils.timezone import format_local_time
 
+# Fallback icon for a last-action word that has no action icon of its own
+# (REJECTED, TERMINAL_CLOSED, FORCED_CLOSED) — keyed by the trade's own status
+# rather than the word, since all three are terminal in different ways.
 _STATUS_EMOJI: dict[str, str] = {
   "OPENED": emojis.TRADE_OPENED,
   "PARTIALLY_CLOSED": emojis.TRADE_PARTIALLY_CLOSED,
@@ -30,13 +33,22 @@ _STATUS_EMOJI: dict[str, str] = {
   "REJECTED": emojis.TRADE_REJECTED,
 }
 
-_STATUS_LABEL: dict[str, str] = {
-  "OPENED": "Opened",
-  "PARTIALLY_CLOSED": "Partially closed",
-  "CLOSED": "Closed",
-  "FLAT": "Flatted",
-  "REJECTED": "Rejected",
+# Mirrors broker/helpers/signal_helper.py's ``_ACTION_EMOJI``.
+_ACTION_EMOJI: dict[str, str] = {
+  "LONG": emojis.LONG,
+  "SHORT": emojis.SHORT,
+  "TP1": emojis.TP1,
+  "TP2": emojis.TP2,
+  "R_SL": emojis.R_SL,
+  "SL": emojis.SL,
+  "FLAT": emojis.FLAT,
 }
+
+_DIVIDER = "-----------"
+
+#: Same glyph the broadcast header shows for a closed cycle — reused so the
+#: Close button reads as "this ends the trade" at a glance.
+_CLOSE_ICON = emojis.CYCLE_CLOSED
 
 
 def _esc(value: Any) -> str:
@@ -61,14 +73,26 @@ def _num(value: Any) -> str:
   return text or "0"
 
 
-def _last_action_suffix(trade: dict[str, Any], status: str) -> str:
-  """`` (SL)`` — the event that put the trade in this status, when it says
-  something the status does not. Mirrors the broker-side twin: TP2/SL/R_SL all
-  persist as ``CLOSED``, so without it the card never says how a trade ended."""
+def _action_icon(last_action: str, status: str) -> str:
+  return _ACTION_EMOJI.get(last_action, _STATUS_EMOJI.get(status, emojis.SATELLITE))
+
+
+def _last_action_block(trade: dict[str, Any], status: str) -> list[str]:
+  """The boxed "Actions:" section, mirroring the broker-side twin and the
+  broadcast message's own — the event that moved the trade, when it says
+  something the entry action and bracket status do not. Empty when there is
+  nothing to add yet — a fresh OPENED trade, or a row that predates the
+  ``last_action`` field."""
   last_action = trade.get("last_action")
-  if not last_action or last_action == status:
-    return ""
-  return f" ({_esc(last_action)})"
+  if not last_action or last_action in ("OPENED", str(trade.get("action"))):
+    return []
+  return [
+    "",
+    "Actions:",
+    _DIVIDER,
+    f"{_action_icon(last_action, status)} {_esc(last_action)}",
+    _DIVIDER,
+  ]
 
 
 def is_closed(trade: dict[str, Any]) -> bool:
@@ -83,21 +107,36 @@ def format_trade_card(
   detailed: bool = False,
   footer: Optional[str] = None,
 ) -> str:
-  """Render *trade* as the card body — see the broker-side twin for the shape."""
+  """Render *trade* as the card body — see the broker-side twin for the shape,
+  styled like the public broadcast message: a ``[STATUS]`` header, a boxed
+  entry block, and a boxed "Actions:" section for whatever moved the trade
+  since it opened."""
   status = str(trade.get("status"))
-  dot = _STATUS_EMOJI.get(status, emojis.SATELLITE)
-  label = _STATUS_LABEL.get(status, status)
-  price_label = "Close price" if status in TERMINAL_TRADE_STATUSES else "Price"
+  action = str(trade.get("action"))
+  terminal = status in TERMINAL_TRADE_STATUSES
+  status_icon = _CLOSE_ICON if terminal else emojis.CYCLE_RUNNING
+  status_word = "CLOSED" if terminal else "RUNNING"
+  price_label = "Close price" if terminal else "Price"
 
   lines = [
-    f"{dot} <b>{_esc(trade.get('symbol'))}</b> · <b>{_esc(trade.get('action'))}</b>",
-    f"Status: <b>{label}</b>{_last_action_suffix(trade, status)}",
+    f"[{status_icon}{status_word}]",
+    f"{_ACTION_EMOJI.get(action, emojis.SATELLITE)} <b>{_esc(action)}</b> "
+    f"<b>{_esc(trade.get('symbol'))}</b>",
+    _DIVIDER,
     f"{price_label}: <code>{_num(trade.get('price'))}</code>",
-    f"Quantity: <code>{_num(trade.get('quantity'))}</code>",
+  ]
+
+  qty_risk = [f"Quantity: <code>{_num(trade.get('quantity'))}</code>"]
+  if trade.get("risk_percent") is not None:
+    qty_risk.append(f"Risk: <code>{_num(trade.get('risk_percent'))}%</code>")
+  lines.append(" | ".join(qty_risk))
+
+  lines.append(
     f"SL: <code>{_num(trade.get('sl'))}</code> | "
     f"TP1: <code>{_num(trade.get('tp1'))}</code> | "
-    f"TP2: <code>{_num(trade.get('tp2'))}</code>",
-  ]
+    f"TP2: <code>{_num(trade.get('tp2'))}</code>"
+  )
+  lines.append(_DIVIDER)
 
   balance = trade.get("account_balance")
   if balance is not None:
@@ -117,8 +156,6 @@ def format_trade_card(
     )
     if trade.get("account_leverage") is not None:
       lines.append(f"Leverage: <b>{_esc(trade.get('account_leverage'))}</b>")
-    if trade.get("risk_percent") is not None:
-      lines.append(f"Risk: <code>{_num(trade.get('risk_percent'))}%</code>")
     if trade.get("ref_id"):
       lines.append(f"Ref: <code>{_esc(trade.get('ref_id'))}</code>")
     if trade.get("comment"):
@@ -130,6 +167,7 @@ def format_trade_card(
     )
 
   lines.append(f"Updated: {format_local_time(trade.get('updatedAt'), tz_offset_hours)}")
+  lines.extend(_last_action_block(trade, status))
 
   if footer:
     lines.append("")
@@ -139,7 +177,7 @@ def format_trade_card(
 
 
 def format_exit_prompt(trade: dict[str, Any]) -> str:
-  """The confirmation the Exit button puts in place of the card.
+  """The confirmation the Close button puts in place of the card.
 
   Replacing the whole body (rather than only swapping the keyboard) is what
   lets Cancel restore a known-good card without having to remember whether the
@@ -148,14 +186,13 @@ def format_exit_prompt(trade: dict[str, Any]) -> str:
   return (
     f"{emojis.WARNING} Close <b>{_esc(trade.get('symbol'))}</b> "
     f"(<b>{_esc(trade.get('action'))}</b>) now?\n\n"
-    f"<i>This publishes a FLAT for strategy "
-    f"<code>{_esc(trade.get('strategy'))}</code> on this symbol, so any other "
-    f"position it holds on "
-    f"<code>{_esc(trade.get('symbol'))}</code> closes too.</i>"
+    f"<i>This closes exactly this trade. Any other positions for strategy "
+    f"<code>{_esc(trade.get('strategy'))}</code> on "
+    f"<code>{_esc(trade.get('symbol'))}</code> are not affected.</i>"
   )
 
 
 EXIT_REQUESTED_FOOTER = (
-  f"{emojis.PENDING} <i>Exit requested — waiting for the worker to close it. "
+  f"{emojis.PENDING} <i>Close requested — waiting for the worker to close it. "
   "This card updates itself when it does.</i>"
 )

@@ -11,6 +11,7 @@ import httpx
 import pytest
 from aiogram.types import InlineKeyboardMarkup
 
+from app import emojis
 from app.constants import (
   CB_TRADE_DETAIL,
   CB_TRADE_EXIT,
@@ -65,7 +66,7 @@ def _trade(**overrides):
 def test_summary_card_shows_the_essentials():
   body = card.format_trade_card(_trade(), 7.0)
   assert "<b>BTCUSDT</b>" in body
-  assert "Status: <b>Opened</b>" in body
+  assert f"[{emojis.CYCLE_RUNNING}RUNNING]" in body
   assert "Price: <code>65000</code>" in body
   assert "Quantity: <code>0.01</code>" in body
   assert "SL: <code>63000</code>" in body
@@ -86,20 +87,28 @@ def test_detailed_card_adds_the_bookkeeping_block():
 
 
 def test_card_says_how_a_trade_ended():
-  """Must match the broker's twin, or a Detail tap would drop the "(SL)"."""
+  """Must match the broker's twin, or a Detail tap would drop the SL entry."""
   body = card.format_trade_card(_trade(status="CLOSED", last_action="SL"), 7.0)
-  assert "Status: <b>Closed</b> (SL)" in body
+  assert "Actions:" in body
+  assert f"{emojis.SL} SL" in body
 
 
-def test_card_does_not_repeat_the_status_as_its_own_last_action():
+def test_fresh_trade_has_no_actions_box():
+  """Nothing has happened yet beyond the entry, so there is nothing to box."""
+  body = card.format_trade_card(_trade(), 7.0)
+  assert "Actions:" not in body
+
+
+def test_flat_trade_shows_flat_in_the_actions_box():
   body = card.format_trade_card(_trade(status="FLAT", last_action="FLAT"), 7.0)
-  assert "(FLAT)" not in body
+  assert f"[{emojis.CYCLE_CLOSED}CLOSED]" in body
+  assert f"{emojis.FLAT} FLAT" in body
 
 
 def test_closed_card_labels_the_price_as_a_close():
   body = card.format_trade_card(_trade(status="CLOSED"), 7.0)
   assert "Close price: <code>65000</code>" in body
-  assert "Status: <b>Closed</b>" in body
+  assert f"[{emojis.CYCLE_CLOSED}CLOSED]" in body
 
 
 def test_numbers_render_without_the_json_float_tail():
@@ -142,6 +151,8 @@ def test_card_keyboard_toggles_between_views():
   assert summary.inline_keyboard[0][0].callback_data == f"{CB_TRADE_DETAIL}:{TRADE_ID}"
   assert summary.inline_keyboard[0][1].callback_data == f"{CB_TRADE_EXIT}:{TRADE_ID}"
   assert detail.inline_keyboard[0][0].callback_data == f"{CB_TRADE_SUMMARY}:{TRADE_ID}"
+  # Same glyph as the [CLOSED] header, so the button reads as "ends the trade".
+  assert summary.inline_keyboard[0][1].text == f"{emojis.CYCLE_CLOSED} Close"
 
 
 def test_closed_card_has_no_keyboard():
@@ -298,7 +309,7 @@ async def test_a_closed_trade_renders_without_buttons():
   call = FakeCall(f"{CB_TRADE_SUMMARY}:{TRADE_ID}")
   await handlers.cb_summary(call, FakeBroker(_trade(status="CLOSED")), FakeBrokerAdmin())
 
-  assert "Status: <b>Closed</b>" in call.message.text
+  assert f"[{emojis.CYCLE_CLOSED}CLOSED]" in call.message.text
   assert call.message.markup is None
 
 
@@ -335,7 +346,7 @@ async def test_cancel_puts_the_card_back():
   call = FakeCall(f"{CB_TRADE_EXIT_CANCEL}:{TRADE_ID}")
   await handlers.cb_exit_cancel(call, FakeBroker(_trade()), FakeBrokerAdmin())
 
-  assert "Status: <b>Opened</b>" in call.message.text
+  assert f"[{emojis.CYCLE_RUNNING}RUNNING]" in call.message.text
   assert call.message.markup is not None
 
 
@@ -345,7 +356,7 @@ async def test_confirm_publishes_the_exit_and_notes_it_on_the_card():
   await handlers.cb_exit_confirm(call, broker, FakeBrokerAdmin())
 
   assert broker.exits == [(7, TRADE_ID)]
-  assert "Exit requested" in call.message.text
+  assert "Close requested" in call.message.text
   # Still open, so the buttons stay until the worker reports the close.
   assert call.message.markup is not None
   assert call.answers == [(None, False)]
@@ -356,7 +367,7 @@ async def test_a_failed_exit_alerts_and_refreshes_without_the_footer():
   call = FakeCall(f"{CB_TRADE_EXIT_CONFIRM}:{TRADE_ID}")
   await handlers.cb_exit_confirm(call, broker, FakeBrokerAdmin())
 
-  assert "Exit requested" not in call.message.text
+  assert "Close requested" not in call.message.text
   assert call.answers[0][1] is True
 
 

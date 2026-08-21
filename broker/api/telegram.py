@@ -286,10 +286,14 @@ def get_telegram_router() -> APIRouter:
     FLAT is the only close directive the workers understand, and it takes a
     scope rather than a position id — so the narrowest close available is
     "this account, this strategy, this symbol", which is the trade itself
-    unless the same strategy holds two positions on one symbol. Closing an
-    already-terminal trade is refused rather than published: the FLAT would be
-    a no-op at best, and could close a *newer* position on the same symbol at
-    worst.
+    unless the same strategy holds two positions on one symbol. This trade's
+    own ``ref_id`` — the worker's own unique column, so it stays correct even
+    for a position the worker opened by hand — rides along too, letting a
+    worker that understands it narrow the close to this exact position
+    instead of matching every open position on that scope. Closing an
+    already-terminal trade is refused rather than published: the FLAT would
+    be a no-op at best, and could close a *newer* position on the same symbol
+    at worst.
     """
     if is_terminal(trade):
       raise HTTPException(
@@ -305,9 +309,15 @@ def get_telegram_router() -> APIRouter:
       account_id=trade.account_id,
       market=trade.market,
       gateway=trade.gateway,
+      ref_id=trade.ref_id,
     )
     scope = _scope(trade.account_id, strategy=trade.strategy, symbol=trade.symbol)
-    log.info("Telegram trade exit published trade_id=%s scope=%s", trade.id, scope)
+    log.info(
+      "Telegram trade exit published trade_id=%s scope=%s ref_id=%s",
+      trade.id,
+      scope,
+      trade.ref_id,
+    )
     return CommandResultResponse(action=AdminActionEnum.FLAT.value, scope=scope)
 
   @router.post(

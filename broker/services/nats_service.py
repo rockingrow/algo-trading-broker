@@ -848,7 +848,8 @@ class NatsPublisher:
     payload = signal.model_dump_json().encode()
     await self._conn.nc.publish(subject, payload)
     log.info(
-      "Published [%s] action=%s strategy=%s symbol=%s account_id=%s market=%s gateway=%s",
+      "Published [%s] action=%s strategy=%s symbol=%s account_id=%s market=%s "
+      "gateway=%s ref_id=%s",
       subject,
       signal.action,
       signal.strategy,
@@ -856,6 +857,7 @@ class NatsPublisher:
       signal.account_id,
       signal.market,
       signal.gateway,
+      signal.ref_id,
     )
 
   async def publish_system_signal(

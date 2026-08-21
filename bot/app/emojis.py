@@ -48,5 +48,17 @@ SATELLITE = _e(":satellite_antenna:")
 
 DETAIL = _e(":magnifying_glass_tilted_left:")
 COLLAPSE = _e(":up_arrow:")
-EXIT = _e(":stop_sign:")
 PENDING = _e(":hourglass_not_done:")
+
+# Card header, styled like the broadcast message's own ``[STATUS]`` line.
+CYCLE_RUNNING = _e(":hourglass_not_done:")
+CYCLE_CLOSED = _e(":chequered_flag:")
+
+# Entry/action icons for the card's position line and its "Actions:" box.
+LONG = _e(":chart_increasing:")
+SHORT = _e(":chart_decreasing:")
+TP1 = _e(":bullseye:")
+TP2 = _e(":rocket:")
+R_SL = _e(":shield:")
+SL = _e(":hollow_red_circle:")
+FLAT = _e(":white_flag:")

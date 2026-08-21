@@ -13,6 +13,7 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
+from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 
 
@@ -48,6 +49,8 @@ class TradeResponse(BaseModel):
 
   id: uuid.UUID
   account_id: str
+  market: Optional[MarketTypeEnum] = None
+  gateway: Optional[str] = None
   account_leverage: Optional[int]
   account_balance_init: Optional[float]
   account_balance: Optional[float]
@@ -79,6 +82,8 @@ class TradeResponse(BaseModel):
       "example": {
         "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
         "account_id": "MT5-12345678",
+        "market": "FOREX",
+        "gateway": "MT5",
         "account_leverage": 100,
         "account_balance_init": 10000.0,
         "account_balance": 10250.75,

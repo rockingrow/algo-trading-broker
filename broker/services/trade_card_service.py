@@ -5,7 +5,7 @@ Every TRADE event a worker publishes lands here after the trade row has been
 upserted. For each owner of that account who has opted in (``/subscribe`` in
 the bot) the service keeps exactly **one** Telegram message alive per trade:
 
-* first sighting  → post the card, with a Detail / Exit button row,
+* first sighting  → post the card, with a Detail / Close button row,
 * status change   → edit that same message in place (OPENED → PARTIALLY_CLOSED
   → CLOSED / FLAT / REJECTED),
 * terminal status → edit one last time and drop the buttons, since there is

@@ -8,7 +8,7 @@ poll — which is what this router answers:
 
 - ``tc:d``  Detail  — re-render the card with the strategy/account/risk block,
 - ``tc:s``  Summary — collapse it again,
-- ``tc:x``  Exit    — replace the card with a confirmation prompt,
+- ``tc:x``  Close   — replace the card with a confirmation prompt,
 - ``tc:xy`` / ``tc:xn`` — publish the close, or restore the card.
 
 Every handler re-fetches the trade rather than trusting what the message
@@ -128,7 +128,7 @@ async def cb_exit(call: CallbackQuery, broker: BrokerClientUser) -> None:
   """Swap the card for a confirmation prompt.
 
   Replacing the body (not just the keyboard) means Cancel has one card to go
-  back to, whichever view the user was in when they tapped Exit.
+  back to, whichever view the user was in when they tapped Close.
   """
   trade_id = _trade_id(call.data)
   if trade_id is None:

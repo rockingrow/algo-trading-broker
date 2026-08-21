@@ -29,7 +29,6 @@ TRADE_REJECTED: str = emoji.emojize(":prohibited:")  # 🚫
 # ── Trade card buttons / footers ──────────────────────────────────────────────
 DETAIL: str = emoji.emojize(":magnifying_glass_tilted_left:")  # 🔍
 COLLAPSE: str = emoji.emojize(":up_arrow:")  # ⬆️
-EXIT: str = emoji.emojize(":stop_sign:")  # 🛑
 CONFIRM: str = emoji.emojize(":check_mark_button:")  # ✅
 CANCEL: str = emoji.emojize(":multiply:")  # ✖️
 PENDING: str = emoji.emojize(":hourglass_not_done:")  # ⏳

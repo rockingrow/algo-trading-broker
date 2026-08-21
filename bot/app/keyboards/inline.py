@@ -105,7 +105,7 @@ def trade_card(trade_id: str, *, detailed: bool, closed: bool) -> Optional[Inlin
       [
         toggle,
         InlineKeyboardButton(
-          text=f"{emojis.EXIT} Exit", callback_data=f"{CB_TRADE_EXIT}:{trade_id}"
+          text=f"{emojis.CYCLE_CLOSED} Close", callback_data=f"{CB_TRADE_EXIT}:{trade_id}"
         ),
       ]
     ]

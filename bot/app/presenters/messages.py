@@ -134,7 +134,7 @@ class UserMessages:
         "You'll now get a message here the moment one of your linked accounts "
         "opens a trade. Each message updates itself as the trade moves — "
         "partial close, close, flat — and carries "
-        f"{emojis.DETAIL} <b>Detail</b> and {emojis.EXIT} <b>Exit</b> buttons "
+        f"{emojis.DETAIL} <b>Detail</b> and {emojis.CYCLE_CLOSED} <b>Close</b> buttons "
         "while the trade is still running.\n\n"
         "Use /unsubscribe to stop."
       )

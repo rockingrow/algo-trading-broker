@@ -5,7 +5,7 @@ A *card* is the single Telegram message a subscribed owner gets for one trade.
 It is posted when the trade first shows up on the TRADE subject and then
 **edited in place** on every status change, so a user's chat holds one message
 per trade rather than a stream of them. While the trade is running the card
-carries a Detail / Exit button row; once it reaches a terminal status the row
+carries a Detail / Close button row; once it reaches a terminal status the row
 is dropped, because there is nothing left to act on.
 
 This module is deliberately pure — no I/O, no ORM writes — so both the sender
@@ -32,7 +32,9 @@ from typing import Any
 from broker.db.models import Trade
 from broker.helpers import emoji_constants as em
 from broker.helpers.message_formatter import format_number
+from broker.helpers.signal_helper import action_to_emoji
 from broker.helpers.timezone_helper import format_notification_time
+from broker.schemas.core import SignalActionEnum
 from broker.schemas.trade_schema import TradeStatusEnum
 
 # ── Callback data (mirrored by the bot) ──────────────────────────────
@@ -47,6 +49,9 @@ TERMINAL_STATUSES = frozenset(
   {TradeStatusEnum.CLOSED, TradeStatusEnum.FLAT, TradeStatusEnum.REJECTED}
 )
 
+# Fallback icon for a last-action word that isn't itself a SignalActionEnum
+# (REJECTED, TERMINAL_CLOSED, FORCED_CLOSED) — keyed by the trade's own status
+# rather than the word, since all three are terminal in different ways.
 _STATUS_EMOJI: dict[TradeStatusEnum, str] = {
   TradeStatusEnum.OPENED: em.TRADE_OPENED,
   TradeStatusEnum.PARTIALLY_CLOSED: em.TRADE_PARTIALLY_CLOSED,
@@ -55,13 +60,11 @@ _STATUS_EMOJI: dict[TradeStatusEnum, str] = {
   TradeStatusEnum.REJECTED: em.TRADE_REJECTED,
 }
 
-_STATUS_LABEL: dict[TradeStatusEnum, str] = {
-  TradeStatusEnum.OPENED: "Opened",
-  TradeStatusEnum.PARTIALLY_CLOSED: "Partially closed",
-  TradeStatusEnum.CLOSED: "Closed",
-  TradeStatusEnum.FLAT: "Flatted",
-  TradeStatusEnum.REJECTED: "Rejected",
-}
+_DIVIDER = "-----------"
+
+#: Same glyph the broadcast header shows for a closed cycle — reused so the
+#: Close button reads as "this ends the trade" at a glance.
+_CLOSE_ICON = em.CYCLE_CLOSED
 
 
 def _esc(value: Any) -> str:
@@ -92,20 +95,36 @@ def is_terminal(trade: Trade) -> bool:
   return trade_status(trade) in TERMINAL_STATUSES
 
 
-def _last_action_suffix(trade: Trade, status: TradeStatusEnum) -> str:
-  """`` (SL)`` — the event that put the trade in this status, when it says
-  something the status does not.
+def _action_icon(last_action: str, status: TradeStatusEnum) -> str:
+  """Icon for one action word. ``last_action`` is usually a SignalActionEnum
+  member (TP1/TP2/SL/R_SL/FLAT); REJECTED/TERMINAL_CLOSED/FORCED_CLOSED are
+  not, so those fall back to the trade's own status dot."""
+  try:
+    return action_to_emoji(SignalActionEnum(last_action))
+  except ValueError:
+    return _STATUS_EMOJI.get(status, em.DEFAULT_SIGNAL)
+
+
+def _last_action_block(trade: Trade, status: TradeStatusEnum) -> list[str]:
+  """The boxed "Actions:" section, mirroring the broadcast message's own —
+  the event that moved the trade, when it says something the entry action and
+  bracket status do not.
 
   TP2, SL, R_SL, TERMINAL_CLOSED and FORCED_CLOSED all persist as ``CLOSED``,
-  and ``action`` keeps the entry direction, so without this the card never says
-  *how* a trade ended. Skipped when the two carry the same word (a FLATTED
-  event yields status FLAT and last action FLAT — say it once) and when the
-  row predates the column.
+  and ``action`` keeps the entry direction, so without this the card never
+  says *how* a trade ended. Empty when there is nothing to add yet — a fresh
+  OPENED trade, or a row that predates the ``last_action`` column.
   """
   last_action = trade.last_action
-  if not last_action or last_action == status.value:
-    return ""
-  return f" ({_esc(last_action)})"
+  if not last_action or last_action in ("OPENED", _enum_value(trade.action)):
+    return []
+  return [
+    "",
+    "Actions:",
+    _DIVIDER,
+    f"{_action_icon(last_action, status)} {_esc(last_action)}",
+    _DIVIDER,
+  ]
 
 
 def _pnl(trade: Trade) -> float | None:
@@ -123,29 +142,37 @@ def format_trade_card(
   detailed: bool = False,
   footer: str | None = None,
 ) -> str:
-  """Render the card body for *trade* (Telegram HTML).
+  """Render the card body for *trade* (Telegram HTML), styled like the public
+  broadcast message: a ``[STATUS]`` header, a boxed entry block, and a boxed
+  "Actions:" section for whatever moved the trade since it opened.
 
   The summary view carries what an owner glances at — direction, status,
   price, size, the stop/target levels and the running PnL. ``detailed=True``
   adds the bookkeeping an owner only wants on request: which strategy and
-  account it came from, the broker's reference id, leverage, risk and the
-  worker's own comment or reject reason.
+  account it came from, the broker's reference id, leverage and the worker's
+  own comment or reject reason.
 
   *footer* appends one extra line, used to say an exit has been requested but
   the worker has not reported the close yet.
   """
   status = trade_status(trade)
   action = _enum_value(trade.action)
-  dot = _STATUS_EMOJI.get(status, em.DEFAULT_SIGNAL)
-  label = _STATUS_LABEL.get(status, status.value)
-  price_label = "Close price" if status in TERMINAL_STATUSES else "Price"
+  terminal = status in TERMINAL_STATUSES
+  status_icon = _CLOSE_ICON if terminal else em.CYCLE_RUNNING
+  status_word = "CLOSED" if terminal else "RUNNING"
+  price_label = "Close price" if terminal else "Price"
 
   lines = [
-    f"{dot} <b>{_esc(trade.symbol)}</b> · <b>{_esc(action)}</b>",
-    f"Status: <b>{label}</b>{_last_action_suffix(trade, status)}",
+    f"[{status_icon}{status_word}]",
+    f"{action_to_emoji(trade.action)} <b>{_esc(action)}</b> <b>{_esc(trade.symbol)}</b>",
+    _DIVIDER,
     f"{price_label}: <code>{format_number(trade.price)}</code>",
-    f"Quantity: <code>{format_number(trade.quantity)}</code>",
   ]
+
+  qty_risk = [f"Quantity: <code>{format_number(trade.quantity)}</code>"]
+  if trade.risk_percent is not None:
+    qty_risk.append(f"Risk: <code>{format_number(trade.risk_percent)}%</code>")
+  lines.append(" | ".join(qty_risk))
 
   levels = [
     f"SL: <code>{format_number(trade.sl)}</code>",
@@ -153,6 +180,7 @@ def format_trade_card(
     f"TP2: <code>{format_number(trade.tp2)}</code>",
   ]
   lines.append(" | ".join(levels))
+  lines.append(_DIVIDER)
 
   if trade.account_balance is not None:
     lines.append(f"Balance: <b>{format_number(trade.account_balance)}</b>")
@@ -170,8 +198,6 @@ def format_trade_card(
     )
     if trade.account_leverage is not None:
       lines.append(f"Leverage: <b>{_esc(trade.account_leverage)}</b>")
-    if trade.risk_percent is not None:
-      lines.append(f"Risk: <code>{format_number(trade.risk_percent)}%</code>")
     if trade.ref_id:
       lines.append(f"Ref: <code>{_esc(trade.ref_id)}</code>")
     if trade.comment:
@@ -181,6 +207,7 @@ def format_trade_card(
     lines.append(f"Opened: {format_notification_time(trade.createdAt, timezone_offset)}")
 
   lines.append(f"Updated: {format_notification_time(trade.updatedAt, timezone_offset)}")
+  lines.extend(_last_action_block(trade, status))
 
   if footer:
     lines.append("")
@@ -211,4 +238,4 @@ def trade_card_keyboard(
     if detailed
     else _button(f"{em.DETAIL} Detail", CALLBACK_DETAIL, trade.id)
   )
-  return {"inline_keyboard": [[toggle, _button(f"{em.EXIT} Exit", CALLBACK_EXIT, trade.id)]]}
+  return {"inline_keyboard": [[toggle, _button(f"{_CLOSE_ICON} Close", CALLBACK_EXIT, trade.id)]]}
