@@ -25,6 +25,7 @@ http:
           "tp2": 4700.73,
           "risk_percent": 3.0,
           "tp1_percent": 30.0,
+          "use_equity_sizing": true,
           "move_sl_to_be": false,
           "is_scale_position": false,
           "scale_strategy": "LOW_RR_TIER",

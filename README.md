@@ -334,7 +334,8 @@ Empty when the worker announced no strategies, or when there is nothing recent t
       "sl": 2340.0,
       "tp1": 2370.0,
       "tp2": 2390.0,
-      "risk_percent": 1.0
+      "risk_percent": 1.0,
+      "use_equity_sizing": true
     }
   ]
 }
@@ -712,6 +713,7 @@ The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the respon
     "sl": 1890.0,
     "tp1": 1920.0,
     "tp2": 1950.0,
+    "use_equity_sizing": true,
     "is_running": true,
     "is_scale_position": true,
     "scaling": {
@@ -756,6 +758,7 @@ To support this, the `position` block carries two sets of exit levels:
 | Field | Purpose |
 | ----- | ------- |
 | `tp1`, `tp2`, `sl` | Base levels from the **primary** strategy logic — always present. |
+| `use_equity_sizing` | `true` when the worker should size the position off account **equity** (balance + floating P/L) instead of the plain balance. Optional — omitted (or `null`) leaves the worker's own default in place. Forwarded as-is on the NATS `SIGNAL` payload. |
 | `is_scale_position` | `true` when a sub-strategy wants to **scale into** an existing open position rather than open a new one. |
 | `scale_strategy` | Name of the sub-strategy that triggered the scale-in (e.g. `LOW_RR_TIER`). Lets workers apply sub-strategy-specific position sizing or risk rules. |
 | `scaling.tp`, `scaling.sl`, `scaling.quantity` | **Override** levels and size for the scale-in leg. These replace `tp1`/`sl`/`quantity` for the additional entry — they are forwarded on the NATS `SIGNAL` payload only when `is_scale_position` is `true`. |

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`position.use_equity_sizing` on the webhook payload** — an optional boolean
+  telling the worker to size the position off account **equity** (balance plus
+  floating P/L) instead of the plain balance. It is accepted on the webhook
+  `position` block, forwarded unchanged on the NATS `SIGNAL` payload
+  (`TradingSignal`) and captured in the broadcast event. Omitting it (or
+  sending `null`) keeps the previous behaviour: the worker's own default.
+
 ## [1.1.3] - 2026-08-21
 
 ### Added

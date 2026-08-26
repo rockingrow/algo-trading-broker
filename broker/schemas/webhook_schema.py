@@ -32,6 +32,10 @@ class PositionSchema(BaseModel):
   tp2: Optional[float] = None
   risk_percent: Optional[float] = None
   tp1_percent: Optional[float] = None
+  # When true the worker sizes the position off account *equity* (balance plus
+  # floating P/L) instead of the plain balance. Optional: a payload that omits
+  # it leaves the choice to the worker's own default.
+  use_equity_sizing: Optional[bool] = None
   move_sl_to_be: Optional[bool] = None
   is_running: Optional[bool] = None
   is_scale_position: Optional[bool] = None
@@ -106,6 +110,7 @@ class WebhookPayload(BaseModel):
           "sl": 67800.0,
           "tp1": 68900.0,
           "tp2": 69500.0,
+          "use_equity_sizing": True,
           "is_running": True,
         },
         "token": "shared-webhook-token",

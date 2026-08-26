@@ -64,6 +64,7 @@ def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
       if payload.inputs is not None and payload.inputs.risk_percent is not None
       else 0.0
     ),
+    use_equity_sizing=position.use_equity_sizing,
     is_scale_position=is_scale_position,
     scale_strategy=position.scale_strategy if is_scale_position else None,
     scaling=scaling,
