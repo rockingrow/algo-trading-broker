@@ -1,6 +1,13 @@
 # Algo Trading Broker
 
-A high-performance, decentralized **trading signal broker** built with FastAPI and NATS. It acts as a central hub between TradingView alerts and distributed execution nodes (VPS workers).
+A high-performance, decentralized **trading signal broker** built with FastAPI and NATS. It acts as a central hub between **signal producers** and distributed execution nodes (VPS workers).
+
+Two signal producers feed it today:
+
+- **TradingView** — Pine strategies posting their alert JSON to `POST /secret/webhook`.
+- **[Quant-Trading-Engine (QTE)](https://github.com/rockingrow/quant-trading-engine)** — an event-driven backtest/live engine that emits the *same* `WebhookPayload` shape, either to the same webhook or straight onto the broker's JetStream buffer.
+
+Neither is special-cased: one payload schema, one pipeline, one set of NATS subjects downstream. See [Signal producers](#signal-producers).
 
 ## ⚡ Quick Start
 
@@ -57,7 +64,7 @@ and uv project. It reads the same root `.env`. See
 
 ## ✨ Features
 
-- **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification). Every alert is persisted (`status=QUEUED`) and pushed onto a **NATS JetStream** stream so the HTTP request returns as soon as the message is durably queued — the fan-out to workers runs in a background consumer, which closes the `Webhook delivery failed — server closed the connection unexpectedly` failure mode from holding the request open across the pipeline.
+- **Webhook Hub**: Receives and validates signal JSON from **TradingView** and from **[QTE](https://github.com/rockingrow/quant-trading-engine)** on the same `POST /secret/webhook` endpoint, against the same payload schema (with optional HMAC signature verification). Every alert is persisted (`status=QUEUED`) and pushed onto a **NATS JetStream** stream so the HTTP request returns as soon as the message is durably queued — the fan-out to workers runs in a background consumer, which closes the `Webhook delivery failed — server closed the connection unexpectedly` failure mode from holding the request open across the pipeline.
 - **Persistence**: Logs every signal (with a `QUEUED` → `PUBLISHED` status), trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
 - **Signal replay on reconnect**: Every `WORKER_CONNECTED` handshake is answered with a `retry_signals` list holding every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
@@ -76,7 +83,8 @@ and uv project. It reads the same root `.env`. See
 
 ```mermaid
 graph TD
-    TV[TradingView Alert] -- "POST :8080/webhook" --> Broker
+    TV[TradingView Alert] -- "POST :8080/secret/webhook" --> Broker
+    QTE[Quant-Trading-Engine] -- "POST :8080/secret/webhook (http transport)" --> Broker
     subgraph "Broker Node (This Repo)"
         Broker[FastAPI Webhook Server]
         DB[(PostgreSQL)]
@@ -93,6 +101,7 @@ graph TD
         NATS -- "TRADE events" --> Consumer[TradeEventConsumer]
         Consumer -- "Upsert Trade + Account" --> DB
     end
+    QTE -. "publish SIGNALS.{strategy} (nats transport)" .-> JS
     NATS -- "{strategy}" --> W1
     NATS -- "{strategy}" --> W2
     NATS -- "{strategy}" --> WN
@@ -109,6 +118,18 @@ graph TD
         WNB -. "NATS TRADE event" .-> NATS
     end
 ```
+
+### Signal producers
+
+Both producers speak the same [`WebhookPayload`](#post-secretwebhook); the broker cannot tell them apart, and nothing downstream — persistence, block gate, fan-out, broadcast — branches on the origin.
+
+| Producer | How it reaches the broker | Auth |
+| -------- | ------------------------- | ---- |
+| **TradingView** | `POST /secret/webhook` from the alert's webhook URL. | In-payload `token` + optional HMAC `X-Signature`. |
+| **[QTE](https://github.com/rockingrow/quant-trading-engine)** — `http` transport | The same `POST /secret/webhook`. The right choice when QTE and the broker do not share a trusted NATS cluster. | Same as above. |
+| **[QTE](https://github.com/rockingrow/quant-trading-engine)** — `nats` transport (its default) | Publishes `{"payload": {...}}` straight to the JetStream subject `SIGNALS.<strategy>` — the very buffer the webhook writes to — so the signal keeps the broker's persistence and retry without the HTTP hop. | **Access to the NATS cluster is the auth**: this path skips the `token` check, so keep that cluster private (or token-protected). |
+
+QTE pins what it relies on in its own [`docs/broker-contract.md`](https://github.com/rockingrow/quant-trading-engine/blob/main/docs/broker-contract.md); this repo's schema stays the source of truth, so a field added here (e.g. `position.use_equity_sizing`) is what that page tracks.
 
 ---
 
@@ -622,7 +643,7 @@ All routes are grouped under versioned or purpose-scoped prefixes:
 | ------ | ------ | ----------- |
 | `/v1` | API | Public API endpoints (accounts, trades, health) |
 | `/admin` | Admin | Management endpoints (settings, trading actions) |
-| `/secret` | Webhook | TradingView webhook receiver |
+| `/secret` | Webhook | Signal webhook receiver (TradingView, QTE) |
 
 If `BROKER_API_PREFIX` is set (e.g. `abc123xyz`), every route is mounted under that secret segment:
 
@@ -692,7 +713,7 @@ Returns `{"status": "ok"}`. No authentication required.
 
 ### POST `/secret/webhook`
 
-Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
+Receives signals from **TradingView** and from **[Quant-Trading-Engine](https://github.com/rockingrow/quant-trading-engine)** — one endpoint, one payload schema, one `token`, no per-producer branch anywhere downstream. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
 
 The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the response is still `202`, with `status=deferred`, and the enqueue is retried in the background (see [JetStream signal pipeline](#jetstream-signal-pipeline)). `503` means the enqueue failed *and* could not be deferred — the signal was dropped.
 
