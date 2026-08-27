@@ -111,6 +111,10 @@ class TradingSignal(BaseModel):
   move_sl_to_be: Optional[bool] = None
   is_running: Optional[bool] = None
   risk_percent: Optional[float] = None
+  # Forwarded straight from the webhook's ``position.use_equity_sizing``: size
+  # off account equity rather than balance. ``None`` means the webhook said
+  # nothing, so the worker keeps its own default.
+  use_equity_sizing: Optional[bool] = None
   is_scale_position: Optional[bool] = None
   scale_strategy: Optional[str] = None
   scaling: Optional[ScalingSchema] = None
@@ -342,6 +346,7 @@ class SystemWorkerConnectedAck(SystemSignal):
             "tp1": 2370.0,
             "tp2": 2390.0,
             "risk_percent": 1.0,
+            "use_equity_sizing": True,
           }
         ],
         "settings": {"signal_blocked": False},

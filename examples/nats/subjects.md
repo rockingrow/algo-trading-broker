@@ -31,7 +31,9 @@ only to the strategies it handles, so it never sees another strategy's traffic.
 - **Entry / target / stop payloads** are a full `TradingSignal`: `signal_id`,
   `signal_uxid`, `timestamp`, `strategy`, `action`, `symbol`, `price`,
   `quantity`, plus the
-  optional `sl` / `tp1` / `tp2` / `risk_percent` risk levels. A **scale-in**
+  optional `sl` / `tp1` / `tp2` / `risk_percent` risk levels and the
+  optional `use_equity_sizing` flag (size off account equity instead of
+  balance). A **scale-in**
   additionally sets `is_scale_position: true`, `scale_strategy`, and a `scaling`
   block (`tp` / `sl` / `quantity`) describing the add.
 - **The FLAT directive** is a lighter payload carrying only `signal_id`,

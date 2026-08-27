@@ -147,6 +147,7 @@ def build_broadcast_event(
     "risk_percent": risk_percent,
     "tp1_percent": pos.tp1_percent,
     "move_sl_to_be": pos.move_sl_to_be,
+    "use_equity_sizing": pos.use_equity_sizing,
     "is_running": pos.is_running,
     "is_scale_position": pos.is_scale_position,
     "scale_strategy": pos.scale_strategy,

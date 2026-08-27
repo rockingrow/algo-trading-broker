@@ -14,6 +14,7 @@
       "tp2": 69500.0,
       "risk_percent": 1.0,
       "tp1_percent": 50.0,
+      "use_equity_sizing": true,
       "move_sl_to_be": true,
       "is_running": true,
       "is_scale_position": false,

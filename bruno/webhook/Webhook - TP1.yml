@@ -23,6 +23,7 @@ http:
           "risk_percent": 3.0,
           "is_running": true,
           "tp1_percent": 70.0,
+          "use_equity_sizing": true,
           "move_sl_to_be": false
         },
         "indicators": {},
