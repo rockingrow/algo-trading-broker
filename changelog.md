@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Several signal cycles per `symbol` + `strategy` at the same time** — a
+  producer may now run more than one trade on the same symbol and strategy
+  concurrently. Each one carries its own `signal_uxid` and its full action trail
+  from entry to exit, and the broker keys a broadcast cycle on
+  `(symbol, strategy, signal_uxid)` instead of `(strategy, signal_uxid)`, so the
+  concurrent trades stay separate records and separate Telegram messages — a
+  `TP1` belonging to one of them can no longer land on another.
+
+  The webhook and NATS payloads are unchanged; the only requirement on a
+  producer is the one that already held — one `signal_uxid` per trade, not
+  reused by a second overlapping trade.
+
+  **Migration `d4e5f6a7b8c9`** replaces `broadcast_messages`' unique constraint
+  `uq_broadcast_messages_strategy_signal_uxid` with
+  `uq_broadcast_messages_symbol_strategy_signal_uxid` on
+  `(symbol, strategy, signal_uxid)`. The new constraint is weaker than the old
+  one, so no existing row can violate it and no data is rewritten.
+  `BroadcastMessageRepository.record_worker_execution` takes a `symbol` argument
+  accordingly (the worker path reads it off the signal's row).
+
 ### Added
 
 - **`position.use_equity_sizing` on the webhook payload** — an optional boolean

@@ -770,6 +770,16 @@ per-signal `signal_id` the broker mints on persist is still unique per
 alert (workers keep deduping on it) — the two ids serve different jobs and
 both travel on every downstream NATS payload.
 
+**Several cycles on one symbol + strategy at the same time:** a producer may
+run more than one trade on the same `symbol` + `strategy` concurrently. Each
+one mints its own `signal_uxid` and carries the full action trail from entry to
+exit under that id; the broker keys a cycle on `(symbol, strategy,
+signal_uxid)`, so the concurrent trades stay separate records and separate
+Telegram messages, and a `TP1` belonging to one of them never lands on
+another. Nothing else about the payload changes — the producer only has to keep
+one `signal_uxid` per trade and not reuse it for a second, overlapping trade on
+the same symbol and strategy.
+
 #### Position fields — `tp1`/`tp2`/`sl` vs `scaling`
 
 A TradingView strategy can contain **multiple sub-strategies** running under the same parent strategy name. Each sub-strategy may apply different risk/reward profiles to the same signal — for example, a `LOW_RR_TIER` sub-strategy is designed to catch entries more frequently but accepts a tighter TP and higher relative risk, which means the effective TP, SL, and quantity differ from the base signal values.
@@ -1153,7 +1163,7 @@ and local development.
 | ------------------ | ---------------- | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `strategy` | String(50) | Strategy name that generated the signal |
-| `signal_uxid` | String(16) (Nullable) | Cycle correlator — 16-char lowercase-hex short uuid shared by every signal of one trade (entry + TPs + SL + FLAT). Ties a signal to its `broadcast_messages` row so the trade renders as one edited-in-place Telegram message. |
+| `signal_uxid` | String(16) (Nullable) | Cycle correlator — 16-char lowercase-hex short uuid shared by every signal of one trade (entry + TPs + SL + FLAT). Ties a signal to its `broadcast_messages` row — together with the row's `symbol` and `strategy`, the cycle key — so the trade renders as one edited-in-place Telegram message, even while other trades run on the same symbol and strategy. |
 | `symbol` | String(50) | Trading symbol (e.g., XAUUSD) |
 | `timeframe` | String(20) | Chart timeframe (e.g., M15) |
 | `timestamp` | DateTime | Signal generation time from TradingView |
@@ -1434,7 +1444,7 @@ position on the same symbol.
 ### `broadcast_messages` table
 
 One row per signal *cycle*: everything the broker has seen for one trade
-(``strategy`` + ``signal_uxid``) rolled up into a single record. The row's
+(``symbol`` + ``strategy`` + ``signal_uxid``) rolled up into a single record. The row's
 ``events`` list — an ordered JSONB array of the actions in the order they
 arrived — is what the Telegram message body is rendered from every time an
 edit is due, so the operator sees the full timeline in one place instead of
@@ -1453,7 +1463,11 @@ one message per action.
 | `last_broadcast_at` | DateTime (Nullable) | Timestamp of the last successful dispatcher run for this cycle |
 | `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
 
-**Unique constraint:** `(strategy, signal_uxid)` — the cycle key.
+**Unique constraint:** `(symbol, strategy, signal_uxid)` — the cycle key. The
+symbol is part of it because one `symbol` + `strategy` pair can run several
+cycles at once (see [POST `/secret/webhook`](#post-secretwebhook)): the cycle id
+is what separates the concurrent trades, and the symbol is what keeps an id
+minted for one symbol from colliding with another's.
 
 ### `broadcast_message_chats` table
 

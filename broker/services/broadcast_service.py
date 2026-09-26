@@ -28,8 +28,12 @@ The module has two halves, and they never call each other directly:
   ``public_broadcast_reply_notify``, both enabled by default) — the message
   keeps being edited in place either way, only the reply notice is silenced.
 
-What ties a cycle together is the pair ``strategy`` + ``signal_uxid`` (see
-``WebhookPayload``): the unique key of a ``broadcast_messages`` row. Ordering
+What ties a cycle together is the triple ``symbol`` + ``strategy`` +
+``signal_uxid`` (see ``WebhookPayload``): the unique key of a
+``broadcast_messages`` row. One symbol + strategy carries several cycles at
+once — each concurrent signal brings its own ``signal_uxid`` and runs its own
+entry-to-exit trail — so the cycle id is what separates them and the symbol is
+what keeps an id minted for one symbol from colliding with another's. Ordering
 and lost-update safety come from the write log — ``last_seq`` is handed out
 under a row lock on the cycle, and each chat records the highest sequence it
 has been shown (``delivered_seq``), so a slow delivery cannot overwrite a newer
@@ -197,7 +201,8 @@ class SignalBroadcastService:
     )
     if record is None:
       log.error(
-        "Broadcast not recorded strategy=%s signal_uxid=%s",
+        "Broadcast not recorded symbol=%s strategy=%s signal_uxid=%s",
+        payload.symbol,
         payload.strategy,
         payload.signal_uxid,
       )
@@ -211,7 +216,9 @@ class SignalBroadcastService:
 
     Called for every TRADE event. A worker echoes back the ``signal_id`` it was
     given — the ``signals`` row id, unique per signal — so the cycle is found by
-    reading that row's ``signal_uxid``. (The SIGNAL payload also carries the
+    reading that row's ``symbol``, ``strategy`` and ``signal_uxid``, which is
+    the cycle key: several cycles can be live on one symbol + strategy at the
+    same time, and the signal row says which of them this trade belongs to. (The SIGNAL payload also carries the
     cycle id directly, but ``PositionEvent`` has no field for it, so this stays
     the one link.) An event without a ``signal_id`` (a manual trade, a worker
     too old to echo it) has no cycle to update and is ignored.
@@ -233,6 +240,7 @@ class SignalBroadcastService:
     market = _market_of(event, trade)
     gateway = event.gateway or (trade.gateway if trade is not None else None)
     await self._repository.record_worker_execution(
+      symbol=signal.symbol,
       strategy=signal.strategy,
       signal_uxid=signal.signal_uxid,
       worker_id=compose_worker_id(

@@ -100,7 +100,7 @@ class FakeBroadcastRepository:
   ):
     if self.fail_record:
       return None
-    key = (strategy, signal_uxid)
+    key = (symbol, strategy, signal_uxid)
     cycle = self.cycles.get(key)
     incoming = status_for_action(action)
     if cycle is None:
@@ -140,6 +140,7 @@ class FakeBroadcastRepository:
   async def record_worker_execution(
     self,
     *,
+    symbol,
     strategy,
     signal_uxid,
     worker_id,
@@ -151,7 +152,7 @@ class FakeBroadcastRepository:
     reject_reason=None,
     event_at=None,
   ):
-    cycle = self.cycles.get((strategy, signal_uxid))
+    cycle = self.cycles.get((symbol, strategy, signal_uxid))
     if cycle is None:
       return None
     workers = self.workers.setdefault(cycle.id, {})
@@ -394,8 +395,8 @@ def _trade_event(**overrides) -> PositionEvent:
   return PositionEvent(**base)
 
 
-def _signal_row(strategy="strat", uxid="9f2c4b7e18a3d605"):
-  return SimpleNamespace(strategy=strategy, signal_uxid=uxid)
+def _signal_row(strategy="strat", uxid="9f2c4b7e18a3d605", symbol="XAUUSD"):
+  return SimpleNamespace(strategy=strategy, signal_uxid=uxid, symbol=symbol)
 
 
 def _writer(repo=None, signals=None):
@@ -431,14 +432,14 @@ async def _run(payload, repo=None, **dispatcher_kwargs):
   """Record a signal and immediately dispatch its cycle."""
   writer, repo = _writer(repo)
   await writer.broadcast(payload)
-  cycle = repo.cycles[(payload.strategy, payload.signal_uxid)]
+  cycle = repo.cycles[(payload.symbol, payload.strategy, payload.signal_uxid)]
   dispatcher, channel = _dispatcher(repo, **dispatcher_kwargs)
   await dispatcher.dispatch(cycle.id)
   return repo, channel, cycle
 
 
-def _cycle_of(repo, strategy="strat", uxid="9f2c4b7e18a3d605"):
-  return repo.cycles[(strategy, uxid)]
+def _cycle_of(repo, strategy="strat", uxid="9f2c4b7e18a3d605", symbol="XAUUSD"):
+  return repo.cycles[(symbol, strategy, uxid)]
 
 
 def _only_cycle(repo):
@@ -493,11 +494,39 @@ async def test_a_different_uxid_starts_its_own_cycle():
 
 
 async def test_same_uxid_on_another_strategy_is_a_separate_cycle():
-  """The unique key is the pair, so two strategies may reuse an id."""
+  """The unique key is the triple, so two strategies may reuse an id."""
   writer, repo = _writer()
   await writer.broadcast(_payload())
   await writer.broadcast(_payload(strategy="other"))
   assert len(repo.cycles) == 2
+
+
+async def test_same_uxid_on_another_symbol_is_a_separate_cycle():
+  """``symbol`` is in the key too, so an id minted for one symbol cannot
+  swallow another symbol's cycle."""
+  writer, repo = _writer()
+  await writer.broadcast(_payload())
+  await writer.broadcast(_payload(symbol="EURUSD"))
+  assert len(repo.cycles) == 2
+
+
+async def test_concurrent_cycles_on_one_symbol_and_strategy_stay_separate():
+  """One symbol + strategy runs several trades at once: each ``signal_uxid``
+  keeps its own entry-to-exit trail and its own cycle row."""
+  writer, repo = _writer()
+  first = "9F2C4B7E18A3D605"
+  second = "0000111122223333"
+
+  # Interleaved, as two live trades on the same instrument actually arrive.
+  await writer.broadcast(_payload(uxid=first))
+  await writer.broadcast(_payload(uxid=second))
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1, uxid=first))
+  await writer.broadcast(_payload(action=SignalActionEnum.SL, uxid=second))
+  await writer.broadcast(_payload(action=SignalActionEnum.FLAT, uxid=first))
+
+  assert len(repo.cycles) == 2
+  assert repo.cycles[("XAUUSD", "strat", first)].actions == "LONG,TP1,FLAT"
+  assert repo.cycles[("XAUUSD", "strat", second)].actions == "LONG,SL"
 
 
 # ── Writer: worker executions ───────────────────────────────────────
@@ -513,6 +542,29 @@ async def test_trade_event_records_the_worker_on_the_cycle():
   assert list(workers) == ["FOREX-MT5-12345678"]
   assert workers["FOREX-MT5-12345678"].latest_status == TradeStatusEnum.OPENED
   assert repo.logs[-1].kind == BroadcastLogKindEnum.EXECUTION
+
+
+async def test_a_trade_event_lands_on_the_cycle_of_its_signals_symbol():
+  """The cycle key is read off the ``signals`` row, symbol included, so a
+  worker's report cannot land on a same-id cycle of another symbol."""
+  uxid = "9F2C4B7E18A3D605"
+  writer, repo = _writer(
+    signals=FakeSignalRepository(
+      {
+        "sig-1": _signal_row(uxid=uxid, symbol="XAUUSD"),
+        "sig-2": _signal_row(uxid=uxid, symbol="EURUSD"),
+      }
+    )
+  )
+  await writer.broadcast(_payload(uxid=uxid))
+  await writer.broadcast(_payload(uxid=uxid, symbol="EURUSD"))
+
+  await writer.record_execution(_trade_event(signal_id="sig-2", symbol="EURUSD"))
+
+  gold = repo.cycles[("XAUUSD", "strat", uxid)]
+  euro = repo.cycles[("EURUSD", "strat", uxid)]
+  assert repo.workers[gold.id] == {}
+  assert list(repo.workers[euro.id]) == ["FOREX-MT5-12345678"]
 
 
 async def test_the_cycle_is_found_through_the_echoed_signal_id():

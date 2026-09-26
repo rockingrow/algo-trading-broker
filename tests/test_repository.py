@@ -1416,6 +1416,59 @@ async def test_record_event_returns_none_on_error(monkeypatch):
   )
 
 
+class _RecordingSession(FakeSession):
+  """FakeSession that keeps the statements it was handed, so a test can check
+  which columns a lookup was scoped by."""
+
+  def __init__(self, results):
+    super().__init__(results)
+    self.statements = []
+
+  async def execute(self, stmt):
+    self.statements.append(stmt)
+    return await super().execute(stmt)
+
+
+def _cycle_key_columns(statement) -> str:
+  return str(statement.whereclause)
+
+
+async def test_the_cycle_lookup_is_scoped_by_symbol_strategy_and_uxid(monkeypatch):
+  """The cycle key is the same triple as ``uq_broadcast_messages_symbol_strategy
+  _signal_uxid``: without ``symbol`` in the lock, a cycle id reused across two
+  symbols would fold two live trades into one row."""
+  session = _RecordingSession(results=[[]])
+  await _record(monkeypatch, session, action=SignalActionEnum.LONG)
+
+  where = _cycle_key_columns(session.statements[0])
+  assert "broadcast_messages.symbol" in where
+  assert "broadcast_messages.strategy" in where
+  assert "broadcast_messages.signal_uxid" in where
+
+
+async def test_the_worker_path_locks_the_cycle_by_the_same_triple(monkeypatch):
+  session = _RecordingSession(results=[[_cycle()], []])
+  await _record_worker(monkeypatch, session)
+
+  where = _cycle_key_columns(session.statements[0])
+  assert "broadcast_messages.symbol" in where
+  assert "broadcast_messages.strategy" in where
+  assert "broadcast_messages.signal_uxid" in where
+
+
+def test_the_broadcast_cycle_key_is_symbol_strategy_and_uxid():
+  constraint = next(
+    c
+    for c in BroadcastMessage.__table__.constraints
+    if getattr(c, "name", "") == "uq_broadcast_messages_symbol_strategy_signal_uxid"
+  )
+  assert [column.name for column in constraint.columns] == [
+    "symbol",
+    "strategy",
+    "signal_uxid",
+  ]
+
+
 async def test_upsert_chat_inserts_a_new_chat_row(monkeypatch):
   session = FakeSession(results=[[]])
   _patch_session(monkeypatch, session)
@@ -1562,6 +1615,7 @@ async def test_load_cycle_missing_returns_none(monkeypatch):
 async def _record_worker(monkeypatch, session, **overrides):
   _patch_session(monkeypatch, session)
   kwargs = dict(
+    symbol="XAUUSD",
     strategy="strat",
     signal_uxid="9f2c4b7e18a3d605",
     worker_id="FOREX-MT5-12345678",
