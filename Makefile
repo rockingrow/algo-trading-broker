@@ -1,5 +1,10 @@
 .PHONY: help install install-dev update lock fix format lint check run simulate-nats \
-        db-upgrade db-downgrade db-history db-current db-revision
+        check-tailscale db-upgrade db-downgrade db-history db-current db-revision
+
+# Enables the `tailscale-check` container (docker-compose.yml, profile
+# `tailscale`) as part of `docker compose up` whenever .env sets
+# TAILSCALE_IP — hosts without it never pull/run that container.
+COMPOSE_PROFILE := $(shell grep -qE '^TAILSCALE_IP=.+' .env 2>/dev/null && echo --profile tailscale)
 
 help:
 	@echo "Available commands:"
@@ -13,6 +18,8 @@ help:
 	@echo "  make check         - Alias for lint"
 	@echo "  make run           - Run the broker locally"
 	@echo "  make dev           - Run docker compose locally with hot module reload on code change"
+	@echo "  make check-tailscale - Manually warn if TAILSCALE_IP is set in .env but Tailscale is down/mismatched"
+	@echo "                       (make dev/start already run this check automatically as part of the stack)"
 	@echo "  make simulate-nats - Run NATS signal simulator (E2E)"
 	@echo ""
 	@echo "Database (Alembic — runs inside broker container, requires stack up):"
@@ -53,12 +60,15 @@ run:
 build:
 	docker compose build --no-cache
 
+check-tailscale:
+	@bash scripts/check-tailscale.sh
+
 dev:
-	docker compose up --build -d
+	docker compose $(COMPOSE_PROFILE) up --build -d
 	docker compose watch
 
 start:
-	docker compose up --build -d
+	docker compose $(COMPOSE_PROFILE) up --build -d
 
 stop:
 	docker compose down
