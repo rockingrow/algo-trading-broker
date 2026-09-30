@@ -31,24 +31,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Tailscale-secured NATS** — `docker-compose.yml` now binds the NATS client
-  and monitoring ports to `TAILSCALE_IP` (this host's tailnet address)
-  instead of `0.0.0.0` when that new `.env` variable is set, so neither port
-  is reachable from the real LAN or a public interface — a device must be an
+- **Optional Tailscale-secured NATS** — with the new `.env` switch
+  `TAILSCALE_ENABLED=true` (default **`false`**) plus a `TAILSCALE_IP` (this
+  host's tailnet address), `make dev`/`make start` bind the NATS client and
+  monitoring ports to that address instead of `0.0.0.0`, so neither port is
+  reachable from the real LAN or a public interface — a device must be an
   authenticated member of the tailnet before it can even attempt a
-  connection, `NATS_TOKEN` notwithstanding. This is how `quant-trading-engine`
-  and the MT5/Binance workers are expected to reach this broker's NATS in any
-  non-local deployment. Leaving `TAILSCALE_IP` unset keeps the previous
-  behaviour (bind every interface) for local dev without Tailscale. New
-  `tailscale-check` one-shot container (`docker-compose.yml`, profile
+  connection, `NATS_TOKEN` notwithstanding. This is the recommended way for
+  `quant-trading-engine` and the MT5/Binance workers to reach this broker's
+  NATS in a non-local deployment, but it is **not required**: with the switch
+  off the ports bind every interface as before, even if `TAILSCALE_IP` is
+  still filled in, so the address can stay on file while the feature is
+  toggled. The Makefile derives the bind address (`NATS_BIND_ADDRESS`) from
+  the two variables; a bare `docker compose up` still honours a non-empty
+  `TAILSCALE_IP`, so no previously private port is exposed by the new default.
+  New `tailscale-check` one-shot container (`docker-compose.yml`, profile
   `tailscale`, running `scripts/check-tailscale.sh`) is part of
   `docker compose up` itself — `make dev`/`make start` enable that profile
-  automatically whenever `.env` sets `TAILSCALE_IP` — and warns, without
+  only while Tailscale is enabled — and warns, without
   blocking anything, when Tailscale is down on the host or the reported
   address has drifted, so a stopped tailnet fails with a clear message
   instead of Docker's raw `bind: cannot assign requested address`.
   `make check-tailscale` still runs the same check standalone, on the host,
-  for a quick manual look. README gains a
+  for a quick manual look, and exits silently while the feature is off.
+  README gains an explicitly optional
   "Securing NATS with Tailscale" setup section and a reworked quick-start
   clarifying that only the full Docker stack (`make dev`/`make start`) runs
   migrations automatically, while `make run` needs Postgres/NATS already

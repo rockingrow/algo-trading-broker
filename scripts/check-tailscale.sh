@@ -1,23 +1,37 @@
 #!/bin/sh
-# Warns when .env pins TAILSCALE_IP (docker-compose then binds the NATS
-# client/monitor ports to it — see docker-compose.yml) but Tailscale is not
-# actually up on this host. Left unchecked, `docker compose up` instead fails
-# on a raw "bind: cannot assign requested address" with no hint why.
+# Warns when .env opts into Tailscale (TAILSCALE_ENABLED=true plus a pinned
+# TAILSCALE_IP — docker-compose then binds the NATS client/monitor ports to
+# that address, see docker-compose.yml) but Tailscale is not actually up on
+# this host. Left unchecked, `docker compose up` instead fails on a raw
+# "bind: cannot assign requested address" with no hint why.
+#
+# Tailscale is optional, so this exits silently whenever the feature is off.
 #
 # Runs two ways:
 #   - as the `tailscale-check` one-shot container (profile `tailscale`,
-#     enabled automatically by `make dev`/`make start` whenever TAILSCALE_IP
-#     is set), talking to the host's tailscaled over its mounted unix socket
-#     (ENV_FILE/TS_SOCKET set by docker-compose.yml);
+#     enabled automatically by `make dev`/`make start` whenever Tailscale is
+#     enabled in .env), talking to the host's tailscaled over its mounted
+#     unix socket (ENV_FILE/TS_SOCKET set by docker-compose.yml);
 #   - directly on the host via `make check-tailscale` for a manual check.
 set -e
 
 ENV_FILE="${ENV_FILE:-$(dirname "$0")/../.env}"
 
-TAILSCALE_IP=$(grep -E '^TAILSCALE_IP=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)
-TAILSCALE_IP=$(printf '%s' "$TAILSCALE_IP" | tr -d '\r')
+read_env_var() {
+  grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '\r'
+}
+
+TAILSCALE_ENABLED=$(read_env_var TAILSCALE_ENABLED | tr '[:upper:]' '[:lower:]')
+TAILSCALE_IP=$(read_env_var TAILSCALE_IP)
+
+# Opt-in switch, defaulting to off when absent or unparseable.
+case "$TAILSCALE_ENABLED" in
+  true|1|yes|on) ;;
+  *) exit 0 ;;
+esac
 
 if [ -z "$TAILSCALE_IP" ]; then
+  echo "WARNING: TAILSCALE_ENABLED=true in .env but TAILSCALE_IP is empty — the NATS ports will bind every interface (0.0.0.0). Run 'tailscale ip -4' and set TAILSCALE_IP, or set TAILSCALE_ENABLED=false."
   exit 0
 fi
 

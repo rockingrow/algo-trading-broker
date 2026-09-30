@@ -25,13 +25,14 @@ services:
   # ─────────────────────────────────────────────────────────────────
   # TAILSCALE CHECK — one-shot container, part of `docker compose up`
   # itself (profile `tailscale`, enabled automatically by `make dev`/
-  # `make start` when .env sets TAILSCALE_IP). Warns, without blocking
-  # anything, if this host's Tailscale is down or its address has
-  # drifted from TAILSCALE_IP before nats binds to it below. Talks to
-  # the host's tailscaled over its mounted unix socket, so it only
-  # applies where that socket exists (Linux hosts with Tailscale
-  # installed) — exactly the hosts that set TAILSCALE_IP in the first
-  # place; hosts without it never enable this profile.
+  # `make start` when .env sets TAILSCALE_ENABLED=true and a
+  # TAILSCALE_IP). Warns, without blocking anything, if this host's
+  # Tailscale is down or its address has drifted from TAILSCALE_IP
+  # before nats binds to it below. Talks to the host's tailscaled over
+  # its mounted unix socket, so it only applies where that socket exists
+  # (Linux hosts with Tailscale installed) — exactly the hosts that opt
+  # into Tailscale in the first place; hosts with the feature off never
+  # enable this profile.
   # ─────────────────────────────────────────────────────────────────
   tailscale-check:
     image: tailscale/tailscale:stable
@@ -56,15 +57,19 @@ services:
     container_name: algo_trading_nats
     restart: always
     ports:
-      # Both ports bound to TAILSCALE_IP (this host's tailnet address) so
-      # neither is reachable over the real LAN/public interface — only a
-      # device that is itself authenticated into this Tailscale network can
-      # reach them, whether that is a worker, quant-trading-engine, or any
-      # other service that needs to publish/subscribe on this broker's NATS.
-      # Falls back to every interface (0.0.0.0) when TAILSCALE_IP is unset,
-      # so local dev without Tailscale still works.
-      - "${TAILSCALE_IP:-0.0.0.0}:${NATS_PORT:-4222}:${NATS_PORT:-4222}"  # NATS client port — any service connecting to the broker's NATS
-      - "${TAILSCALE_IP:-0.0.0.0}:${NATS_MONITOR_PORT:-8222}:${NATS_MONITOR_PORT:-8222}"  # HTTP monitoring dashboard
+      # Tailscale is optional. NATS_BIND_ADDRESS is what `make dev`/
+      # `make start` compute from the .env switch (TAILSCALE_ENABLED plus
+      # TAILSCALE_IP): the tailnet address when the feature is on, else
+      # 0.0.0.0. Bound to that tailnet address, neither port is reachable
+      # over the real LAN/public interface — only a device that is itself
+      # authenticated into this Tailscale network can reach them, whether
+      # that is a worker, quant-trading-engine, or any other service that
+      # needs to publish/subscribe on this broker's NATS. Running
+      # `docker compose` directly (no Makefile, so no NATS_BIND_ADDRESS)
+      # still honours TAILSCALE_IP when it is set, and otherwise binds
+      # every interface so local dev without Tailscale works.
+      - "${NATS_BIND_ADDRESS:-${TAILSCALE_IP:-0.0.0.0}}:${NATS_PORT:-4222}:${NATS_PORT:-4222}"  # NATS client port — any service connecting to the broker's NATS
+      - "${NATS_BIND_ADDRESS:-${TAILSCALE_IP:-0.0.0.0}}:${NATS_MONITOR_PORT:-8222}:${NATS_MONITOR_PORT:-8222}"  # HTTP monitoring dashboard
     command: ["-js", "-sd", "/data/jetstream", "--port", "${NATS_PORT:-4222}", "--auth", "${NATS_TOKEN:-changeme}", "--http_port", "${NATS_MONITOR_PORT:-8222}"]
     volumes:
       - nats_data:/data/jetstream

@@ -1,10 +1,22 @@
 .PHONY: help install install-dev update lock fix format lint check run simulate-nats \
         check-tailscale db-upgrade db-downgrade db-history db-current db-revision
 
+# Tailscale is opt-in: it takes effect only when .env sets both
+# TAILSCALE_ENABLED=true (default false) and a non-empty TAILSCALE_IP.
+TAILSCALE_ENABLED := $(shell grep -E '^TAILSCALE_ENABLED=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '\r' | tr '[:upper:]' '[:lower:]')
+TAILSCALE_IP := $(shell grep -E '^TAILSCALE_IP=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '\r')
+TAILSCALE_ACTIVE := $(if $(and $(filter true 1 yes on,$(TAILSCALE_ENABLED)),$(TAILSCALE_IP)),1,)
+
 # Enables the `tailscale-check` container (docker-compose.yml, profile
-# `tailscale`) as part of `docker compose up` whenever .env sets
-# TAILSCALE_IP — hosts without it never pull/run that container.
-COMPOSE_PROFILE := $(shell grep -qE '^TAILSCALE_IP=.+' .env 2>/dev/null && echo --profile tailscale)
+# `tailscale`) as part of `docker compose up` when Tailscale is active —
+# hosts with the feature off never pull/run that container.
+COMPOSE_PROFILE := $(if $(TAILSCALE_ACTIVE),--profile tailscale,)
+
+# The address docker-compose binds the NATS ports to. Passing it explicitly is
+# what makes the switch authoritative: with Tailscale off, the ports bind every
+# interface even if TAILSCALE_IP is still filled in from an earlier setup.
+NATS_BIND_ADDRESS := $(if $(TAILSCALE_ACTIVE),$(TAILSCALE_IP),0.0.0.0)
+export NATS_BIND_ADDRESS
 
 help:
 	@echo "Available commands:"

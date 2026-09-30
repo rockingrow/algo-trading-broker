@@ -16,9 +16,11 @@ Neither is special-cased: one payload schema, one pipeline, one set of NATS subj
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/)
 - Docker & Docker Compose
-- [Tailscale](https://tailscale.com/) — recommended for any non-local
-  deployment, so NATS is never reachable from the public internet. See
-  [Securing NATS with Tailscale](#-securing-nats-with-tailscale) below.
+- [Tailscale](https://tailscale.com/) — **optional**, off by default. Only
+  needed if you want NATS locked to a private tailnet instead of being
+  reachable on every interface, which is recommended for any non-local
+  deployment. See [Securing NATS with Tailscale](#-securing-nats-with-tailscale)
+  below.
 
 ### 2. Installation
 
@@ -60,17 +62,25 @@ same root `.env`. See [`bot/README.md`](bot/README.md) for setup.
 
 ## 🔒 Securing NATS with Tailscale
 
+> **Optional — not a prerequisite.** This whole section is opt-in, gated
+> behind `TAILSCALE_ENABLED` in `.env`, which defaults to `false`. With it off
+> the stack runs exactly as before Tailscale existed, and nothing in the broker
+> requires a tailnet. Turn it on when you want the transport hardening
+> described below; leave it off for local dev, or if you secure NATS some other
+> way (firewall rules, a private network, your own VPN).
+
 By default `docker-compose.yml` publishes the NATS client and monitoring
 ports on every interface of the host (`0.0.0.0`), reachable from the same LAN
 or, on a VPS, the public internet — `NATS_TOKEN` is then the *only* thing
 standing between an attacker and the signal stream. For any deployment beyond
-local dev, the broker treats [Tailscale](https://tailscale.com/) — a
-WireGuard-based mesh VPN — as the standard way to close that off: NATS binds
-only to this host's Tailscale address, so a device has to be an authenticated
-member of the tailnet before it can even attempt a connection, `NATS_TOKEN`
-notwithstanding. This is how any producer or worker that is not TradingView's
+local dev, [Tailscale](https://tailscale.com/) — a WireGuard-based mesh VPN —
+is the recommended way to close that off: NATS binds only to this host's
+Tailscale address, so a device has to be an authenticated member of the
+tailnet before it can even attempt a connection, `NATS_TOKEN` notwithstanding.
+Traffic between tailnet members is end-to-end encrypted by WireGuard. This is
+the recommended path for any producer or worker that is not TradingView's
 public webhook — `quant-trading-engine`, `algo-trading-worker`, or any future
-service — is expected to reach this broker's NATS.
+service — to reach this broker's NATS.
 
 **Setup, on the broker host:**
 
@@ -86,19 +96,26 @@ service — is expected to reach this broker's NATS.
    lets every device address this host by name (e.g. `my-broker-host`)
    instead of a raw IP.
 
-3. Get this host's tailnet IPv4 address and put it in `.env`:
+3. Turn the feature on and give it this host's tailnet IPv4 address, both in
+   `.env`:
 
    ```bash
    tailscale ip -4
    ```
 
    ```env
+   TAILSCALE_ENABLED=true                  # default is false
    TAILSCALE_IP=<that address>
    NATS_HOST=<this host's MagicDNS name>   # for other services' own config
    ```
 
-4. Start (or restart) the stack — `docker-compose.yml` reads `TAILSCALE_IP`
-   and binds both NATS ports to it instead of `0.0.0.0`:
+   Both are required: with `TAILSCALE_ENABLED=false` (or absent) the ports
+   bind `0.0.0.0` even if `TAILSCALE_IP` is filled in, so you can keep the
+   address on file and flip the switch instead of editing it back out.
+
+4. Start (or restart) the stack — `make` derives the NATS bind address from
+   those two variables and binds both NATS ports to the tailnet address
+   instead of `0.0.0.0`:
 
    ```bash
    make dev   # or: make start
@@ -106,13 +123,13 @@ service — is expected to reach this broker's NATS.
 
    Both targets enable the `tailscale-check` container (docker-compose.yml,
    profile `tailscale`) as part of that same `docker compose up` — the
-   Makefile turns the profile on whenever `.env` sets `TAILSCALE_IP`. It
+   Makefile turns the profile on only while Tailscale is enabled. It
    talks to this host's tailscaled over its unix socket and warns, without
    blocking anything, when Tailscale is not actually up or the reported
    address has drifted, so a stopped tailnet fails with a clear message
    instead of Docker's raw `bind: cannot assign requested address`. Run
    `make check-tailscale` on its own for the same check without starting the
-   stack.
+   stack; it exits silently while the feature is off.
 
 **On every machine that needs to reach this broker's NATS** (a worker VPS,
 `quant-trading-engine`, …): install Tailscale and join the *same* tailnet,
@@ -120,8 +137,14 @@ then point that service's own NATS client config at
 `nats://<NATS_HOST>:<NATS_PORT>` (MagicDNS name, or the raw `TAILSCALE_IP`
 address if that service's own networking cannot resolve MagicDNS — e.g. a
 Docker container without host networking) with the matching `NATS_TOKEN`.
-Leaving `TAILSCALE_IP` unset in `.env` falls back to binding `0.0.0.0`, so
-local dev without Tailscale is unaffected.
+**To turn it off again**, set `TAILSCALE_ENABLED=false` (or remove it) and
+restart the stack: the NATS ports go back to binding every interface and the
+`tailscale-check` container is no longer started. `NATS_TOKEN` is then your
+only NATS-level protection, so leave the ports behind a firewall or a private
+network if the host is not purely local. Note that running `docker compose up`
+directly, without the Makefile, still honours a non-empty `TAILSCALE_IP` — the
+switch is applied by `make dev`/`make start`, which is what keeps a
+half-disabled setup from silently exposing ports that used to be private.
 
 ---
 
@@ -491,12 +514,15 @@ NATS_PORT=4222
 NATS_MONITOR_PORT=8222     # HTTP monitoring dashboard (compose only)
 NATS_TOKEN=changeme        # shared secret; leave blank = no auth
 
-# Set only when an external producer (e.g. quant-trading-engine) reaches this
-# broker's NATS over a Tailscale virtual LAN instead of localhost/Docker.
-# TAILSCALE_IP is this host's tailnet address (`tailscale ip -4`); compose
-# binds both NATS ports (client + monitoring) to it instead of 0.0.0.0, so
-# neither is reachable outside the tailnet. NATS_HOST is then usually set to
-# this machine's Tailscale MagicDNS name so the producer connects by name.
+# Optional Tailscale hardening, off by default. Set TAILSCALE_ENABLED=true
+# (plus TAILSCALE_IP) when an external producer (e.g. quant-trading-engine)
+# reaches this broker's NATS over a Tailscale virtual LAN instead of
+# localhost/Docker. TAILSCALE_IP is this host's tailnet address
+# (`tailscale ip -4`); compose then binds both NATS ports (client +
+# monitoring) to it instead of 0.0.0.0, so neither is reachable outside the
+# tailnet. NATS_HOST is then usually set to this machine's Tailscale MagicDNS
+# name so the producer connects by name.
+TAILSCALE_ENABLED=false
 TAILSCALE_IP=
 
 # ── PostgreSQL ────────────────────────────────────────
