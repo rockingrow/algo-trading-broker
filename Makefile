@@ -75,12 +75,14 @@ build:
 
 # The image's containerboot puts tailscaled's socket at /tmp/tailscaled.sock,
 # not where the CLI looks by default. A node that has not logged in yet fails
-# `status`; its container log then carries the login URL.
-TS_CLI = docker compose $(COMPOSE_PROFILE) exec tailscale tailscale --socket=/tmp/tailscaled.sock
+# `status`; its container log then carries the login URL. MSYS_NO_PATHCONV stops
+# Git Bash on Windows from rewriting that path into C:/Users/.../Temp/...; it is
+# ignored everywhere else.
+TS_CLI = MSYS_NO_PATHCONV=1 docker compose $(COMPOSE_PROFILE) exec tailscale tailscale --socket=/tmp/tailscaled.sock
 
 tailscale-status:
 ifeq ($(TAILSCALE_ACTIVE),1)
-	@$(TS_CLI) status || docker logs algo_trading_tailscale --tail 30
+	@$(TS_CLI) status || docker logs algo_trading_broker_tailscale --tail 30
 	@$(TS_CLI) serve status
 else
 	@echo "Tailscale is disabled (TAILSCALE_ENABLED is not true in .env) — nothing to show."
@@ -97,10 +99,10 @@ stop:
 	docker compose --profile tailscale down
 
 logs:
-	docker logs algo_trading_broker --tail 500
+	docker logs algo_trading_broker_broker --tail 500
 
 logging:
-	docker logs algo_trading_broker --follow
+	docker logs algo_trading_broker_broker --follow
 
 simulate-nats:
 	uv run python e2e/simulate_signals.py

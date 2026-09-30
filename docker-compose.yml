@@ -4,7 +4,7 @@ services:
   # ─────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: algo_trading_postgres
+    container_name: algo_trading_broker_postgres
     restart: always
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
@@ -32,7 +32,9 @@ services:
   #
   # The container joins the tailnet as TAILSCALE_HOSTNAME and, through
   # Tailscale Serve (config/tailscale/serve.json), forwards its tailnet
-  # ports 4222/8222/5432 to nats and postgres over trading_net. Other
+  # ports 4222/8222/5432/8080 to nats, postgres and the broker API over
+  # trading_net (8080 is the default WEBHOOK_PORT — keep serve.json in step
+  # if you change it). Other
   # servers therefore reach this broker at nats://<TAILSCALE_HOSTNAME>:4222
   # and never need its tailnet IP; which of them may is decided by the
   # tailnet policy (config/tailscale/policy.hujson), not here.
@@ -49,7 +51,7 @@ services:
   # ─────────────────────────────────────────────────────────────────
   tailscale:
     image: tailscale/tailscale:stable
-    container_name: algo_trading_tailscale
+    container_name: algo_trading_broker_tailscale
     profiles: ["tailscale"]
     restart: always
     environment:
@@ -76,7 +78,7 @@ services:
   # ─────────────────────────────────────────────────────────────────
   nats:
     image: nats:2.10-alpine
-    container_name: algo_trading_nats
+    container_name: algo_trading_broker_nats
     restart: always
     ports:
       # Inside the stack NATS always listens on 4222/8222; NATS_PORT and
@@ -112,7 +114,7 @@ services:
         - action: rebuild
           path: ./uv.lock
     image: algo-trading-broker:latest
-    container_name: algo_trading_broker
+    container_name: algo_trading_broker_broker
     restart: always
     depends_on:
       postgres:
@@ -154,7 +156,7 @@ services:
         - action: rebuild
           path: ./bot/pyproject.toml
     image: algo-trading-bot:latest
-    container_name: algo_trading_bot
+    container_name: algo_trading_broker_bot
     restart: always
     depends_on:
       broker:
