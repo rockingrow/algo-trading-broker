@@ -94,6 +94,7 @@ package; never scan from the repository root.
 | Models, repositories, LISTEN/NOTIFY | `broker/db/{models,repository,engine,listener}.py` |
 | Migrations (single Alembic chain) | `alembic/versions/` |
 | Settings and environment variables | `broker/settings.py`, `.env.example` |
+| Optional Tailscale node, tailnet ACL, Serve forwards | `docker-compose.yml` (service `tailscale`), `Makefile` (`TAILSCALE_ENABLED`), `config/tailscale/` |
 | API-key guard (`X-API-KEY`) | `broker/security/` |
 | DI protocols (db, notifier, publisher) | `broker/interfaces/` |
 | Telegram bot (separate uv project, HTTP client only) | `bot/app/`, and read `bot/README.md` first |
