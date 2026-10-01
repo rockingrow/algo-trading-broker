@@ -32,8 +32,8 @@ services:
   #
   # The container joins the tailnet as TAILSCALE_HOSTNAME and, through
   # Tailscale Serve (config/tailscale/serve.json), forwards its tailnet
-  # ports 4222/8222/5432/8080 to nats, postgres and the broker API over
-  # trading_net (8080 is the default WEBHOOK_PORT — keep serve.json in step
+  # ports 4222/8222/5432/80 to nats, postgres and the broker API over
+  # trading_net (80 is the default WEBHOOK_PORT — keep serve.json in step
   # if you change it). Other
   # servers therefore reach this broker at nats://<TAILSCALE_HOSTNAME>:4222
   # and never need its tailnet IP; which of them may is decided by the
@@ -103,7 +103,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        WEBHOOK_PORT: "${WEBHOOK_PORT:-8080}"
+        WEBHOOK_PORT: "${WEBHOOK_PORT:-80}"
     develop:
       watch:
         - action: sync+restart
@@ -122,12 +122,12 @@ services:
       nats:
         condition: service_started
     ports:
-      - "${WEBHOOK_PORT:-8080}:${WEBHOOK_PORT:-8080}"      # TradingView webhook
+      - "${WEBHOOK_PORT:-80}:${WEBHOOK_PORT:-80}"      # TradingView webhook
     env_file:
       - .env
     environment:
       WEBHOOK_HOST: "0.0.0.0"
-      WEBHOOK_PORT: "${WEBHOOK_PORT:-8080}"                # use unprivileged port for Windows compatibility
+      WEBHOOK_PORT: "${WEBHOOK_PORT:-80}"                # container runs as root, so it may bind 80
       NATS_HOST: "nats"   # Docker service name, overrides NATS_HOST=localhost from .env
       NATS_PORT: "4222"   # container's real listen port; overrides host-mapping NATS_PORT from .env
       POSTGRES_HOST: postgres             # service name resolves via docker network
@@ -165,7 +165,7 @@ services:
       - .env
     environment:
       # Reach the broker over the internal docker network (no public port needed).
-      BOT_BROKER_BASE_URL: "http://broker:${WEBHOOK_PORT:-8080}"
+      BOT_BROKER_BASE_URL: "http://broker:${WEBHOOK_PORT:-80}"
     volumes:
       - ./logs:/app/logs
     networks:

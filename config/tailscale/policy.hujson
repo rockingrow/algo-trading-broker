@@ -43,10 +43,10 @@
     // and the SYSTEM handshake. Same port, same reason.
     {"src": ["tag:engine", "tag:worker"], "dst": ["tag:broker"], "ip": ["tcp:4222"]},
 
-    // Worker → broker HTTP API (WEBHOOK_PORT, 8080 by default; the `tailscale`
+    // Worker → broker HTTP API (WEBHOOK_PORT, 80 by default; the `tailscale`
     // container forwards it to the broker service). Only the worker gets it:
     // the engine talks to the broker over NATS, not HTTP.
-    {"src": ["tag:worker"], "dst": ["tag:broker"], "ip": ["tcp:8080"]},
+    {"src": ["tag:worker"], "dst": ["tag:broker"], "ip": ["tcp:80"]},
 
     // Operators' own devices: everything, including the NATS monitoring port
     // (8222) and the broker's Postgres (5432) for a DB client.
@@ -61,13 +61,13 @@
     },
     {
       "src":    "tag:worker",
-      "accept": ["tag:broker:4222", "tag:broker:8080"],
+      "accept": ["tag:broker:4222", "tag:broker:80"],
       "deny":   ["tag:broker:5432", "tag:broker:8222", "tag:engine:4222"],
     },
     {
       "src":    "tag:engine",
       "accept": ["tag:broker:4222"],
-      "deny":   ["tag:broker:5432", "tag:broker:8222", "tag:broker:8080", "tag:ingester:8090", "tag:worker:8000"],
+      "deny":   ["tag:broker:5432", "tag:broker:8222", "tag:broker:80", "tag:ingester:8090", "tag:worker:8000"],
     },
     {
       "src":    "tag:broker",

@@ -2,7 +2,7 @@
   "TCP": {
     "4222": { "TCPForward": "nats:4222" },
     "8222": { "TCPForward": "nats:8222" },
-    "8080": { "TCPForward": "broker:8080" },
+    "80": { "TCPForward": "broker:80" },
     "5432": { "TCPForward": "postgres:5432" }
   }
 }

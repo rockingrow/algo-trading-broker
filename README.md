@@ -187,8 +187,8 @@ console; the `tailscale_state` volume lets it rejoin as the same node later.
 
 ```mermaid
 graph TD
-    TV[TradingView Alert] -- "POST :8080/secret/webhook" --> Broker
-    QTE[Quant-Trading-Engine] -- "POST :8080/secret/webhook (http transport)" --> Broker
+    TV[TradingView Alert] -- "POST :80/secret/webhook" --> Broker
+    QTE[Quant-Trading-Engine] -- "POST :80/secret/webhook (http transport)" --> Broker
     subgraph "Broker Node (This Repo)"
         Broker[FastAPI Webhook Server]
         DB[(PostgreSQL)]
@@ -508,7 +508,7 @@ BROKER_API_KEY=api_key
 
 # ── Webhook ──────────────────────────────────────────
 WEBHOOK_HOST=0.0.0.0
-WEBHOOK_PORT=80            # docker-compose defaults this to 8080 instead
+WEBHOOK_PORT=80
 
 # Seconds an idle keep-alive connection is held open. Must exceed the gap
 # between TradingView alerts: TradingView reuses pooled connections and
@@ -576,7 +576,7 @@ TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_BROK
 # Full reference: bot/README.md → Configuration
 BOT_TELEGRAM_TOKEN=
 TELEGRAM_ADMIN_IDS=            # comma-separated admin user ids, e.g. 123,456
-BOT_BROKER_BASE_URL=http://localhost:8080   # → http://broker:8080 in Docker
+BOT_BROKER_BASE_URL=http://localhost:80   # → http://broker:80 in Docker
 BOT_LOG_LEVEL=INFO
 BOT_REQUEST_TIMEOUT=10.0
 ```
@@ -743,9 +743,9 @@ FastAPI auto-generates interactive API documentation. With the server running:
 
 | Page | URL | Notes |
 | ---- | --- | ----- |
-| Swagger UI | `http://localhost:8080/docs` | Try endpoints; click **Authorize** to set `X-API-KEY`. |
-| ReDoc | `http://localhost:8080/redoc` | Read-only reference. |
-| OpenAPI schema | `http://localhost:8080/openapi.json` | Raw spec. |
+| Swagger UI | `http://localhost:80/docs` | Try endpoints; click **Authorize** to set `X-API-KEY`. |
+| ReDoc | `http://localhost:80/redoc` | Read-only reference. |
+| OpenAPI schema | `http://localhost:80/openapi.json` | Raw spec. |
 
 Set `DOCS_ENABLED=false` in `.env` to disable all three in production.
 
@@ -775,7 +775,7 @@ The prefix acts as a URL secret — an attacker who knows the IP or domain still
 Management endpoints require an API key passed in the `X-API-KEY` header, validated against `BROKER_API_KEY`:
 
 ```bash
-curl http://localhost:8080/v1/accounts -H "X-API-KEY: $BROKER_API_KEY"
+curl http://localhost:80/v1/accounts -H "X-API-KEY: $BROKER_API_KEY"
 ```
 
 Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset, protected endpoints return `500`. The `/v1/health` and `/secret/webhook` endpoints are **not** key-protected (`/secret/webhook` uses its own in-payload `token`).

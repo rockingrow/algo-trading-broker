@@ -239,7 +239,7 @@ app/
 | `TELEGRAM_ADMIN_IDS` | `""` | Comma-separated admin Telegram IDs (e.g. `123,456`). |
 | `BROKER_API_KEY` | — | `X-API-KEY` used to call the broker. |
 | `BROKER_API_PREFIX` | `""` | Secret URL segment, if the broker uses one. |
-| `BOT_BROKER_BASE_URL` | `http://broker:8080` | Broker base URL (Docker service name). |
+| `BOT_BROKER_BASE_URL` | `http://broker:80` | Broker base URL (Docker service name). |
 | `BOT_LOG_LEVEL` | `DEBUG` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). |
 | `BOT_REQUEST_TIMEOUT` | `10.0` | HTTP timeout (seconds). |
 

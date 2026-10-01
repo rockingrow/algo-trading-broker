@@ -34,7 +34,7 @@ RUN chmod +x /app/scripts/docker-entrypoint.sh
 # Install the project itself
 RUN uv sync --no-dev
 
-ARG WEBHOOK_PORT=8080
+ARG WEBHOOK_PORT=80
 EXPOSE ${WEBHOOK_PORT}
 
 ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
