@@ -185,7 +185,7 @@ def test_all_callback_data_fits_telegrams_limit():
 
 def _client(handler):
   return BrokerClientUser(
-    base_url="http://broker:8080",
+    base_url="http://broker:80",
     api_key="secret-key",
     transport=httpx.MockTransport(handler),
   )

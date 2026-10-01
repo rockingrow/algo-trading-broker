@@ -31,34 +31,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Optional Tailscale-secured NATS** — with the new `.env` switch
-  `TAILSCALE_ENABLED=true` (default **`false`**) plus a `TAILSCALE_IP` (this
-  host's tailnet address), `make dev`/`make start` bind the NATS client and
-  monitoring ports to that address instead of `0.0.0.0`, so neither port is
-  reachable from the real LAN or a public interface — a device must be an
-  authenticated member of the tailnet before it can even attempt a
-  connection, `NATS_TOKEN` notwithstanding. This is the recommended way for
-  `quant-trading-engine` and the MT5/Binance workers to reach this broker's
-  NATS in a non-local deployment, but it is **not required**: with the switch
-  off the ports bind every interface as before, even if `TAILSCALE_IP` is
-  still filled in, so the address can stay on file while the feature is
-  toggled. The Makefile derives the bind address (`NATS_BIND_ADDRESS`) from
-  the two variables; a bare `docker compose up` still honours a non-empty
-  `TAILSCALE_IP`, so no previously private port is exposed by the new default.
-  New `tailscale-check` one-shot container (`docker-compose.yml`, profile
-  `tailscale`, running `scripts/check-tailscale.sh`) is part of
-  `docker compose up` itself — `make dev`/`make start` enable that profile
-  only while Tailscale is enabled — and warns, without
-  blocking anything, when Tailscale is down on the host or the reported
-  address has drifted, so a stopped tailnet fails with a clear message
-  instead of Docker's raw `bind: cannot assign requested address`.
-  `make check-tailscale` still runs the same check standalone, on the host,
-  for a quick manual look, and exits silently while the feature is off.
-  README gains an explicitly optional
-  "Securing NATS with Tailscale" setup section and a reworked quick-start
-  clarifying that only the full Docker stack (`make dev`/`make start`) runs
-  migrations automatically, while `make run` needs Postgres/NATS already
-  reachable and migrated.
+- **Optional Tailscale-secured NATS and Postgres, as a container** — one `.env`
+  switch, `TAILSCALE_ENABLED` (default **`false`**). Turned on, `make dev`/
+  `make start` also start a `tailscale` container (`tailscale/tailscale`,
+  profile `tailscale`) that joins the tailnet as `TAILSCALE_HOSTNAME` and, via
+  Tailscale Serve (`config/tailscale/serve.json`), forwards its tailnet ports
+  4222 (NATS), 8222 (NATS monitoring) and 5432 (Postgres) to the stack; the
+  NATS and Postgres host ports are then published on `127.0.0.1` only, so the
+  tailnet is the only way in from another machine. Other services connect to
+  `nats://<TAILSCALE_HOSTNAME>:4222`. Nothing is installed on the host and no
+  tailnet IP is copied into `.env`: the only other variables are
+  `TAILSCALE_AUTHKEY` (first login only — the node identity is kept in the new
+  `tailscale_state` volume) and `TAILSCALE_HOSTNAME`. Turned off, the container
+  is never pulled and every port binds `0.0.0.0` as before. The switch is read
+  by the Makefile (`PRIVATE_BIND_ADDRESS`); a bare `docker compose up` ignores
+  it and binds `0.0.0.0`.
+  New `config/tailscale/policy.hujson` is the tailnet policy for the whole
+  deployment — `tag:ingester` → `tag:engine:4222`,
+  `tag:engine`/`tag:worker` → `tag:broker:4222`, admins → everything — with a
+  `tests` block the admin console runs on every save. New
+  `make tailscale-status`; `make stop` now also stops the `tailscale`
+  container.
+  Inside the stack NATS now always listens on 4222/8222: `NATS_PORT` and
+  `NATS_MONITOR_PORT` only move the host side of the mapping, exactly like
+  `POSTGRES_PORT` (the broker container is given `NATS_PORT=4222`). Nothing
+  changes with the defaults.
+  **If you ran the earlier `dev` version of this feature** (Tailscale installed
+  on the host, `TAILSCALE_IP` in `.env`): `TAILSCALE_IP`, the
+  `tailscale-check` container and `make check-tailscale` are gone. Remove
+  `TAILSCALE_IP`, add `TAILSCALE_AUTHKEY`/`TAILSCALE_HOSTNAME`, and repoint
+  remote NATS clients at the new node's name. The host's own Tailscale can
+  stay (for SSH) or be removed; it is a separate node and no longer carries
+  NATS.
 
 - **`position.use_equity_sizing` on the webhook payload** — an optional boolean
   telling the worker to size the position off account **equity** (balance plus
