@@ -3,8 +3,9 @@ Consistency checks for the optional Tailscale node.
 
 Three files describe one setup and none of them is validated by anything this
 repository runs: ``docker-compose.yml`` (the ``tailscale`` service and the
-ports it forwards to), ``config/tailscale/serve.json`` (what the node exposes
-on the tailnet) and ``config/tailscale/policy.hujson`` (who may reach it,
+ports it forwards to), ``config/tailscale/serve.json.template`` (what the node
+exposes, rendered to ``serve.json`` from ``.env`` by ``make
+tailscale-serve-config``, so the template is what is tracked and checked here) and ``config/tailscale/policy.hujson`` (who may reach it,
 applied by hand in the Tailscale admin console). A drift between them fails
 only on a server, as a NATS client that cannot connect — so it is pinned here.
 """
@@ -21,6 +22,9 @@ yaml = pytest.importorskip("yaml")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TAILSCALE_DIR = REPO_ROOT / "config" / "tailscale"
+# Any syntactically valid tailnet name: the tests check structure, not the name
+# of one deployment.
+FQDN = "algo-broker.example-tailnet.ts.net"
 
 
 def _strip_hujson(text: str) -> str:
@@ -58,7 +62,11 @@ def policy() -> dict:
 
 @pytest.fixture(scope="module")
 def serve_config() -> dict:
-  return json.loads((TAILSCALE_DIR / "serve.json").read_text())
+  """The template with a stand-in FQDN, as ``make tailscale-serve-config``
+  renders it. The rendered ``serve.json`` is generated and untracked, so it
+  cannot be what this suite reads."""
+  template = (TAILSCALE_DIR / "serve.json.template").read_text()
+  return json.loads(template.replace("@TAILSCALE_FQDN@", FQDN))
 
 
 @pytest.fixture(scope="module")
@@ -114,8 +122,12 @@ def test_serve_forwards_reach_the_ports_the_services_listen_on(serve_config, com
       nats_command[nats_command.index("--http_port") + 1],
     },
     "postgres": {"5432"},
+    "broker": {services["broker"]["environment"]["WEBHOOK_PORT"].strip('"$ {}').split(":-")[-1]},
   }
   for tailnet_port, handler in serve_config["TCP"].items():
+    # The HTTPS entry has no TCPForward: its backend is in ``Web`` below.
+    if "TCPForward" not in handler:
+      continue
     host, port = handler["TCPForward"].rsplit(":", 1)
     assert host in listening, f"tailnet port {tailnet_port} forwards to {host}"
     assert port in listening[host], f"{host} does not listen on {port}"

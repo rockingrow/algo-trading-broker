@@ -56,6 +56,7 @@ make lint / format  # ruff check . / ruff format .   (make fix = both, with --fi
 make run            # uv run python -m broker.main
 make dev            # docker compose up --build -d + compose watch (hot reload)
 make logs / logging # docker logs (last 500 / follow)
+make status         # containers, then every link the running stack depends on (read-only)
 make help           # every target, one line each
 
 uv run pytest -q                      # broker suite (tests/)
@@ -94,6 +95,7 @@ package; never scan from the repository root.
 | Models, repositories, LISTEN/NOTIFY | `broker/db/{models,repository,engine,listener}.py` |
 | Migrations (single Alembic chain) | `alembic/versions/` |
 | Settings and environment variables | `broker/settings.py`, `.env.example` |
+| `make status`: read-only probes of Postgres, NATS, JetStream, the API, and the engine/workers connected to NATS | `broker/status.py`, `tests/test_status.py` |
 | Optional Tailscale node, tailnet ACL, Serve forwards | `docker-compose.yml` (service `tailscale`), `Makefile` (`TAILSCALE_ENABLED`), `config/tailscale/` |
 | API-key guard (`X-API-KEY`) | `broker/security/` |
 | DI protocols (db, notifier, publisher) | `broker/interfaces/` |

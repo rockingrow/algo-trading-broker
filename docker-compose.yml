@@ -130,6 +130,7 @@ services:
       WEBHOOK_PORT: "${WEBHOOK_PORT:-80}"                # container runs as root, so it may bind 80
       NATS_HOST: "nats"   # Docker service name, overrides NATS_HOST=localhost from .env
       NATS_PORT: "4222"   # container's real listen port; overrides host-mapping NATS_PORT from .env
+      NATS_MONITOR_PORT: "8222"   # same, for the monitoring endpoint `make status` reads
       POSTGRES_HOST: postgres             # service name resolves via docker network
       POSTGRES_PORT: "5432"                # container's real listen port; overrides host-mapping POSTGRES_PORT from .env
       POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}

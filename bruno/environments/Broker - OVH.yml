@@ -1,0 +1,18 @@
+name: Broker - OVH
+color: "#2E8A54"
+variables:
+  - name: port
+    value: "{{process.env.port}}"
+    description: ""
+  - name: url
+    value: https://algo-trading-broker-ovhcloud.tailf67d0a.ts.net/{{process.env.url_prefix}}
+    description: ""
+  - name: webhook_token
+    value: "{{process.env.webhook_token}}"
+    description: ""
+  - name: broker_token
+    value: d85fe678-a7bc-48f5-abac-06cc5d27aed4
+    description: ""
+  - name: api_key
+    value: "{{process.env.api_key}}"
+    description: ""
