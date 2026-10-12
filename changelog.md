@@ -31,6 +31,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`make status` — every link the broker depends on, on one screen.** Prints
+  the stack's containers (and the tailnet peers when `TAILSCALE_ENABLED` is
+  on), then runs the new `python -m broker.status` inside the broker
+  container: PostgreSQL, NATS, the `SIGNALS` stream and whether `SignalWorker`
+  is pulling from it, the API's `/v1/health`, and who is connected to NATS —
+  the engine (QTE's `qte-broker-sink` connection) and the workers (the client
+  subscribed to each private `ADMIN.<market>.<gateway>.<account_id>` subject),
+  set against the `accounts` table so a missing worker is listed as offline.
+  The engine and the workers are read off the server's `/connz` monitoring
+  endpoint; nothing is sent to them and nothing is written. The exit code is
+  non-zero only when one of the stack's own services is down. New setting
+  `NATS_MONITOR_PORT` (default `8222`, already in `.env.example` as the host
+  side of the mapping); `docker-compose.yml` pins it to `8222` inside the
+  broker container, as it does `NATS_PORT`. The image has to be rebuilt once
+  (`make start`) before the command exists in the container.
+
+- **Tailscale Serve config is rendered from `.env`, and can publish the
+  webhook over HTTPS.** `config/tailscale/serve.json` is no longer tracked:
+  `make dev`/`make start` (and `make tailscale-serve-config` on its own)
+  render it from the new `config/tailscale/serve.json.template`, substituting
+  this deployment's tailnet FQDN. Serve addresses its HTTPS handler by full
+  DNS name and `tailscaled` expands no environment variables inside
+  `TS_SERVE_CONFIG`, so the name could not stay committed without baking one
+  deployment into the repository. New setting `TAILSCALE_DNS_NAME` (the
+  tailnet domain, admin console → DNS); with `TAILSCALE_HOSTNAME` it forms
+  that FQDN, and `make tailscale-serve-config` fails fast when
+  `TAILSCALE_ENABLED` is true and either is missing. The Makefile now reads
+  `.env` through one `env-value` helper that strips comments, quotes and CRLF
+  the way docker compose does.
+
+  The template adds two entries the old file did not have: an HTTPS handler on
+  443 proxying `/` to `broker:80`, and `AllowFunnel` for it. **That handler is
+  public** — Funnel terminates TLS at Tailscale and forwards from the
+  internet, so TradingView can POST to
+  `https://<hostname>.<dns-name>/secret/webhook` without the host publishing
+  `WEBHOOK_PORT`, and the webhook token/HMAC plus `X-API-KEY` are the only
+  guard in front of it. Funnel must be enabled for the tailnet and the node
+  must carry the `funnel` attribute; remove the `Web`/`AllowFunnel` blocks
+  from the template to keep the node tailnet-only.
+
 - **Optional Tailscale-secured NATS and Postgres, as a container** — one `.env`
   switch, `TAILSCALE_ENABLED` (default **`false`**). Turned on, `make dev`/
   `make start` also start a `tailscale` container (`tailscale/tailscale`,

@@ -53,3 +53,6 @@ poetry.toml
 !.claude/settings.json
 !.claude/hooks/
 .claude/settings.local.json
+# Generated from config/tailscale/serve.json.template by `make tailscale-serve-config`
+# (it carries this deployment's own tailnet FQDN).
+config/tailscale/serve.json

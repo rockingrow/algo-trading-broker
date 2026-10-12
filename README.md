@@ -80,10 +80,14 @@ host ports close to the outside world:
                  tailnet (WireGuard, policy-filtered)
 engine / worker ─────────────► algo-broker:4222 ─┐  `tailscale` container
 operator laptop ─────────────► algo-broker:8222 ─┤  (Tailscale Serve,
-                               algo-broker:5432 ─┤   config/tailscale/serve.json)
+                               algo-broker:5432 ─┤   serve.json, rendered
+                                                 │    from .env)
                                                  │
                                    trading_net   ├─► nats:4222 / nats:8222
-                                                 └─► postgres:5432
+                                                 ├─► postgres:5432
+                                                 └─► broker:80
+                                                 │
+public internet ────────► https://<FQDN>/ ─────┘  (Serve HTTPS + Funnel)
 host ports: 127.0.0.1:{NATS_PORT,NATS_MONITOR_PORT,POSTGRES_PORT} only
 webhook:    0.0.0.0:WEBHOOK_PORT (TradingView is not on the tailnet)
 ```
@@ -137,12 +141,45 @@ clients reconnect; the broker's own NATS connection is never touched.
    TAILSCALE_ENABLED=true
    TAILSCALE_AUTHKEY=tskey-auth-...
    TAILSCALE_HOSTNAME=algo-broker      # the MagicDNS name other servers use
+   TAILSCALE_DNS_NAME=rudd-komodo.ts.net   # the tailnet's domain (admin console → DNS)
    ```
+
+   The two names together are this node's FQDN, which Tailscale Serve needs to
+   bind its HTTPS handler. `make start`/`make dev` render it into
+   `config/tailscale/serve.json` from `serve.json.template`; the rendered file
+   is generated, not tracked, because `tailscaled` reads no environment
+   variables inside it. Run `make tailscale-serve-config` by itself after
+   editing either name — the directory is watched, so a running container
+   picks it up without a restart.
+
+   What the rendered file serves:
+
+   | Serve entry | Reachable from | Forwards to |
+   | --- | --- | --- |
+   | TCP 4222 / 8222 | tailnet (policy-filtered) | `nats:4222` / `nats:8222` |
+   | TCP 5432 | tailnet (admin devices only) | `postgres:5432` |
+   | TCP 80 | tailnet | `broker:80` |
+   | HTTPS 443 `/` | **the public internet** (`AllowFunnel`) | `http://broker:80` |
+
+   The 443 handler is a [Funnel](https://tailscale.com/kb/1223/funnel): it
+   gives the node a public, Tailscale-terminated HTTPS name, so TradingView
+   (which is not on the tailnet) can POST to
+   `https://<TAILSCALE_HOSTNAME>.<TAILSCALE_DNS_NAME>/secret/webhook` without
+   the host publishing `WEBHOOK_PORT` itself. It is the one entry in the file
+   that is **not** tailnet-only: anyone on the internet can reach the broker's
+   HTTP surface through it, so the webhook token/HMAC and the `X-API-KEY`
+   guard are the only thing standing in front of the API. Funnel also has to
+   be enabled for the tailnet in the admin console
+   ([Settings → Funnel](https://login.tailscale.com/admin/settings/funnel)) and
+   the node needs `funnel` in its policy attributes, or the handler is
+   rejected at startup. Drop the `Web` and `AllowFunnel` blocks from
+   `serve.json.template` if you do not want a public endpoint — keep sending
+   TradingView to the published `WEBHOOK_PORT` instead.
 
 4. **Start** — `make start` (or `make dev`), then check it joined:
 
    ```bash
-   make tailscale-status   # tailnet peers + the three Serve forwards
+   make tailscale-status   # tailnet peers + the Serve forwards and HTTPS handler
    ```
 
    The key is only used for the first login: the node's identity lives in the
@@ -540,6 +577,8 @@ NATS_TOKEN=changeme        # shared secret; leave blank = no auth
 TAILSCALE_ENABLED=false
 TAILSCALE_AUTHKEY=         # tskey-auth-…, tagged tag:broker; first login only
 TAILSCALE_HOSTNAME=algo-broker
+TAILSCALE_DNS_NAME=        # tailnet domain, e.g. rudd-komodo.ts.net; with the
+                           # hostname it is the FQDN Serve binds
 
 # ── PostgreSQL ────────────────────────────────────────
 POSTGRES_HOST=localhost    # overridden to "postgres" inside Docker
@@ -716,12 +755,44 @@ environment if you really need to:
 | `make stop` | Stop Docker stack |
 | `make logs` | Tail broker container logs (last 500 lines) |
 | `make logging` | Follow broker container logs live |
+| `make status` | Containers, then a read-only check of every link: PostgreSQL, NATS, JetStream, the API, the engine and the workers — see below |
 | `make tailscale-status` | Tailnet status and Serve forwards of the `tailscale` container (when enabled) |
 | `make simulate-nats` | Replay an example NATS payload against the running stack |
 | `make format` | Format code with Ruff |
 | `make lint` | Run Ruff check |
 | `make check` | Alias for `make lint` |
 | `make fix` | Format and auto-fix linting issues |
+
+### `make status`
+
+Prints the stack's containers (and the tailnet peers, with Tailscale on), then
+runs `python -m broker.status` inside the broker container and exits non-zero
+if one of the stack's own services is down:
+
+```text
+Broker status
+  [ OK ] PostgreSQL    postgres:5432/algo_trading_broker, 2 account(s)
+  [ OK ] NATS          nats:4222
+  [ OK ] JetStream     SIGNALS holds 0 undelivered signal(s); broker_signal_handler is pulling
+  [ OK ] Broker API    GET 127.0.0.1:80/v1/health answered 200
+  [ OK ] Engine (QTE)  connected as qte-broker-sink from 172.18.0.3
+  [WARN] Workers       1 connected, 1 known account(s) offline
+                       online   FOREX-MT5-123456  from 172.18.0.3  strategies: MT5_GOLD_M5_V1
+                       offline  CRYPTO-BINANCE-7654321  last activity 2026-10-11 21:04 UTC
+```
+
+Neither the engine nor a worker has a ping in its contract, so nothing is sent
+to them. They are read off the NATS server's own client list (`/connz` on the
+monitoring port): QTE names its connection `qte-broker-sink`, and a worker is
+the client subscribed to its private `ADMIN.<market>.<gateway>.<account_id>`
+subject. Connected workers are then set against the `accounts` table, so an
+account whose worker dropped off is listed as offline. A client that is
+neither shows under **Other clients**. With Tailscale on, every remote client
+arrives through the `tailscale` container and carries its address.
+
+A missing engine or worker is a warning, not a failure: a deployment fed by
+TradingView alone has no engine, and an account may be offline on purpose.
+Every probe is read-only.
 
 ### Database (Alembic)
 

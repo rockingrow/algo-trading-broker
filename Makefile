@@ -1,5 +1,5 @@
 .PHONY: help install install-dev update lock fix format lint check run simulate-nats \
-        tailscale-status db-upgrade db-downgrade db-history db-current db-revision
+        status tailscale-status tailscale-serve-config db-upgrade db-downgrade db-history db-current db-revision
 
 # Tailscale is opt-in: .env sets TAILSCALE_ENABLED=true (default false). That
 # one switch decides both halves of the setup, so .env never has to spell them
@@ -10,8 +10,25 @@
 #     another machine can reach them through the tailnet and nothing else.
 # With it off, the container is never pulled and those ports bind every
 # interface (0.0.0.0), as before Tailscale existed.
-TAILSCALE_ENABLED := $(shell sed -n 's/^TAILSCALE_ENABLED=//p' .env 2>/dev/null | tail -n1 | sed 's/[[:space:]]*\#.*//' | tr -d '\r"' | tr -d "' " | tr '[:upper:]' '[:lower:]')
+#
+# env-value reads one key out of .env the way docker compose does: the last
+# assignment wins, and a trailing comment, CR (files edited on Windows),
+# quotes and padding are stripped. .env is not `include`d: a value containing
+# a `#` or a space would break make, and these two files need to agree on
+# nothing but the key names.
+env-value = $(shell sed -n 's/^$(1)=//p' .env 2>/dev/null | tail -n1 | sed 's/[[:space:]]*\#.*//' | tr -d '\r"' | tr -d "' ")
+
+TAILSCALE_ENABLED := $(shell echo '$(call env-value,TAILSCALE_ENABLED)' | tr '[:upper:]' '[:lower:]')
 TAILSCALE_ACTIVE := $(if $(filter true 1 yes on,$(TAILSCALE_ENABLED)),1,)
+
+# The node's name on the tailnet. Tailscale Serve addresses its HTTPS handler
+# by full DNS name, and tailscaled does not expand environment variables
+# inside TS_SERVE_CONFIG, so config/tailscale/serve.json is rendered from
+# serve.json.template (target tailscale-serve-config) rather than committed
+# with one deployment's name baked in.
+TAILSCALE_HOSTNAME := $(call env-value,TAILSCALE_HOSTNAME)
+TAILSCALE_DNS_NAME := $(call env-value,TAILSCALE_DNS_NAME)
+TAILSCALE_FQDN := $(TAILSCALE_HOSTNAME).$(TAILSCALE_DNS_NAME)
 
 COMPOSE_PROFILE := $(if $(TAILSCALE_ACTIVE),--profile tailscale,)
 
@@ -32,7 +49,9 @@ help:
 	@echo "  make check         - Alias for lint"
 	@echo "  make run           - Run the broker locally"
 	@echo "  make dev           - Run docker compose locally with hot module reload on code change"
+	@echo "  make status        - Containers, then every link: Postgres, NATS, JetStream, API, engine, workers"
 	@echo "  make tailscale-status - Show the tailscale container's tailnet status, Serve forwards and login URL"
+	@echo "  make tailscale-serve-config - Render config/tailscale/serve.json from .env (run by make dev/start)"
 	@echo "  make simulate-nats - Run NATS signal simulator (E2E)"
 	@echo ""
 	@echo "Database (Alembic — runs inside broker container, requires stack up):"
@@ -80,6 +99,22 @@ build:
 # ignored everywhere else.
 TS_CLI = MSYS_NO_PATHCONV=1 docker compose $(COMPOSE_PROFILE) exec tailscale tailscale --socket=/tmp/tailscaled.sock
 
+# serve.json is generated, not tracked: it carries this deployment's own
+# tailnet name. tailscaled watches the mounted directory, so writing it while
+# the container runs is applied without a restart.
+tailscale-serve-config:
+ifeq ($(TAILSCALE_ACTIVE),1)
+	@if [ -z "$(TAILSCALE_HOSTNAME)" ] || [ -z "$(TAILSCALE_DNS_NAME)" ]; then \
+		echo "TAILSCALE_ENABLED is true, so .env must also set TAILSCALE_HOSTNAME" >&2; \
+		echo "and TAILSCALE_DNS_NAME (the tailnet domain, e.g. rudd-komodo.ts.net," >&2; \
+		echo "admin console > DNS). Serve has no FQDN to bind without them." >&2; \
+		exit 1; \
+	fi
+	@sed 's/@TAILSCALE_FQDN@/$(TAILSCALE_FQDN)/g' \
+		config/tailscale/serve.json.template > config/tailscale/serve.json
+	@echo "Rendered config/tailscale/serve.json for $(TAILSCALE_FQDN)"
+endif
+
 tailscale-status:
 ifeq ($(TAILSCALE_ACTIVE),1)
 	@$(TS_CLI) status || docker logs algo_trading_broker_tailscale --tail 30
@@ -88,11 +123,30 @@ else
 	@echo "Tailscale is disabled (TAILSCALE_ENABLED is not true in .env) — nothing to show."
 endif
 
-dev:
+# Probed from inside the broker container: that is where `nats` and `postgres`
+# resolve, and where NATS' monitoring port can be read without publishing it.
+# `--profile tailscale` so the table lists the tailnet container whatever the
+# switch says today. The probe is read-only (see broker/status.py).
+status:
+	@docker compose --profile tailscale ps --all
+ifeq ($(TAILSCALE_ACTIVE),1)
+	@echo
+	@$(TS_CLI) status || echo "The tailscale container did not answer - see make tailscale-status."
+endif
+	@echo
+	@if [ -n "$$(docker compose ps --quiet --status running broker 2>/dev/null)" ]; then \
+		docker compose exec -T broker uv run --no-dev python -m broker.status; \
+	else \
+		echo "The broker container is not running, so nothing can be probed from inside" >&2; \
+		echo "the stack. Start it with make start, then run make status again." >&2; \
+		exit 1; \
+	fi
+
+dev: tailscale-serve-config
 	docker compose $(COMPOSE_PROFILE) up --build -d
 	docker compose watch
 
-start:
+start: tailscale-serve-config
 	docker compose $(COMPOSE_PROFILE) up --build -d
 
 stop:
