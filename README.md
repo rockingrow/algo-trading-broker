@@ -86,9 +86,10 @@ operator laptop ─────────────► algo-broker:8222 ─�
                                    trading_net   ├─► nats:4222 / nats:8222
                                                  └─► postgres:5432
 
-public internet ──► https://<FQDN>/<webhook path> ──► broker:80
-                    (Serve HTTPS + Funnel: the one path in; every other
-                     path 404s at the edge, and 80 is not on the tailnet)
+public internet ──► https://<FQDN>/ ──► broker:80
+                    (Serve HTTPS + Funnel — the only route to the broker's
+                     HTTP API; port 80 itself is on neither the host's
+                     public address nor the tailnet)
 host ports: 127.0.0.1:{NATS_PORT,NATS_MONITOR_PORT,POSTGRES_PORT,WEBHOOK_PORT}
             — nothing on the VPS' public address at all
 ```
@@ -161,21 +162,33 @@ clients reconnect; the broker's own NATS connection is never touched.
    | --- | --- | --- |
    | TCP 4222 / 8222 | tailnet (policy-filtered) | `nats:4222` / `nats:8222` |
    | TCP 5432 | tailnet (admin devices only) | `postgres:5432` |
-   | HTTPS 443, webhook path only | **the public internet** (`AllowFunnel`) | `http://broker:80` |
+   | HTTPS 443 `/` | **the public internet** (`AllowFunnel`) | `http://broker:WEBHOOK_PORT` |
 
-   The broker's HTTP port is **not** forwarded onto the tailnet, and the 443
-   handler is mounted on one path instead of `/`: the webhook, including the
-   `BROKER_API_PREFIX` segment when one is set
-   (`@WEBHOOK_PATH@` in the template, rendered by `make
-   tailscale-serve-config` from the same `.env`). Every other path — `/admin`,
-   the docs, and the `.env` / `phpunit` / `wp-admin` probes that scanners
-   fire at any public HTTPS name — is answered at Tailscale's edge with a 404
-   and never reaches FastAPI. The flip side: nothing but the webhook is
-   reachable from anywhere outside `trading_net`, so an admin call or a
-   `/v1/trades` query has to come from the host itself (or through a
-   forward you add back deliberately). Change `BROKER_API_PREFIX` and the
-   rendered path moves with it — re-run `make tailscale-serve-config` and
-   update the TradingView alert URL together.
+   The broker's HTTP port is **not** forwarded onto the tailnet, and with
+   Tailscale on it is not published on the host's public address either (see
+   the table above). Funnel on 443 is therefore the only route to the broker's
+   HTTP API, and `@WEBHOOK_PORT@` in the template is rendered from the same
+   `.env` the app reads, so the proxy target follows `WEBHOOK_PORT` when it
+   moves.
+
+   > **Do not narrow this handler to the webhook path.** It is the obvious
+   > hardening idea and it breaks every signal. Tailscale Serve strips the
+   > mount point before proxying, and a mount matches its whole subtree —
+   > measured against a live tailnet:
+   >
+   > | Mount | Request | What the broker receives |
+   > | --- | --- | --- |
+   > | `/<prefix>/secret/webhook` | the same path | `POST /` → **404** |
+   > | `/probeA` | `/probeA/hello` | `GET /hello` |
+   > | `/probeA/` | `/probeA/hello` | `GET /hello` |
+   > | `/` | `/<prefix>/v1/health` | unchanged → `200` |
+   >
+   > So mounting the webhook's own path makes the broker answer 404 for every
+   > alert, and the shallowest mount that would leave `/secret/webhook` intact
+   > is `/<prefix>`, which forwards `/v1` and `/admin` too. Exposing a single
+   > path needs a route that the stripped remainder can hit — an application
+   > change, not a `serve.json` one.
+   > `test_the_funnel_handler_stays_mounted_at_the_root` pins this.
 
    The 443 handler is a [Funnel](https://tailscale.com/kb/1223/funnel): it
    gives the node a public, Tailscale-terminated HTTPS name, so TradingView
@@ -183,9 +196,12 @@ clients reconnect; the broker's own NATS connection is never touched.
    `https://<TAILSCALE_HOSTNAME>.<TAILSCALE_DNS_NAME>/secret/webhook` without
    the host publishing `WEBHOOK_PORT` itself. It is the one entry in the file
    that is **not** tailnet-only — Funnel bypasses the tailnet policy
-   entirely, so that single path is a public endpoint and the webhook
-   token/HMAC is all that stands in front of it. Rotate the path
-   (`BROKER_API_PREFIX`) and `WEBHOOK_SECRET` together. Funnel also has to
+   entirely, so everything FastAPI serves is reachable from the internet
+   behind `BROKER_API_PREFIX`, and the webhook token/HMAC plus the
+   `X-API-KEY` guard are what stand in front of it. The `*.ts.net` name is
+   discoverable from public Certificate Transparency logs, so treat the
+   prefix as the secret it is and rotate it with `WEBHOOK_SECRET`. Funnel
+   also has to
    be enabled for the tailnet in the admin console
    ([Settings → Funnel](https://login.tailscale.com/admin/settings/funnel)) and
    the node needs `funnel` in its policy attributes, or the handler is

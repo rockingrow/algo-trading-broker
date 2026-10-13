@@ -25,9 +25,6 @@ TAILSCALE_DIR = REPO_ROOT / "config" / "tailscale"
 # Any syntactically valid tailnet name: the tests check structure, not the name
 # of one deployment.
 FQDN = "algo-broker.example-tailnet.ts.net"
-# The webhook path as make renders it when BROKER_API_PREFIX is set: the secret
-# segment is part of the public path, so the tests use a stand-in prefix.
-WEBHOOK_PATH = "/example-prefix/secret/webhook"
 # The port the broker listens on, which make reads from the same .env. The
 # template must not hardcode it: Funnel's handler is the only route to the
 # broker, so a stale port here is a dead webhook.
@@ -74,7 +71,6 @@ def serve_config() -> dict:
   cannot be what this suite reads."""
   template = (TAILSCALE_DIR / "serve.json.template").read_text()
   rendered = template.replace("@TAILSCALE_FQDN@", FQDN)
-  rendered = rendered.replace("@WEBHOOK_PATH@", WEBHOOK_PATH)
   return json.loads(rendered.replace("@WEBHOOK_PORT@", WEBHOOK_PORT))
 
 
@@ -165,16 +161,28 @@ def test_private_ports_follow_the_makefile_bind_address(compose, service_name):
     assert mapping.startswith("${PRIVATE_BIND_ADDRESS:-0.0.0.0}:"), mapping
 
 
-def test_the_funnel_serves_only_the_webhook_path(serve_config):
-  """Funnel is the public internet, and the broker answers nothing on it but
-  the webhook. A handler on ``/`` would put every FastAPI route — /admin, the
-  docs, the scanners' favourite paths — one request away from the world."""
+def test_the_funnel_handler_stays_mounted_at_the_root(serve_config):
+  """Narrowing this handler to the webhook path looks like an obvious
+  hardening win and silently breaks every signal.
+
+  Tailscale Serve strips the mount point before proxying, and a mount matches
+  its whole subtree. Measured against a live tailnet: mounting
+  ``/<prefix>/secret/webhook`` made the broker receive ``POST /`` and answer
+  404, while mounting ``/probeA`` turned ``/probeA/hello`` into ``/hello``.
+  The shallowest mount that would leave ``/secret/webhook`` intact is
+  ``/<prefix>``, which forwards ``/v1`` and ``/admin`` as well. Restricting
+  Funnel to one path therefore needs a route the stripped remainder can hit,
+  which is an application change — so this test fails loudly rather than let
+  the config change alone."""
   funnelled = set(serve_config["AllowFunnel"])
 
   assert funnelled == {f"{FQDN}:443"}
   for host_port in funnelled:
     handlers = serve_config["Web"][host_port]["Handlers"]
-    assert set(handlers) == {WEBHOOK_PATH}, "only the webhook path may be public"
+    assert set(handlers) == {"/"}, (
+      "Tailscale strips the mount point: a deeper mount makes the broker "
+      "receive a path that matches no route"
+    )
 
 
 def test_the_broker_http_port_is_not_forwarded_onto_the_tailnet(serve_config, policy):

@@ -40,9 +40,8 @@ services:
   # The container joins the tailnet as TAILSCALE_HOSTNAME and, through
   # Tailscale Serve (config/tailscale/serve.json), forwards its tailnet
   # ports 4222/8222/5432 to nats and postgres over trading_net. The broker's
-  # HTTP port is not forwarded onto the tailnet: the only route to it is the
-  # single webhook path Funnel publishes on 443, so no other HTTP path is
-  # reachable from the tailnet or the internet. Other
+  # HTTP port is not forwarded onto the tailnet: the only route to it from
+  # outside trading_net is Funnel on 443. Other
   # servers therefore reach this broker at nats://<TAILSCALE_HOSTNAME>:4222
   # and never need its tailnet IP; which of them may is decided by the
   # tailnet policy (config/tailscale/policy.hujson), not here.
@@ -138,7 +137,7 @@ services:
       # The webhook's host-side port, for a local curl and for `make status`.
       # PRIVATE_BIND_ADDRESS (from TAILSCALE_ENABLED, like nats/postgres above)
       # closes it to 127.0.0.1 when Tailscale is on: TradingView then arrives
-      # through the Funnel path on 443, and the bot and the `tailscale`
+      # through Funnel on 443, and the bot and the `tailscale`
       # container reach broker:80 over trading_net, so nothing needs this port
       # published on the VPS' public address. Published on 0.0.0.0 it is the
       # one FastAPI surface the whole internet can enumerate by IP alone —
