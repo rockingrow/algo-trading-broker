@@ -135,7 +135,7 @@ ifeq ($(TAILSCALE_ACTIVE),1)
 endif
 	@echo
 	@if [ -n "$$(docker compose ps --quiet --status running broker 2>/dev/null)" ]; then \
-		docker compose exec -T broker uv run --no-dev python -m broker.status; \
+		docker compose exec -T broker python -m broker.status; \
 	else \
 		echo "The broker container is not running, so nothing can be probed from inside" >&2; \
 		echo "the stack. Start it with make start, then run make status again." >&2; \
@@ -162,7 +162,8 @@ simulate-nats:
 	uv run python e2e/simulate_signals.py
 
 # ── Alembic ──────────────────────────────────────────────────────────────────
-ALEMBIC = docker compose exec broker uv run alembic
+# The image puts /app/.venv/bin on PATH, so alembic runs without uv.
+ALEMBIC = docker compose exec broker alembic
 
 db-upgrade:
 	$(ALEMBIC) upgrade head

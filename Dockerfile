@@ -37,5 +37,12 @@ RUN uv sync --no-dev
 ARG WEBHOOK_PORT=80
 EXPOSE ${WEBHOOK_PORT}
 
+# Put the project venv on PATH so the interpreter, alembic and the app run
+# without uv at runtime. `uv run` does not exec: it stays alive as the
+# container's main process, which costs ~30 MB and puts one more hop between
+# `docker stop`'s SIGTERM and FastAPI's shutdown handler. A TradingView
+# signal dropped mid-request is never re-sent, so that hop is worth removing.
+ENV PATH="/app/.venv/bin:${PATH}"
+
 ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
-CMD ["uv", "run", "--no-dev", "python", "-m", "broker.main"]
+CMD ["python", "-m", "broker.main"]

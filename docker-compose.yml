@@ -6,6 +6,13 @@ services:
     image: postgres:16-alpine
     container_name: algo_trading_broker_postgres
     restart: always
+    # Memory ceilings, not reservations. The host has no swap, so without a
+    # per-container cap the kernel OOM killer picks its victim by score and
+    # is as likely to take Postgres — the signal audit log — as the container
+    # that actually leaked. A cap keeps the blast radius on the offender,
+    # which `restart: always` then brings back. Budget across the stack is
+    # ~2.3 GB of a 4 GB box; raise a single value rather than all of them.
+    mem_limit: 768m
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
       POSTGRES_USER: ${POSTGRES_USER:-algo_trading}
@@ -54,6 +61,7 @@ services:
     container_name: algo_trading_broker_tailscale
     profiles: ["tailscale"]
     restart: always
+    mem_limit: 128m
     environment:
       # Needed only for the first login: the node's identity is kept in the
       # tailscale_state volume, and TS_AUTH_ONCE stops a restart from logging
@@ -80,6 +88,9 @@ services:
     image: nats:2.10-alpine
     container_name: algo_trading_broker_nats
     restart: always
+    # JetStream keeps the SIGNALS stream on disk, so this bounds buffers
+    # and connection state, not the stream itself.
+    mem_limit: 512m
     ports:
       # Inside the stack NATS always listens on 4222/8222; NATS_PORT and
       # NATS_MONITOR_PORT only move the host side, like POSTGRES_PORT.
@@ -116,6 +127,7 @@ services:
     image: algo-trading-broker:latest
     container_name: algo_trading_broker_broker
     restart: always
+    mem_limit: 512m
     depends_on:
       postgres:
         condition: service_healthy
@@ -159,6 +171,7 @@ services:
     image: algo-trading-bot:latest
     container_name: algo_trading_broker_bot
     restart: always
+    mem_limit: 384m
     depends_on:
       broker:
         condition: service_started

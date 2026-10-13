@@ -29,6 +29,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BroadcastMessageRepository.record_worker_execution` takes a `symbol` argument
   accordingly (the worker path reads it off the signal's row).
 
+- **Containers run the venv interpreter directly, and every service has a
+  memory ceiling.** The broker and bot images dropped the `uv run` wrapper
+  from `CMD` in favour of `/app/.venv/bin` on `PATH`. `uv run` does not
+  exec, so it stayed alive as the container's main process: ~30 MB per
+  service, and one more hop between `docker stop`'s SIGTERM and FastAPI's
+  shutdown handler. `scripts/docker-entrypoint.sh` runs `alembic upgrade
+  head` through the same venv, and `make status` and the `db-*` targets
+  exec `python`/`alembic` in the container instead of `uv run`. uv stays in
+  the image as the build-time installer; nothing invokes it at runtime
+  (`alembic` is a production dependency, so it ships in the image).
+
+  `docker-compose.yml` gives postgres, nats, broker, bot and tailscale a
+  `mem_limit` totalling ~2.3 GB. On a host without swap and without caps,
+  the kernel OOM killer chooses by score and can take Postgres instead of
+  the container that leaked; a cap keeps the kill on the offender, which
+  `restart: always` then brings back. No image rebuild changes behaviour —
+  `make dev` or `make start` picks both up.
+
 ### Added
 
 - **`make status` — every link the broker depends on, on one screen.** Prints
