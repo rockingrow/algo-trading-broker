@@ -8,7 +8,7 @@
   "Web": {
     "@TAILSCALE_FQDN@:443": {
       "Handlers": {
-        "@WEBHOOK_PATH@": { "Proxy": "http://broker:@WEBHOOK_PORT@" }
+        "/": { "Proxy": "http://broker:@WEBHOOK_PORT@" }
       }
     }
   },

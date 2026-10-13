@@ -9,31 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Tailscale exposes only the webhook path, and no longer the broker's HTTP
-  port** — `config/tailscale/serve.json.template` drops the tailnet TCP forward
-  for port 80, and its Funnel handler on 443 moves from `/` to the single
-  webhook path, rendered from `BROKER_API_PREFIX` as
-  `/<prefix>/secret/webhook` by `make tailscale-serve-config`. Every other path
-  — `/admin`, `/v1`, the docs, and the `.env` / `phpunit` / `wp-admin` probes
-  that find any public HTTPS name — is answered at Tailscale's edge and never
-  reaches FastAPI. `config/tailscale/policy.hujson` loses the matching
-  `tcp:80` grant for `tag:worker`, which now described a forward that no longer
-  exists.
+- **The broker's HTTP port is off the public internet and off the tailnet.**
+  `docker-compose.yml` publishes it on `PRIVATE_BIND_ADDRESS` like the NATS and
+  Postgres ports, so with Tailscale on it binds `127.0.0.1` instead of
+  `0.0.0.0`. It was the one FastAPI surface reachable by the VPS' public IP
+  alone, which is what the `.env` / `phpunit` / `wp-admin` scanners were
+  finding; `ufw` does not cover it either, because Docker's DNAT rules are
+  traversed before ufw's `INPUT` chain. Nothing in the stack needed it
+  published: the bot and the `tailscale` container both reach `broker:80` over
+  `trading_net`.
 
-  `docker-compose.yml` closes the matching hole on the host: the broker's
-  published port now follows `PRIVATE_BIND_ADDRESS` like the NATS and Postgres
-  ones, so with Tailscale on it binds `127.0.0.1` instead of `0.0.0.0`. It was
-  the one FastAPI surface reachable by the VPS' public IP alone, which is what
-  the endpoint scanners were finding — restricting Funnel to a single path does
-  nothing while port 80 answers on the public address. Nothing in the stack
-  needed it published: the bot and the `tailscale` container both reach
-  `broker:80` over `trading_net`.
+  `config/tailscale/serve.json.template` drops the tailnet TCP forward for port
+  80, and `config/tailscale/policy.hujson` drops the matching `tcp:80` grant for
+  `tag:worker`, which then described a forward that no longer exists. Funnel on
+  443 is the only route to the HTTP API; its proxy target is rendered from
+  `WEBHOOK_PORT` rather than hardcoded to 80, so moving the port no longer
+  breaks the webhook with a 502 that looks like a broker fault.
 
   **Operational note:** a worker or admin device that called the broker's HTTP
   API over the tailnet loses that route. Workers talk to the broker over NATS
-  (4222, unchanged); anything else has to run on the host or get a forward
-  added back deliberately. Re-run `make tailscale-serve-config` after pulling,
-  and keep the TradingView alert URL in step with `BROKER_API_PREFIX`.
+  (4222, unchanged); anything else has to run on the host. Re-run `make
+  tailscale-serve-config` after pulling, and re-paste `policy.hujson` into the
+  Tailscale admin console - Tailscale does not read it from the repository.
+
+  **Reverted before release: restricting Funnel to the webhook path.** An
+  earlier revision of this entry claimed the 443 handler served only
+  `/<prefix>/secret/webhook`. It cannot: Tailscale Serve strips the mount point
+  before proxying, and a mount matches its whole subtree. Mounting the webhook's
+  own path made the broker receive `POST /` and answer 404 for every alert -
+  observed in production, with signals lost, since TradingView never re-sends.
+  The shallowest mount that leaves `/secret/webhook` intact is `/<prefix>`,
+  which forwards `/v1` and `/admin` too, so exposing a single path needs a route
+  the stripped remainder can hit - an application change, not a `serve.json`
+  one. The handler stays at `/`; the measurements are recorded in the Makefile,
+  in README and in `test_the_funnel_handler_stays_mounted_at_the_root`, which
+  fails if anyone narrows it again.
 
 - **Several signal cycles per `symbol` + `strategy` at the same time** — a
   producer may now run more than one trade on the same symbol and strategy
