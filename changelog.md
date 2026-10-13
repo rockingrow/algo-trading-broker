@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Tailscale exposes only the webhook path, and no longer the broker's HTTP
+  port** — `config/tailscale/serve.json.template` drops the tailnet TCP forward
+  for port 80, and its Funnel handler on 443 moves from `/` to the single
+  webhook path, rendered from `BROKER_API_PREFIX` as
+  `/<prefix>/secret/webhook` by `make tailscale-serve-config`. Every other path
+  — `/admin`, `/v1`, the docs, and the `.env` / `phpunit` / `wp-admin` probes
+  that find any public HTTPS name — is answered at Tailscale's edge and never
+  reaches FastAPI. `config/tailscale/policy.hujson` loses the matching
+  `tcp:80` grant for `tag:worker`, which now described a forward that no longer
+  exists.
+
+  `docker-compose.yml` closes the matching hole on the host: the broker's
+  published port now follows `PRIVATE_BIND_ADDRESS` like the NATS and Postgres
+  ones, so with Tailscale on it binds `127.0.0.1` instead of `0.0.0.0`. It was
+  the one FastAPI surface reachable by the VPS' public IP alone, which is what
+  the endpoint scanners were finding — restricting Funnel to a single path does
+  nothing while port 80 answers on the public address. Nothing in the stack
+  needed it published: the bot and the `tailscale` container both reach
+  `broker:80` over `trading_net`.
+
+  **Operational note:** a worker or admin device that called the broker's HTTP
+  API over the tailnet loses that route. Workers talk to the broker over NATS
+  (4222, unchanged); anything else has to run on the host or get a forward
+  added back deliberately. Re-run `make tailscale-serve-config` after pulling,
+  and keep the TradingView alert URL in step with `BROKER_API_PREFIX`.
+
 - **Several signal cycles per `symbol` + `strategy` at the same time** — a
   producer may now run more than one trade on the same symbol and strategy
   concurrently. Each one carries its own `signal_uxid` and its full action trail

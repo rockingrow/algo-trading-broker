@@ -25,6 +25,13 @@ TAILSCALE_DIR = REPO_ROOT / "config" / "tailscale"
 # Any syntactically valid tailnet name: the tests check structure, not the name
 # of one deployment.
 FQDN = "algo-broker.example-tailnet.ts.net"
+# The webhook path as make renders it when BROKER_API_PREFIX is set: the secret
+# segment is part of the public path, so the tests use a stand-in prefix.
+WEBHOOK_PATH = "/example-prefix/secret/webhook"
+# The port the broker listens on, which make reads from the same .env. The
+# template must not hardcode it: Funnel's handler is the only route to the
+# broker, so a stale port here is a dead webhook.
+WEBHOOK_PORT = "80"
 
 
 def _strip_hujson(text: str) -> str:
@@ -66,7 +73,9 @@ def serve_config() -> dict:
   renders it. The rendered ``serve.json`` is generated and untracked, so it
   cannot be what this suite reads."""
   template = (TAILSCALE_DIR / "serve.json.template").read_text()
-  return json.loads(template.replace("@TAILSCALE_FQDN@", FQDN))
+  rendered = template.replace("@TAILSCALE_FQDN@", FQDN)
+  rendered = rendered.replace("@WEBHOOK_PATH@", WEBHOOK_PATH)
+  return json.loads(rendered.replace("@WEBHOOK_PORT@", WEBHOOK_PORT))
 
 
 @pytest.fixture(scope="module")
@@ -146,7 +155,49 @@ def test_tailscale_service_is_opt_in_and_reads_the_mounted_serve_config(compose)
   assert service["environment"]["TS_AUTH_ONCE"] == "true"
 
 
-@pytest.mark.parametrize("service_name", ["nats", "postgres"])
+@pytest.mark.parametrize("service_name", ["nats", "postgres", "broker"])
 def test_private_ports_follow_the_makefile_bind_address(compose, service_name):
+  """The broker is in this list for the same reason as the other two: with
+  Tailscale on, the only public route in is the Funnel webhook path, and a
+  host port published on 0.0.0.0 would quietly reopen all of FastAPI to the
+  VPS' public address."""
   for mapping in compose["services"][service_name]["ports"]:
     assert mapping.startswith("${PRIVATE_BIND_ADDRESS:-0.0.0.0}:"), mapping
+
+
+def test_the_funnel_serves_only_the_webhook_path(serve_config):
+  """Funnel is the public internet, and the broker answers nothing on it but
+  the webhook. A handler on ``/`` would put every FastAPI route — /admin, the
+  docs, the scanners' favourite paths — one request away from the world."""
+  funnelled = set(serve_config["AllowFunnel"])
+
+  assert funnelled == {f"{FQDN}:443"}
+  for host_port in funnelled:
+    handlers = serve_config["Web"][host_port]["Handlers"]
+    assert set(handlers) == {WEBHOOK_PATH}, "only the webhook path may be public"
+
+
+def test_the_broker_http_port_is_not_forwarded_onto_the_tailnet(serve_config, policy):
+  """Port 80 is closed on the tailnet side as well: no TCP forward, and no
+  grant that would promise one."""
+  for handler in serve_config["TCP"].values():
+    assert handler.get("TCPForward") != "broker:80"
+
+  for grant in policy["grants"]:
+    if "tag:broker" not in grant["dst"]:
+      continue
+    assert "tcp:80" not in grant["ip"]
+
+
+def test_the_funnel_handler_proxies_the_port_the_broker_listens_on(serve_config, compose):
+  """Funnel is the only route to the broker, so the handler's port has to
+  track WEBHOOK_PORT. Hardcoding 80 here breaks the webhook with a 502 the
+  moment the port moves — and nothing else would catch it."""
+  broker_port = (
+    compose["services"]["broker"]["environment"]["WEBHOOK_PORT"]
+    .strip('"$ {}')
+    .split(":-")[-1]
+  )
+  for entry in serve_config["Web"].values():
+    for handler in entry["Handlers"].values():
+      assert handler["Proxy"] == f"http://broker:{broker_port}"
