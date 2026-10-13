@@ -3,13 +3,12 @@
     "443": { "HTTPS": true },
     "4222": { "TCPForward": "nats:4222" },
     "8222": { "TCPForward": "nats:8222" },
-    "80": { "TCPForward": "broker:80" },
     "5432": { "TCPForward": "postgres:5432" }
   },
   "Web": {
     "@TAILSCALE_FQDN@:443": {
       "Handlers": {
-        "/": { "Proxy": "http://broker:80" }
+        "@WEBHOOK_PATH@": { "Proxy": "http://broker:@WEBHOOK_PORT@" }
       }
     }
   },

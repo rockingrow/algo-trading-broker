@@ -16,13 +16,21 @@
 //                                                   publishes SIGNALS to broker
 //   Broker server       tag:broker                  this repository; its
 //                                                   `tailscale` container
-//                                                   forwards 4222/8222/5432
+//                                                   forwards 4222/8222/5432,
+//                                                   and funnels one public
+//                                                   HTTPS path (the webhook)
 //
 // Every flow is a NATS client opening a TCP connection to a NATS server, so a
 // grant only ever needs the server's port: replies and subscriptions ride the
 // connection the client opened. Anything not granted here is denied, which is
 // the point — a compromised MT5 VPS (RDP, a broker terminal) can reach the two
 // NATS ports it needs and nothing else, never Postgres or the monitoring port.
+//
+// The broker's HTTP port (80) is deliberately absent: the `tailscale`
+// container no longer forwards it onto the tailnet, and the only way in is the
+// one webhook path Funnel publishes on 443 (see the Makefile's
+// tailscale-serve-config). Granting tcp:80 here would describe a path that
+// does not exist.
 //
 // Tagged nodes never have their key expire, so a server does not silently
 // drop off the tailnet 180 days after it joined.
@@ -43,11 +51,6 @@
     // and the SYSTEM handshake. Same port, same reason.
     {"src": ["tag:engine", "tag:worker"], "dst": ["tag:broker"], "ip": ["tcp:4222"]},
 
-    // Worker → broker HTTP API (WEBHOOK_PORT, 80 by default; the `tailscale`
-    // container forwards it to the broker service). Only the worker gets it:
-    // the engine talks to the broker over NATS, not HTTP.
-    {"src": ["tag:worker"], "dst": ["tag:broker"], "ip": ["tcp:80"]},
-
     // Operators' own devices: everything, including the NATS monitoring port
     // (8222) and the broker's Postgres (5432) for a DB client.
     {"src": ["autogroup:admin"], "dst": ["tag:broker", "tag:engine", "tag:ingester", "tag:worker"], "ip": ["*"]},
@@ -61,8 +64,8 @@
     },
     {
       "src":    "tag:worker",
-      "accept": ["tag:broker:4222", "tag:broker:80"],
-      "deny":   ["tag:broker:5432", "tag:broker:8222", "tag:engine:4222"],
+      "accept": ["tag:broker:4222"],
+      "deny":   ["tag:broker:80", "tag:broker:5432", "tag:broker:8222", "tag:engine:4222"],
     },
     {
       "src":    "tag:engine",

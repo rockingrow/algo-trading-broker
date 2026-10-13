@@ -30,6 +30,19 @@ TAILSCALE_HOSTNAME := $(call env-value,TAILSCALE_HOSTNAME)
 TAILSCALE_DNS_NAME := $(call env-value,TAILSCALE_DNS_NAME)
 TAILSCALE_FQDN := $(TAILSCALE_HOSTNAME).$(TAILSCALE_DNS_NAME)
 
+# The one path Funnel routes publicly. Every broker route sits under
+# BROKER_API_PREFIX when it is set, so the public path has to be built from the
+# same value the app reads - a stale prefix here is a webhook that 404s at the
+# Tailscale edge.
+BROKER_API_PREFIX := $(call env-value,BROKER_API_PREFIX)
+WEBHOOK_PATH := $(if $(BROKER_API_PREFIX),/$(BROKER_API_PREFIX),)/secret/webhook
+
+# The port the broker container listens on, and so the port Funnel's handler
+# must proxy to. Rendered rather than hardcoded: WEBHOOK_PORT moving while
+# serve.json still said 80 would break the webhook with a 502 that looks like
+# a broker fault.
+WEBHOOK_PORT := $(or $(call env-value,WEBHOOK_PORT),80)
+
 COMPOSE_PROFILE := $(if $(TAILSCALE_ACTIVE),--profile tailscale,)
 
 # Passed explicitly so the switch is authoritative over whatever the shell
@@ -100,8 +113,19 @@ build:
 TS_CLI = MSYS_NO_PATHCONV=1 docker compose $(COMPOSE_PROFILE) exec tailscale tailscale --socket=/tmp/tailscaled.sock
 
 # serve.json is generated, not tracked: it carries this deployment's own
-# tailnet name. tailscaled watches the mounted directory, so writing it while
-# the container runs is applied without a restart.
+# tailnet name and secret webhook path. tailscaled watches the mounted
+# directory, so writing it while the container runs is applied without a
+# restart.
+#
+# Two exposure levels come out of that one file:
+#   - tailnet-only: the TCP forwards (4222, 8222, 5432), reachable only by the
+#     nodes config/tailscale/policy.hujson grants and never from the internet;
+#   - public: Funnel on 443, and under it only the single WEBHOOK_PATH handler.
+#     Every other path is answered at Tailscale's edge and never reaches the
+#     broker container, which is what keeps the .env/phpunit/wp-admin scanners
+#     off FastAPI. Funnel ignores tailnet grants, so that one path is a public
+#     endpoint guarded by nothing but the in-payload token - rotate the prefix
+#     (BROKER_API_PREFIX) and WEBHOOK_SECRET together.
 tailscale-serve-config:
 ifeq ($(TAILSCALE_ACTIVE),1)
 	@if [ -z "$(TAILSCALE_HOSTNAME)" ] || [ -z "$(TAILSCALE_DNS_NAME)" ]; then \
@@ -110,9 +134,12 @@ ifeq ($(TAILSCALE_ACTIVE),1)
 		echo "admin console > DNS). Serve has no FQDN to bind without them." >&2; \
 		exit 1; \
 	fi
-	@sed 's/@TAILSCALE_FQDN@/$(TAILSCALE_FQDN)/g' \
+	@sed -e 's/@TAILSCALE_FQDN@/$(TAILSCALE_FQDN)/g' \
+		-e 's|@WEBHOOK_PATH@|$(WEBHOOK_PATH)|g' \
+		-e 's|@WEBHOOK_PORT@|$(WEBHOOK_PORT)|g' \
 		config/tailscale/serve.json.template > config/tailscale/serve.json
 	@echo "Rendered config/tailscale/serve.json for $(TAILSCALE_FQDN)"
+	@echo "Public (Funnel) surface: https://$(TAILSCALE_FQDN)$(WEBHOOK_PATH) and nothing else"
 endif
 
 tailscale-status:
@@ -135,7 +162,7 @@ ifeq ($(TAILSCALE_ACTIVE),1)
 endif
 	@echo
 	@if [ -n "$$(docker compose ps --quiet --status running broker 2>/dev/null)" ]; then \
-		docker compose exec -T broker uv run --no-dev python -m broker.status; \
+		docker compose exec -T broker python -m broker.status; \
 	else \
 		echo "The broker container is not running, so nothing can be probed from inside" >&2; \
 		echo "the stack. Start it with make start, then run make status again." >&2; \
@@ -162,7 +189,8 @@ simulate-nats:
 	uv run python e2e/simulate_signals.py
 
 # ── Alembic ──────────────────────────────────────────────────────────────────
-ALEMBIC = docker compose exec broker uv run alembic
+# The image puts /app/.venv/bin on PATH, so alembic runs without uv.
+ALEMBIC = docker compose exec broker alembic
 
 db-upgrade:
 	$(ALEMBIC) upgrade head

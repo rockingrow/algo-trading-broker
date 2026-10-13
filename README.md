@@ -84,12 +84,13 @@ operator laptop ─────────────► algo-broker:8222 ─�
                                                  │    from .env)
                                                  │
                                    trading_net   ├─► nats:4222 / nats:8222
-                                                 ├─► postgres:5432
-                                                 └─► broker:80
-                                                 │
-public internet ────────► https://<FQDN>/ ─────┘  (Serve HTTPS + Funnel)
-host ports: 127.0.0.1:{NATS_PORT,NATS_MONITOR_PORT,POSTGRES_PORT} only
-webhook:    0.0.0.0:WEBHOOK_PORT (TradingView is not on the tailnet)
+                                                 └─► postgres:5432
+
+public internet ──► https://<FQDN>/<webhook path> ──► broker:80
+                    (Serve HTTPS + Funnel: the one path in; every other
+                     path 404s at the edge, and 80 is not on the tailnet)
+host ports: 127.0.0.1:{NATS_PORT,NATS_MONITOR_PORT,POSTGRES_PORT,WEBHOOK_PORT}
+            — nothing on the VPS' public address at all
 ```
 
 | | `TAILSCALE_ENABLED=false` (default) | `TAILSCALE_ENABLED=true` |
@@ -97,6 +98,8 @@ webhook:    0.0.0.0:WEBHOOK_PORT (TradingView is not on the tailnet)
 | `tailscale` container | not pulled, not started | started (profile `tailscale`) |
 | NATS 4222 / 8222 on the host | `0.0.0.0` | `127.0.0.1` |
 | Postgres on the host | `0.0.0.0` | `127.0.0.1` |
+| `WEBHOOK_PORT` on the host | `0.0.0.0` | `127.0.0.1` |
+| TradingView posts to | `http://<host address>:WEBHOOK_PORT/…` | `https://<FQDN>/<prefix>/secret/webhook` (Funnel) |
 | Remote NATS clients connect to | `nats://<host address>:NATS_PORT` | `nats://<TAILSCALE_HOSTNAME>:4222` |
 | Who may connect | anyone holding `NATS_TOKEN` | tailnet members the policy allows, *and* holding `NATS_TOKEN` |
 
@@ -158,17 +161,31 @@ clients reconnect; the broker's own NATS connection is never touched.
    | --- | --- | --- |
    | TCP 4222 / 8222 | tailnet (policy-filtered) | `nats:4222` / `nats:8222` |
    | TCP 5432 | tailnet (admin devices only) | `postgres:5432` |
-   | TCP 80 | tailnet | `broker:80` |
-   | HTTPS 443 `/` | **the public internet** (`AllowFunnel`) | `http://broker:80` |
+   | HTTPS 443, webhook path only | **the public internet** (`AllowFunnel`) | `http://broker:80` |
+
+   The broker's HTTP port is **not** forwarded onto the tailnet, and the 443
+   handler is mounted on one path instead of `/`: the webhook, including the
+   `BROKER_API_PREFIX` segment when one is set
+   (`@WEBHOOK_PATH@` in the template, rendered by `make
+   tailscale-serve-config` from the same `.env`). Every other path — `/admin`,
+   the docs, and the `.env` / `phpunit` / `wp-admin` probes that scanners
+   fire at any public HTTPS name — is answered at Tailscale's edge with a 404
+   and never reaches FastAPI. The flip side: nothing but the webhook is
+   reachable from anywhere outside `trading_net`, so an admin call or a
+   `/v1/trades` query has to come from the host itself (or through a
+   forward you add back deliberately). Change `BROKER_API_PREFIX` and the
+   rendered path moves with it — re-run `make tailscale-serve-config` and
+   update the TradingView alert URL together.
 
    The 443 handler is a [Funnel](https://tailscale.com/kb/1223/funnel): it
    gives the node a public, Tailscale-terminated HTTPS name, so TradingView
    (which is not on the tailnet) can POST to
    `https://<TAILSCALE_HOSTNAME>.<TAILSCALE_DNS_NAME>/secret/webhook` without
    the host publishing `WEBHOOK_PORT` itself. It is the one entry in the file
-   that is **not** tailnet-only: anyone on the internet can reach the broker's
-   HTTP surface through it, so the webhook token/HMAC and the `X-API-KEY`
-   guard are the only thing standing in front of the API. Funnel also has to
+   that is **not** tailnet-only — Funnel bypasses the tailnet policy
+   entirely, so that single path is a public endpoint and the webhook
+   token/HMAC is all that stands in front of it. Rotate the path
+   (`BROKER_API_PREFIX`) and `WEBHOOK_SECRET` together. Funnel also has to
    be enabled for the tailnet in the admin console
    ([Settings → Funnel](https://login.tailscale.com/admin/settings/funnel)) and
    the node needs `funnel` in its policy attributes, or the handler is
