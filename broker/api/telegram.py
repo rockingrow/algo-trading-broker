@@ -19,11 +19,16 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from broker.constants import ACCOUNT_SETTING_SIGNAL_BLOCKED
+from broker.constants import (
+  ACCOUNT_SETTING_MAX_OPEN_ORDERS,
+  ACCOUNT_SETTING_SIGNAL_BLOCKED,
+  MAX_OPEN_ORDERS_KEY,
+)
 from broker.db.models import Account, Trade
 from broker.helpers.trade_card import is_terminal
 from broker.interfaces import (
   AccountRepository,
+  SettingRepository,
   SignalPublisher,
   TradeBroadcastRepository,
   TradeRepository,
@@ -33,16 +38,25 @@ from broker.openapi import AUTH_RESPONSES
 from broker.providers import (
   get_account_repository,
   get_publisher,
+  get_setting_repository,
   get_trade_broadcast_repository,
   get_trade_repository,
 )
 from broker.schemas.publisher_schema import AdminActionEnum
+from broker.services.account_settings_service import (
+  parse_account_settings,
+  parse_global_max_open_orders,
+  push_worker_settings_update,
+  resolve_account_settings,
+)
 from broker.schemas.telegram_schema import (
   BroadcastSubscriptionResponse,
   CommandResultResponse,
   FlatCommandRequest,
   LinkedAccountResponse,
   LinkRequest,
+  MaxOpenOrdersRequest,
+  MaxOpenOrdersResponse,
   OpenPositionsResponse,
   PreventCommandRequest,
   SwitchAccountRequest,
@@ -54,7 +68,9 @@ log = get_logger(__name__)
 
 NOT_LINKED_RESPONSE = {404: {"description": "No account linked to this Telegram user."}}
 NO_SUCH_TRADE_RESPONSE = {
-  404: {"description": "No such trade, or it belongs to an account you aren't linked to."}
+  404: {
+    "description": "No such trade, or it belongs to an account you aren't linked to."
+  }
 }
 
 
@@ -387,6 +403,107 @@ def get_telegram_router() -> APIRouter:
       "Telegram %s published scope=%s settings=%s", action.value, scope, settings
     )
     return CommandResultResponse(action=action.value, scope=scope, settings=settings)
+
+  # ── Per-account settings ─────────────────────────────────────────
+  # The owner's own copy of a setting the broker otherwise defaults globally.
+  # Unlike /prevent — a directive that happens to be remembered — these are
+  # plain stored values, so they live under /settings rather than /commands.
+
+  @router.get(
+    "/{telegram_user_id}/settings/max-open-orders",
+    summary="Read the open-position cap for the caller's account",
+    response_model=MaxOpenOrdersResponse,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
+  )
+  async def get_max_open_orders(
+    account: Account = Depends(get_linked_account),
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> MaxOpenOrdersResponse:
+    """Return the cap this account's worker runs on, and where it came from.
+
+    Reads the account row rather than the resolved block so it can tell the two
+    apart: the bot needs to show whether the number is the owner's own or
+    inherited, and whether there is an override to clear.
+    """
+    global_value = parse_global_max_open_orders(
+      await setting_repo.get(MAX_OPEN_ORDERS_KEY)
+    )
+    own = parse_account_settings(account.settings, account.account_id).max_open_orders
+    return MaxOpenOrdersResponse(
+      max_open_orders=global_value if own is None else own,
+      source="global" if own is None else "account",
+      global_max_open_orders=global_value,
+    )
+
+  @router.post(
+    "/{telegram_user_id}/settings/max-open-orders",
+    summary="Set the open-position cap for the caller's account",
+    response_model=MaxOpenOrdersResponse,
+    responses={
+      **AUTH_RESPONSES,
+      **NOT_LINKED_RESPONSE,
+      500: {"description": "Failed to persist account settings."},
+    },
+  )
+  async def set_max_open_orders(
+    body: MaxOpenOrdersRequest,
+    account: Account = Depends(get_linked_account),
+    account_repo: AccountRepository = Depends(get_account_repository),
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    publisher: SignalPublisher = Depends(get_publisher),
+  ) -> MaxOpenOrdersResponse:
+    """Store the owner's cap for this account and push it to their worker.
+
+    Persist before publishing, for the same reason ``/prevent`` does: the stored
+    value is what the WORKER_CONNECTED_ACK replays on every (re)connect, so it —
+    not the push — is what makes the setting stick. A DB failure therefore fails
+    the command outright, while a failed push leaves the value recorded for the
+    worker's next handshake.
+
+    ``max_open_orders: null`` writes the key back as null, which reads as "this
+    account has no override" and hands it back to the global default. The blob
+    is a JSONB merge, so the key stays present with a null value rather than
+    being removed — both spell the same thing to
+    :func:`resolve_account_settings`.
+    """
+    stored = await account_repo.update_settings(
+      account.id, {ACCOUNT_SETTING_MAX_OPEN_ORDERS: body.max_open_orders}
+    )
+    if stored is None:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to persist account settings",
+      )
+
+    global_value = parse_global_max_open_orders(
+      await setting_repo.get(MAX_OPEN_ORDERS_KEY)
+    )
+    resolved = resolve_account_settings(
+      parse_account_settings(stored, account.account_id),
+      global_max_open_orders=global_value,
+    )
+    # The whole resolved block goes out, not just the field that changed: the
+    # worker applies it through the same code path as the handshake, and that
+    # path reads every setting it knows.
+    await push_worker_settings_update(
+      publisher,
+      account_id=account.account_id,
+      market=account.market,
+      gateway=account.gateway,
+      settings=resolved,
+    )
+
+    log.info(
+      "Telegram max_open_orders account_id=%s -> %s (global=%s)",
+      account.account_id,
+      body.max_open_orders,
+      global_value,
+    )
+    return MaxOpenOrdersResponse(
+      max_open_orders=resolved.max_open_orders,
+      source="global" if body.max_open_orders is None else "account",
+      global_max_open_orders=global_value,
+    )
 
   # ── Trade-card opt-in ────────────────────────────────────────────
   # A per-user preference (spans every account the user holds), so these are

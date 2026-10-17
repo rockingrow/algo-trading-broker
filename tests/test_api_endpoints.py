@@ -18,6 +18,8 @@ from broker.app import install_webhook_connection_close
 from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
+  DEFAULT_MAX_OPEN_ORDERS,
+  MAX_OPEN_ORDERS_KEY,
   NOTIFICATION_TIMEZONE_KEY,
   PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
@@ -98,12 +100,16 @@ class FakePublisher:
   def __init__(self):
     self.admin_signals = []
     self.system_signals = []
+    self.settings_updates = []
 
   async def publish_admin_signal(self, **kwargs):
     self.admin_signals.append(kwargs)
 
   async def publish_system_signal(self, **kwargs):
     self.system_signals.append(kwargs)
+
+  async def publish_system_settings_update(self, **kwargs):
+    self.settings_updates.append(kwargs)
 
 
 class FakeAccountRepo:
@@ -115,6 +121,8 @@ class FakeAccountRepo:
     self.summaries: dict[uuid.UUID, AccountLinkSummary] = {
       a.id: AccountLinkSummary(link_token=uuid.uuid4()) for a in self.accounts
     }
+    # Flipped by the test that checks a failed settings write fails the command.
+    self.fail_update_settings = False
 
   async def get_all(self):
     return self.accounts
@@ -124,6 +132,17 @@ class FakeAccountRepo:
 
   async def get_by_market(self, market):
     return [a for a in self.accounts if a.market == market]
+
+  async def update_settings(self, account_uuid, patch):
+    for account in self.accounts:
+      if account.id == account_uuid:
+        if self.fail_update_settings:
+          return None
+        merged = dict(account.settings or {})
+        merged.update(patch)
+        account.settings = merged
+        return merged
+    return None
 
   async def create_account(self, account_id, market, gateway, account_name=None):
     # account_id alone isn't unique — only the full (market, gateway, account_id)
@@ -167,6 +186,7 @@ def _make_account(
   account_name="Main",
   market=MarketTypeEnum.FOREX,
   gateway=None,
+  settings=None,
 ) -> Account:
   return Account(
     id=uuid.uuid4(),
@@ -175,6 +195,7 @@ def _make_account(
     account_balance=1000.0,
     market=market,
     gateway=gateway,
+    settings=settings if settings is not None else {},
     last_activity_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     createdAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
     updatedAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -679,6 +700,118 @@ def test_set_crypto_allowed_symbol_skips_crypto_account_without_gateway(ctx):
   )
   assert resp.status_code == 200
   assert ctx["publisher"].system_signals == []
+
+
+# ── /admin/settings/max-open-orders ─────────────────────────────────
+#
+# The broker-wide default every account inherits unless its owner set their own
+# cap from the bot. Changing it pushes the resolved block to each worker, so a
+# running worker does not keep the old cap until it reconnects.
+
+
+def test_get_max_open_orders_reports_the_default_when_unset(ctx):
+  # Reported as the value it resolves to, not an empty string: an admin reading
+  # this wants the cap accounts actually inherit.
+  resp = ctx["client"].get(
+    "/admin/settings/max-open-orders", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": MAX_OPEN_ORDERS_KEY,
+    "value": str(DEFAULT_MAX_OPEN_ORDERS),
+  }
+
+
+def test_get_max_open_orders_reports_the_stored_value(ctx):
+  ctx["setting_repo"].values[MAX_OPEN_ORDERS_KEY] = "9"
+  resp = ctx["client"].get(
+    "/admin/settings/max-open-orders", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.json()["value"] == "9"
+
+
+def test_set_max_open_orders_persists_notifies_and_pushes(ctx):
+  ctx["account_repo"].accounts[0].gateway = "MT5"
+
+  resp = ctx["client"].post(
+    "/admin/settings/max-open-orders",
+    json={"max_open_orders": 8},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == "8"
+  assert ctx["setting_repo"].values[MAX_OPEN_ORDERS_KEY] == "8"
+  assert len(ctx["notifier"].messages) == 1
+
+  pushed = ctx["publisher"].settings_updates
+  assert len(pushed) == 1
+  assert pushed[0]["account_id"] == "FOREX-MT5-acc-1"
+  assert pushed[0]["settings"].max_open_orders == 8
+  # Sent on the shared SYSTEM subject, never a reply inbox.
+  assert pushed[0].get("subject") is None
+
+
+def test_set_max_open_orders_leaves_an_accounts_own_cap_alone(ctx):
+  # The new value is the default to *inherit*; an account that chose its own
+  # keeps it, and its push carries that value rather than the new default.
+  ctx["account_repo"].accounts[0].gateway = "MT5"
+  ctx["account_repo"].accounts[0].settings = {"max_open_orders": 2}
+
+  resp = ctx["client"].post(
+    "/admin/settings/max-open-orders",
+    json={"max_open_orders": 8},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  assert ctx["publisher"].settings_updates[0]["settings"].max_open_orders == 2
+
+
+def test_set_max_open_orders_pushes_one_message_per_addressable_account(ctx):
+  ctx["account_repo"].accounts[0].gateway = "MT5"
+  ctx["account_repo"].accounts.append(
+    _make_account(account_id="7654321", market=MarketTypeEnum.CRYPTO, gateway="BINANCE")
+  )
+  # No gateway reported yet, so there is no worker id to address.
+  ctx["account_repo"].accounts.append(_make_account(account_id="999", gateway=None))
+
+  ctx["client"].post(
+    "/admin/settings/max-open-orders",
+    json={"max_open_orders": 8},
+    headers={"X-API-KEY": API_KEY},
+  )
+
+  targets = {p["account_id"] for p in ctx["publisher"].settings_updates}
+  assert targets == {"FOREX-MT5-acc-1", "CRYPTO-BINANCE-7654321"}
+
+
+def test_set_max_open_orders_accepts_zero(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/max-open-orders",
+    json={"max_open_orders": 0},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 200
+  assert ctx["setting_repo"].values[MAX_OPEN_ORDERS_KEY] == "0"
+
+
+def test_set_max_open_orders_rejects_a_negative_value(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/max-open-orders",
+    json={"max_open_orders": -1},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 422
+
+
+def test_set_max_open_orders_fails_when_the_write_fails(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/max-open-orders",
+    json={"max_open_orders": 8},
+    headers={"X-API-KEY": API_KEY},
+  )
+  assert resp.status_code == 500
+  assert ctx["publisher"].settings_updates == []
 
 
 def test_set_crypto_allowed_symbol_skips_push_on_invalid_leverage(ctx):

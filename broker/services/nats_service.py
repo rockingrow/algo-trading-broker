@@ -91,6 +91,7 @@ from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
   DEFAULT_MAX_RETRY_TIMEOUT_SECONDS,
+  MAX_OPEN_ORDERS_KEY,
   MAX_RETRY_TIMEOUT_KEY,
   STRATEGY_MAGIC_MAP_KEY,
 )
@@ -109,6 +110,11 @@ from broker.schemas.account_schema import (
   MarketTypeEnum,
   decompose_worker_id,
 )
+from broker.services.account_settings_service import (
+  parse_account_settings,
+  parse_global_max_open_orders,
+  resolve_account_settings,
+)
 from broker.schemas.core import MarketEnum, SignalActionEnum
 from broker.schemas.publisher_schema import (
   AdminSignal,
@@ -120,6 +126,7 @@ from broker.schemas.publisher_schema import (
   SystemWorkerConnectedAck,
   SystemWorkerConnectedError,
   SystemWorkerConnectedSignal,
+  SystemWorkerSettingsUpdateSignal,
   TradingSignal,
 )
 from broker.schemas.trade_event_schema import PositionEvent
@@ -147,36 +154,6 @@ def _jetstream_subject(strategy: str) -> str:
 # so a short TTL is a deliberate trade-off between freshness and load: an
 # admin update reaches new handshakes within CRYPTO_SETTINGS_CACHE_TTL_SECONDS.
 CRYPTO_SETTINGS_CACHE_TTL_SECONDS = 30.0
-
-
-def _parse_account_settings(raw: object, account_id: str) -> AccountSettings:
-  """Shape an ``accounts.settings`` blob into the ACK's ``settings`` block.
-
-  Anything unusable — a row that predates the column, a hand-edited value of
-  the wrong type, a key whose value doesn't fit its field — falls back to the
-  schema defaults rather than raising: a bad blob must not cost the worker its
-  whole configuration, and "no settings" is exactly what the defaults mean.
-  Unknown keys are dropped by the model itself (``extra="ignore"``); they stay
-  in the row, since writes merge rather than replace.
-  """
-  if not isinstance(raw, dict):
-    if raw is not None:
-      log.warning(
-        "accounts.settings for account_id=%s is not an object, got %s — using defaults",
-        account_id,
-        type(raw).__name__,
-      )
-    return AccountSettings()
-  try:
-    return AccountSettings(**raw)
-  except ValidationError as exc:
-    log.error(
-      "accounts.settings for account_id=%s is invalid: %s | raw=%r — using defaults",
-      account_id,
-      exc,
-      raw,
-    )
-    return AccountSettings()
 
 
 def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
@@ -331,6 +308,11 @@ class SystemEventConsumer:
     # as the crypto settings to absorb reconnect-storm bursts.
     self._magic_map_cache: dict[str, int] | None = None
     self._magic_map_cached_at: float = 0.0
+    # Same reasoning for the broker-wide max_open_orders default: read on every
+    # handshake (both markets), identical for every worker, so it is cached on
+    # the same TTL rather than re-read once per reconnecting worker.
+    self._max_open_orders_cache: int | None = None
+    self._max_open_orders_cached_at: float = 0.0
 
   async def start(self) -> None:
     """Subscribe to the SYSTEM subject using the shared NATS connection."""
@@ -462,15 +444,20 @@ class SystemEventConsumer:
   async def _build_account_settings(
     self, event: SystemWorkerConnectedSignal
   ) -> AccountSettings:
-    """Return what the account's owner set from the bot (``/prevent`` & co.).
+    """Return what the account's owner set from the bot (``/prevent``,
+    ``/maxorders``), with anything they left unset filled in from the
+    broker-wide default.
 
-    Read straight from the row on every handshake — deliberately *not* cached
-    like the broker-wide settings: this one is per account, so a cache would
-    only ever help a worker that reconnects twice in a row, and would be worth
-    a stale block the moment a user runs a command mid-storm.
+    The per-account row is read straight from the DB on every handshake —
+    deliberately *not* cached like the broker-wide settings: this one is per
+    account, so a cache would only ever help a worker that reconnects twice in
+    a row, and would be worth a stale block the moment a user runs a command
+    mid-storm. The global ``max_open_orders`` it resolves against *is* cached,
+    because that one read is identical for every worker in a reconnect storm.
 
     Not cached also means not fatal: a failed read logs and hands the worker
-    the schema defaults, same as an account that has never run a command.
+    the schema defaults, same as an account that has never run a command — then
+    still resolves, so the worker is never told ``max_open_orders: null``.
     """
     account_id = decompose_worker_id(event.account_id, event.market, event.gateway)
     try:
@@ -485,8 +472,36 @@ class SystemEventConsumer:
         account_id,
         exc,
       )
-      return AccountSettings()
-    return _parse_account_settings(raw, account_id)
+      raw = None
+    return resolve_account_settings(
+      parse_account_settings(raw, account_id),
+      global_max_open_orders=await self._get_global_max_open_orders(),
+    )
+
+  async def _get_global_max_open_orders(self) -> int:
+    """Read the broker-wide ``max_open_orders`` default, reusing a cached read
+    for up to ``CRYPTO_SETTINGS_CACHE_TTL_SECONDS`` (shared with the other
+    broker-wide reads).
+
+    Every handshake needs it — it is what an account that set no cap of its own
+    inherits — so a reconnect storm would otherwise be one DB round trip per
+    worker for a value that is the same for all of them. Both hits and misses
+    are cached; worst case an admin who just changed the default waits up to
+    the TTL for it to reach the next handshake, and already-connected workers
+    get the live ``WORKER_SETTINGS_UPDATE`` push in the meantime.
+    """
+    now = time.monotonic()
+    if (
+      self._max_open_orders_cache is not None
+      and now - self._max_open_orders_cached_at < CRYPTO_SETTINGS_CACHE_TTL_SECONDS
+    ):
+      return self._max_open_orders_cache
+
+    self._max_open_orders_cache = parse_global_max_open_orders(
+      await self._settings.get(MAX_OPEN_ORDERS_KEY)
+    )
+    self._max_open_orders_cached_at = now
+    return self._max_open_orders_cache
 
   async def _build_strategy_magic_map(self, strategies: list[str]) -> dict[str, int]:
     """Return the strategy → magic-number map filtered to *strategies*.
@@ -882,6 +897,32 @@ class NatsPublisher:
       signal.account_id,
       signal.symbols,
       signal.default_leverage,
+    )
+
+  async def publish_system_settings_update(
+    self, *, subject: str | None = None, **kwargs
+  ) -> None:
+    """Push a WORKER_SETTINGS_UPDATE to a worker that is already connected.
+
+    Used after an owner changes an account setting from the bot, or an admin
+    changes the broker-wide default, so a running worker applies the new value
+    straight away instead of at its next handshake. The connect-time copy of the
+    same block travels inside WORKER_CONNECTED_ACK.
+
+    When *subject* is given the signal is delivered to that one worker;
+    otherwise it is broadcast on the shared SYSTEM subject, where a worker
+    filters it by ``account_id``.
+    """
+    signal = SystemWorkerSettingsUpdateSignal(**kwargs)
+    target = subject or PublishTopicEnum.SYSTEM.value
+    body = signal.model_dump_json()
+    await self._conn.nc.publish(target, body.encode())
+    log.info(
+      "Published [SYSTEM→%s] action=%s account_id=%s | payload=%s",
+      target,
+      signal.action,
+      signal.account_id,
+      body,
     )
 
   async def publish_system_ack(self, *, subject: str | None = None, **kwargs) -> None:

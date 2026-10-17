@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from broker.constants import ACCOUNT_SETTING_SIGNAL_BLOCKED
+from broker.constants import (
+  ACCOUNT_SETTING_MAX_OPEN_ORDERS,
+  ACCOUNT_SETTING_SIGNAL_BLOCKED,
+)
 from broker.schemas.account_schema import AccountSettings, MarketTypeEnum
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.publisher_schema import (
@@ -240,7 +243,13 @@ def test_compose_admin_subject_from_string_market():
 
 def test_account_settings_default_to_no_command_ever_run():
   # An account with `{}` in the column must still produce a complete block.
-  assert AccountSettings().model_dump() == {"signal_blocked": False}
+  # max_open_orders is the one field whose default is None rather than a value:
+  # it means "this account set no cap of its own", and the broker resolves it
+  # against the global setting before the block reaches a worker.
+  assert AccountSettings().model_dump() == {
+    "signal_blocked": False,
+    "max_open_orders": None,
+  }
 
 
 def test_account_settings_keys_match_the_constants():
@@ -248,13 +257,14 @@ def test_account_settings_keys_match_the_constants():
   # the field is what the worker reads out of the ACK — a rename that touches
   # only one of them would silently stop persisting.
   assert ACCOUNT_SETTING_SIGNAL_BLOCKED in AccountSettings.model_fields
+  assert ACCOUNT_SETTING_MAX_OPEN_ORDERS in AccountSettings.model_fields
 
 
 def test_account_settings_drops_unknown_keys():
   # A key written by a newer broker is not forwarded to the worker (it stays in
   # the row — writes merge rather than replace).
   settings = AccountSettings(**{"signal_blocked": True, "from_the_future": "x"})
-  assert settings.model_dump() == {"signal_blocked": True}
+  assert settings.model_dump() == {"signal_blocked": True, "max_open_orders": None}
 
 
 def test_account_settings_rejects_a_wrong_typed_value():
@@ -267,7 +277,20 @@ def test_account_settings_rejects_a_wrong_typed_value():
 def test_worker_connected_ack_always_carries_a_settings_block():
   ack = SystemWorkerConnectedAck(account_id="FOREX-MT5-1")
   body = json.loads(ack.model_dump_json())
-  assert body["settings"] == {"signal_blocked": False}
+  assert body["settings"] == {"signal_blocked": False, "max_open_orders": None}
+
+
+def test_account_settings_rejects_a_negative_max_open_orders():
+  # 0 is the documented "no cap", so the bound is ge=0 — but a negative value
+  # is a caller bug, not a way of spelling "unlimited".
+  with pytest.raises(ValidationError):
+    AccountSettings(max_open_orders=-1)
+
+
+def test_account_settings_accepts_zero_max_open_orders():
+  # 0 disables the cap on the worker and must survive the round trip as 0
+  # rather than being coerced to the "unset" None.
+  assert AccountSettings(max_open_orders=0).max_open_orders == 0
 
 
 # ── PositionEvent ──────────────────────────────────────────────────

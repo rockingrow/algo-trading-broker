@@ -243,7 +243,7 @@ console; the `tailscale_state` volume lets it rejoin as the same node later.
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
 - **Signal replay on reconnect**: Every `WORKER_CONNECTED` handshake is answered with a `retry_signals` list holding every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
 - **Strategy magic map**: The same handshake reply carries a `strategy_magic_map` (both markets) — the strategy → magic-number map from the `strategy_magic_map` setting, filtered to the strategies the worker announced. Editable via `POST /admin/settings/strategy-magic-map` or the Telegram bot's `/admin_magicmap`.
-- **Per-account settings that survive a reconnect**: What an owner sets from the bot (today `/prevent` and `/allow`) is stored on the account as a JSONB `settings` blob and replayed to the worker in the `settings` block of every handshake reply — so a worker that restarts comes back blocked if that is how it was left, instead of silently accepting signals again.
+- **Per-account settings that survive a reconnect**: What an owner sets from the bot (`/prevent`, `/allow`, `/maxorders`) is stored on the account as a JSONB `settings` blob and replayed to the worker in the `settings` block of every handshake reply — so a worker that restarts comes back blocked if that is how it was left, instead of silently accepting signals again. Settings with a broker-wide default (`max_open_orders`) are resolved per account before they are sent, so the worker receives one concrete value and never needs the global one. A change also goes out immediately as a `SYSTEM.WORKER_SETTINGS_UPDATE`, so a running worker does not wait for a reconnect.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
@@ -437,7 +437,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
   "timestamp": "2026-06-30T00:00:00+00:00",
   "strategy_magic_map": { "wt_cross_v1": 20260617 },
   "retry_signals": [],
-  "settings": { "signal_blocked": true },
+  "settings": { "signal_blocked": true, "max_open_orders": 3 },
   "crypto_leverage_init": {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10
@@ -487,7 +487,8 @@ The `settings` block of the ACK carries what the account's **owner** set from th
 ```json
 {
   "settings": {
-    "signal_blocked": true
+    "signal_blocked": true,
+    "max_open_orders": 3
   }
 }
 ```
@@ -495,6 +496,31 @@ The `settings` block of the ACK carries what the account's **owner** set from th
 | Key | Type | Set by | Meaning |
 | --- | ---- | ------ | ------- |
 | `signal_blocked` | bool (default `false`) | bot `/prevent` → `true`, `/allow` → `false` | The owner has blocked new entries for this account. Same state the `BLOCK_SIGNAL` / `ALLOW_SIGNAL` ADMIN messages push live |
+| `max_open_orders` | int (never `null` on the wire) | bot `/maxorders`, else the `max_open_orders` `BrokerSetting` | How many positions the account may hold at once; `0` disables the cap. This is what the worker enforces as its `MAX_OPEN_ORDERS` limit |
+
+**`max_open_orders` has two scopes, and the worker sees one.** The owner's own
+value lives in `accounts.settings`; when they have set none, the account
+inherits the broker-wide `max_open_orders` `BrokerSetting` (default `5` when
+that row is unset or unreadable). The broker resolves the two **before** it
+replies, so the ACK always carries a concrete number and a worker never has to
+know a global default exists. On the worker side this replaces its old
+`MAX_OPEN_ORDERS` env var, which no longer exists: a worker falls back to its
+own built-in default of `5` only if the broker sends no value at all.
+
+Both scopes are editable at runtime, each by whoever owns it:
+
+| Scope | Edited by | Applies to |
+| ----- | --------- | ---------- |
+| Account | bot `/maxorders`, or `POST /v1/telegram/{id}/settings/max-open-orders` | That one account. Sending `null` clears the override and goes back to inheriting |
+| Broker-wide | bot `/admin_max_orders`, or `POST /admin/settings/max-open-orders` | Every account that has **not** set its own; the ones that did keep theirs |
+
+A change does not wait for the worker to reconnect: both endpoints push the
+account's resolved `settings` block to the worker(s) concerned as a SYSTEM
+`WORKER_SETTINGS_UPDATE` — the same block, the same values and the same
+worker-side code path as the ACK's, so the live push and the next handshake can
+never disagree. The push is best-effort (an account with no `gateway` recorded
+yet has no worker id to address, and a NATS failure is logged, not surfaced):
+the stored value is the contract, and the next handshake re-delivers it.
 
 **Why it is in the handshake at all.** A command like `/prevent` publishes an ADMIN message, which only reaches a worker that is connected *right now*. Before this block existed, a worker that restarted came back **unblocked** — it had no way to learn that its owner had stopped it while it was away. `POST /v1/telegram/{id}/commands/prevent` now writes `signal_blocked` to the account **before** publishing, and every handshake replays it: the ADMIN message is the live push, the column is the durable state, and a worker reconciles to it on every connect.
 
@@ -502,7 +528,7 @@ Enforcement lives in the worker — the broker records and reports the setting, 
 
 The block is read fresh from the row on every handshake (deliberately **not** cached like the broker-wide settings, which are per-broker and shared by every worker): a command run between two connects must reach the second one. Unknown keys in the column are dropped from the payload, so a worker only ever receives keys this broker version knows — they are not erased from the row, since writes merge (`settings || patch`) rather than replace.
 
-Adding a setting is a field on `AccountSettings` (`broker/schemas/account_schema.py`) plus its key in `broker/constants.py`, written from the command's endpoint — no migration, the column is a blob.
+Adding a setting is a field on `AccountSettings` (`broker/schemas/account_schema.py`) plus its key in `broker/constants.py`, written from the command's endpoint — no migration, the column is a blob. A setting that also has a broker-wide default resolves in `broker/services/account_settings_service.py`, which is the single place both the handshake and the live push go through.
 
 #### Fire-and-forget (backward compatible)
 
@@ -554,6 +580,29 @@ The broker looks up every **crypto account** in the `accounts` table and address
 ```
 
 Both `symbols` and `default_leverage` are read back from `BrokerSetting`, so whichever setting the admin did *not* just change is included from the DB. The push is best-effort: the setting is already persisted (and still reaches workers on their next handshake), so if the complementary setting is missing or invalid, a crypto account has no `gateway` recorded yet, or a publish fails — the affected message is logged and skipped while the endpoint still returns `200`.
+
+The same pattern covers the account `settings` block, for both markets. A change
+to `max_open_orders` — by its owner from the bot's `/maxorders`
+(`POST /v1/telegram/{id}/settings/max-open-orders`) or by an admin changing the
+broker-wide default (`POST /admin/settings/max-open-orders`) — publishes a
+`WORKER_SETTINGS_UPDATE` carrying that account's **resolved** block:
+
+```json
+{
+  "action": "WORKER_SETTINGS_UPDATE",
+  "account_id": "FOREX-MT5-12345678",
+  "timestamp": "2026-06-30T00:05:00+00:00",
+  "settings": { "signal_blocked": false, "max_open_orders": 3 }
+}
+```
+
+The whole block goes out, not just the field that changed: the worker applies it
+through the very same code path as the ACK's `settings`, which reads every
+setting it knows. An account-scoped change pushes to that one account; a change
+to the broker-wide default pushes one message per account, each carrying the
+value *that* account resolves to — so an account with its own cap receives the
+value it already had rather than the new default. Best-effort on the same terms
+as above.
 
 ---
 
@@ -1185,6 +1234,79 @@ On success the broker also **pushes** a targeted `SYSTEM.CRYPTO_LEVERAGE_INIT` t
 
 ---
 
+### GET `/admin/settings/max-open-orders`
+
+Returns the broker-wide `max_open_orders` default — the cap an account inherits when its owner has set none of their own. Requires the `X-API-KEY` header.
+
+```json
+{
+  "setting": "max_open_orders",
+  "value": "5"
+}
+```
+
+`value` is the number the broker actually resolves to, so an unset or unreadable row reads as the built-in default (`5`) rather than an empty string.
+
+---
+
+### POST `/admin/settings/max-open-orders`
+
+Sets that default. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "max_open_orders": 5
+}
+```
+
+`max_open_orders` must be `0` or more (`422` otherwise); `0` disables the cap for every account that inherits it.
+
+This is the default to **inherit**, so it changes nothing for an account whose owner set their own cap with the bot's `/maxorders` — theirs wins until they clear it. On success the broker pushes a `SYSTEM.WORKER_SETTINGS_UPDATE` carrying each account's *resolved* `settings` block, addressed by its `<market>-<gateway>-<account_id>` worker id, so already-running workers apply the new cap immediately instead of at their next handshake. An account with no `gateway` recorded yet cannot be addressed and is skipped (and logged) — it reads the value from its first handshake, which is also what records the gateway.
+
+---
+
+### GET `/v1/telegram/{telegram_user_id}/settings/max-open-orders`
+
+The cap in force for the caller's **active** account, and where it came from. Requires the `X-API-KEY` header (the bot is the only caller).
+
+```json
+{
+  "max_open_orders": 3,
+  "source": "account",
+  "global_max_open_orders": 5
+}
+```
+
+`source` is `"account"` when the owner set this value and `"global"` when it is inherited — the same number means two different things, and only the first is theirs to clear. `404` when the Telegram user has no linked account.
+
+---
+
+### POST `/v1/telegram/{telegram_user_id}/settings/max-open-orders`
+
+Sets the owner's own cap for that account. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "max_open_orders": 3
+}
+```
+
+| Value | Effect |
+| ----- | ------ |
+| `3` (any int ≥ 0) | That account is capped at 3 open positions |
+| `0` | The cap is disabled for that account |
+| `null` | The override is cleared — the account goes back to inheriting the broker-wide default |
+
+A negative value is `422`. The response is the same shape as the `GET`, reporting the effective value after the write.
+
+The value is **persisted before it is published**, like `/commands/prevent`: `accounts.settings` is what every handshake replays, so a DB failure fails the call outright (`500`, nothing published), while a failed push still leaves the intent recorded for the worker to pick up when it reconnects. On success the broker pushes the account's resolved `settings` block as a `SYSTEM.WORKER_SETTINGS_UPDATE` so a running worker applies it right away.
+
+---
+
 ### GET `/admin/settings/strategy-magic-map`
 
 Returns the current `strategy_magic_map` broker setting as JSON text (`{}` when unset). Requires the `X-API-KEY` header.
@@ -1291,8 +1413,8 @@ user with no linked account sees `/start` and nothing else — every other
 command, `/help` included, needs an account behind it — and the full menu
 appears the moment they link. Each id in `TELEGRAM_ADMIN_IDS` additionally gets
 the admin menu (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
-`/admin_flat`, `/admin_rotate`, `/admin_settings`, …), which is not gated on
-linking.
+`/admin_flat`, `/admin_rotate`, `/admin_settings`, `/admin_max_orders`, …),
+which is not gated on linking.
 
 **Onboarding / auth flow**
 
@@ -1321,7 +1443,7 @@ drops the caller's own.
 
 For each user, exactly one of their linked accounts is **active** at a time, and
 every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
-`/allow`, `/unlink`) acts on whichever one that is.
+`/allow`, `/maxorders`, `/unlink`) acts on whichever one that is.
 
 - `/link` — add another account (paste a second token). The first account
   linked becomes active automatically; adding more does not change the
@@ -1342,6 +1464,7 @@ repairs the row.
 | `/flat` | `FLAT` | — (an action, not a state) | Close positions for the **active** account. |
 | `/prevent` | `BLOCK_SIGNAL` | `settings.signal_blocked = true` | Block new signals (worker must honor it). |
 | `/allow` | `ALLOW_SIGNAL` | `settings.signal_blocked = false` | Re-enable new signals. |
+| `/maxorders` | — (SYSTEM `WORKER_SETTINGS_UPDATE`, not ADMIN) | `settings.max_open_orders` | Cap on concurrently open positions for the **active** account; `0` = no cap, `-` clears it and inherits the broker-wide default. |
 
 > `BLOCK_SIGNAL` / `ALLOW_SIGNAL` are scoped by `account_id` in the `AdminSignal`
 > payload. Enforcement is the **worker's** responsibility — worker code lives
@@ -1440,7 +1563,7 @@ and local development.
 | `market` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
-| `settings` | JSONB | What the owner set from the bot, e.g. `{"signal_blocked": true}` from `/prevent`. `NOT NULL`, defaults to `{}`; sent to the worker in the `settings` block of every `WORKER_CONNECTED_ACK` — see [Account settings](#account-settings) |
+| `settings` | JSONB | What the owner set from the bot — `{"signal_blocked": true}` from `/prevent`, `{"max_open_orders": 3}` from `/maxorders`. `NOT NULL`, defaults to `{}`; sent to the worker in the `settings` block of every `WORKER_CONNECTED_ACK` — see [Account settings](#account-settings). A key absent (or `null`) means the account inherits the broker-wide default for that setting |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
@@ -1658,6 +1781,7 @@ position on the same symbol.
 | `private_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/private-reply-notify` | Whether the **private** broadcast posts a reply notice under the cycle's message on each new action (see "Broadcast update notices" above). `"0"` silences the reply only — the message itself keeps being edited in place. Bot: `/admin_private_reply_notify [enable\|disable]`. |
 | `public_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/public-reply-notify` | Same as above, for the **public** broadcast. Bot: `/admin_public_reply_notify [enable\|disable]`. |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
+| `max_open_orders` | `"5"` (unset = `5`) | `POST` / `GET /admin/settings/max-open-orders` | Broker-wide cap on concurrently open positions, inherited by every account whose `accounts.settings` carries no `max_open_orders` of its own. `"0"` disables the cap. Resolved per account and sent in the `settings` block of each `WORKER_CONNECTED_ACK`, and pushed live as `SYSTEM.WORKER_SETTINGS_UPDATE`. Bot: `/admin_max_orders`. |
 
 ### `broadcast_messages` table
 

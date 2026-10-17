@@ -28,6 +28,7 @@ USER_COMMANDS = [
   BotCommand(command="flat", description="Close all positions"),
   BotCommand(command="prevent", description="Block new orders"),
   BotCommand(command="allow", description="Allow new orders"),
+  BotCommand(command="maxorders", description="Max open positions"),
   BotCommand(command="myaccounts", description="List linked accounts"),
   BotCommand(command="link", description="Add another account"),
   BotCommand(command="switch", description="Change active account"),
@@ -64,6 +65,9 @@ ADMIN_EXTRA_COMMANDS = [
   ),
   BotCommand(
     command="admin_crypto_leverage", description="[ADMIN] Crypto max leverage"
+  ),
+  BotCommand(
+    command="admin_max_orders", description="[ADMIN] Default max open positions"
   ),
   BotCommand(
     command="admin_public_chats", description="[ADMIN] Public broadcast chats"

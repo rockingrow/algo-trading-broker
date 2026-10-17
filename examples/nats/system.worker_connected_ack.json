@@ -24,7 +24,8 @@
     }
   ],
   "settings": {
-    "signal_blocked": false
+    "signal_blocked": false,
+    "max_open_orders": 5
   },
   "crypto_leverage_init": null
 }

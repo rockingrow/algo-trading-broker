@@ -85,6 +85,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`max_open_orders` — the open-position cap now comes from the broker, and a
+  bot user can set their own.** Two scopes feed one value: the account's own,
+  in the `accounts.settings` JSONB blob, over a broker-wide default in the new
+  `max_open_orders` `BrokerSetting` (unset or unreadable = `5`). The broker
+  resolves the two before it answers a handshake, so the `settings` block of
+  every `WORKER_CONNECTED_ACK` carries a concrete number and a worker never has
+  to know the global default exists. `0` is a value, not an absence: it
+  disables the cap, and only an absent (or `null`) account key means "inherit".
+
+  Both scopes are editable at runtime by whoever owns them. An account's owner
+  uses the bot's new `/maxorders` (`GET`/`POST
+  /v1/telegram/{id}/settings/max-open-orders`), which reports the effective
+  value plus a `source` of `account` or `global` so the bot can tell "3 because
+  I chose it" from "5 because nobody has"; sending `-` clears the override. An
+  admin changes the default with `/admin_max_orders` (`GET`/`POST
+  /admin/settings/max-open-orders`), which leaves every account that set its
+  own cap alone.
+
+  A change does not wait for a reconnect. Both endpoints publish the account's
+  *resolved* block on the new SYSTEM `WORKER_SETTINGS_UPDATE` action — the same
+  block, values and worker-side code path as the ACK's, so the live push and the
+  next handshake cannot disagree. The admin endpoint sends one message per
+  account, each carrying the value *that* account resolves to. Best-effort on
+  the terms the crypto push already set: the stored value is the contract, an
+  account with no `gateway` recorded yet has no worker id to address, and a
+  publish failure is logged rather than failing the command — it is persisted
+  before it is published, like `/prevent`, so a DB failure is what fails the
+  call.
+
+  Resolution lives in one place, `broker/services/account_settings_service.py`,
+  which both the handshake and the live push go through. The broker-wide read is
+  cached on the same short TTL as the other broker-wide settings, since every
+  handshake needs it and a reconnect storm would otherwise be one query per
+  worker for a value identical to all of them; the per-account row stays
+  uncached, as before.
+
+  **Worker side (`algo-trading-worker`):** the matching release drops
+  `MAX_OPEN_ORDERS` from `.env` entirely and enforces what the broker sends,
+  falling back to its own default of `5` only when the broker sends nothing.
+  No migration — `accounts.settings` is a blob and `broker_settings` is a
+  key/value table. New examples `examples/nats/system.worker_settings_update.json`
+  and the updated `system.worker_connected_ack*.json`; Bruno requests under
+  `bruno/admin/Settings/` and `bruno/telegram/user/`.
+
 - **`make status` — every link the broker depends on, on one screen.** Prints
   the stack's containers (and the tailnet peers when `TAILSCALE_ENABLED` is
   on), then runs the new `python -m broker.status` inside the broker

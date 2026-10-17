@@ -37,6 +37,17 @@ STRATEGY_MAGIC_MAP_KEY = "strategy_magic_map"
 MAX_RETRY_TIMEOUT_KEY = "max_retry_timeout"
 DEFAULT_MAX_RETRY_TIMEOUT_SECONDS = 60
 
+# broker_settings key holding the account-wide cap on concurrently open
+# positions a worker may hold, as decimal text. It is the *global* default:
+# an account whose own ``accounts.settings`` carries no ``max_open_orders``
+# inherits this value, and an unset/invalid row here falls back to
+# DEFAULT_MAX_OPEN_ORDERS. Resolved per worker and sent in the ``settings``
+# block of its WORKER_CONNECTED_ACK, which is what makes the broker — not the
+# worker's own .env — the source of truth for the cap. Editable from the admin
+# API (POST /admin/settings/max-open-orders) and the bot's /admin_max_orders.
+MAX_OPEN_ORDERS_KEY = "max_open_orders"
+DEFAULT_MAX_OPEN_ORDERS = 5
+
 # ── accounts.settings keys ────────────────────────────────────────────────
 # Keys inside the per-account ``accounts.settings`` JSONB blob — a different
 # scope from everything above, which are broker-wide ``broker_settings`` rows.
@@ -47,3 +58,10 @@ DEFAULT_MAX_RETRY_TIMEOUT_SECONDS = 60
 # Written by POST /v1/telegram/{id}/commands/prevent — /prevent stores True,
 # /allow stores False — alongside the BLOCK_SIGNAL/ALLOW_SIGNAL admin push.
 ACCOUNT_SETTING_SIGNAL_BLOCKED = "signal_blocked"
+
+# Written by POST /v1/telegram/{id}/settings/max-open-orders (bot
+# /maxorders): the owner's own cap on concurrently open positions for this
+# account. Absent from the blob means "not set on this account" — the broker
+# resolves the worker's value from MAX_OPEN_ORDERS_KEY instead, which is why
+# the field is nullable where every other account setting has a plain default.
+ACCOUNT_SETTING_MAX_OPEN_ORDERS = "max_open_orders"

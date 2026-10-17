@@ -51,6 +51,12 @@ class SystemActionEnum(str, Enum):
   # inside WORKER_CONNECTED_ACK instead.
   CRYPTO_LEVERAGE_INIT = "CRYPTO_LEVERAGE_INIT"
 
+  # Outgoing (broker → worker): pushed on its own when an owner changes an
+  # account setting from the bot (or an admin changes the global default) while
+  # the worker is connected. The connect-time copy rides inside the
+  # WORKER_CONNECTED_ACK's ``settings`` block instead.
+  WORKER_SETTINGS_UPDATE = "WORKER_SETTINGS_UPDATE"
+
   # Outgoing reply (broker → worker): the one and only answer to a
   # WORKER_CONNECTED handshake, carrying the worker's entire initial
   # configuration (see :class:`SystemWorkerConnectedAck`).
@@ -251,6 +257,44 @@ class SystemCryptoLeverageInitSignal(SystemSignal):
   default_leverage: Optional[int] = None
 
 
+class SystemWorkerSettingsUpdateSignal(SystemSignal):
+  """Outbound WORKER_SETTINGS_UPDATE signal pushing one or more account settings
+  to a worker that is already connected.
+
+  Carries the same :class:`~broker.schemas.account_schema.AccountSettings` block
+  as the WORKER_CONNECTED_ACK, with every value already resolved (an account
+  that set no ``max_open_orders`` of its own gets the global default filled in),
+  so the worker applies it through exactly the code path it uses on connect — no
+  second shape to parse, no second set of fallbacks.
+
+  The push is a convenience, not the contract: ``accounts.settings`` and the
+  global BrokerSetting remain the source of truth, and a worker that was offline
+  for the change picks the new value up in its next handshake. That is why a
+  failed publish is logged rather than failing the command that caused it.
+  """
+
+  model_config = ConfigDict(
+    use_enum_values=True,
+    json_schema_extra={
+      "example": {
+        "action": "WORKER_SETTINGS_UPDATE",
+        "account_id": "FOREX-MT5-12345678",
+        "timestamp": "2026-06-30T00:00:00+00:00",
+        "settings": {"signal_blocked": False, "max_open_orders": 5},
+      }
+    },
+  )
+
+  action: SystemActionEnum = SystemActionEnum.WORKER_SETTINGS_UPDATE
+  settings: AccountSettings = Field(
+    ...,
+    description=(
+      "The account's settings with every value resolved, same block as the "
+      "WORKER_CONNECTED_ACK carries."
+    ),
+  )
+
+
 class SystemWorkerConnectedSignal(SystemSignal):
   """Inbound WORKER_CONNECTED event a worker publishes on connect (worker → broker).
 
@@ -307,10 +351,14 @@ class SystemWorkerConnectedAck(SystemSignal):
     and de-duplicate by ``signal_id``. Always present; ``[]`` means nothing to
     replay.
   * ``settings`` — the worker's own ``accounts.settings`` blob: what its owner
-    set from the bot (e.g. ``signal_blocked`` via /prevent). Always present and
-    always complete — an account that has never run a command gets the schema
-    defaults — so a worker starting up, or reconnecting after being offline,
-    applies the owner's current state instead of its own defaults.
+    set from the bot (``signal_blocked`` via /prevent, ``max_open_orders`` via
+    /maxorders). Always present and always complete — an account that has never
+    run a command gets the schema defaults — so a worker starting up, or
+    reconnecting after being offline, applies the owner's current state instead
+    of its own defaults. ``max_open_orders`` is always a concrete number here:
+    an account that set no cap of its own has the global ``max_open_orders``
+    BrokerSetting resolved into it before the reply is built, so the worker
+    never has to know a global default exists.
   * ``crypto_leverage_init`` — allowed symbols + default leverage, **only** for
     a crypto worker; ``None`` for every other market.
 
@@ -349,7 +397,7 @@ class SystemWorkerConnectedAck(SystemSignal):
             "use_equity_sizing": True,
           }
         ],
-        "settings": {"signal_blocked": False},
+        "settings": {"signal_blocked": False, "max_open_orders": 5},
         "crypto_leverage_init": None,
       }
     },
@@ -373,9 +421,11 @@ class SystemWorkerConnectedAck(SystemSignal):
   settings: AccountSettings = Field(
     default_factory=AccountSettings,
     description=(
-      "The worker's per-account settings, as set from the bot (e.g. "
-      "``signal_blocked`` from /prevent). Always complete: an account that "
-      "has never run a command gets the defaults."
+      "The worker's per-account settings, as set from the bot "
+      "(``signal_blocked`` from /prevent, ``max_open_orders`` from "
+      "/maxorders). Always complete: an account that has never run a command "
+      "gets the defaults, and ``max_open_orders`` is resolved against the "
+      "global setting so it is never null here."
     ),
   )
   crypto_leverage_init: Optional[CryptoLeverageConfig] = Field(
