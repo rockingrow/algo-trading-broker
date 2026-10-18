@@ -18,8 +18,10 @@ worker go through:
 * the live ``WORKER_SETTINGS_UPDATE`` push, so an owner changing a value from the
   bot does not have to wait for the worker to reconnect.
 
-Both call the same :func:`resolve_account_settings`, so the live push and the
-next handshake can never disagree about what the account's cap is.
+Both read the row and the global default, then resolve them through the same
+:func:`resolve_account_settings`, so the live push and the next handshake agree
+about what the account's cap is. That only holds while neither side serves the
+global default from a cache — see ``SystemEventConsumer._get_global_max_open_orders``.
 
 Every read here is best-effort by design: a missing or hand-corrupted setting
 falls back to the documented default rather than raising, because the
@@ -36,7 +38,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from broker.constants import DEFAULT_MAX_OPEN_ORDERS, MAX_OPEN_ORDERS_KEY
-from broker.interfaces import AccountRepository, SettingRepository, SignalPublisher
+from broker.interfaces import SignalPublisher
 from broker.logger import get_logger
 from broker.schemas.account_schema import (
   AccountSettings,
@@ -96,12 +98,20 @@ def resolve_account_settings(
 def parse_account_settings(raw: object, account_id: str) -> AccountSettings:
   """Shape an ``accounts.settings`` blob into the worker-facing settings block.
 
-  Anything unusable — a row that predates the column, a hand-edited value of
-  the wrong type, a key whose value doesn't fit its field — falls back to the
-  schema defaults rather than raising: a bad blob must not cost the worker its
-  whole configuration, and "no settings" is exactly what the defaults mean.
-  Unknown keys are dropped by the model itself (``extra="ignore"``); they stay
-  in the row, since writes merge rather than replace.
+  Validated **one field at a time**, so a bad value costs only its own setting.
+  That matters because these fields are independent live-trading state: parsing
+  the blob as one unit means a hand-edited ``max_open_orders`` of ``"garbage"``
+  takes ``signal_blocked`` down with it and the account comes back *unblocked* —
+  on the ACK, and on the live push, which would resume trading on an account an
+  operator had stopped. The worker salvages the same block per field for the
+  same reason (``_salvage_settings`` in its ``system_schema``); this is the
+  broker half of that contract.
+
+  A field that cannot be parsed falls back to its schema default rather than
+  raising: a bad blob must not cost the worker its whole configuration, and "no
+  settings" is exactly what the defaults mean. Unknown keys are dropped
+  (``extra="ignore"``); they stay in the row, since writes merge rather than
+  replace.
 
   The result is *unresolved*: ``max_open_orders`` is still ``None`` for an
   account that set none of its own. Pass it through
@@ -115,63 +125,33 @@ def parse_account_settings(raw: object, account_id: str) -> AccountSettings:
         type(raw).__name__,
       )
     return AccountSettings()
-  try:
-    return AccountSettings(**raw)
-  except ValidationError as exc:
-    log.error(
-      "accounts.settings for account_id=%s is invalid: %s | raw=%r — using defaults",
-      account_id,
-      exc,
-      raw,
-    )
-    return AccountSettings()
 
+  known = AccountSettings.model_fields
+  kept: dict[str, object] = {}
+  for key, value in raw.items():
+    name = str(key)
+    if name not in known:
+      # Dropped silently: a key written by a newer broker is expected, not a
+      # fault, and it stays in the row for that version to keep reading.
+      continue
+    try:
+      # Through the model itself, not the bare annotation: a field's own
+      # constraints live on the field (``max_open_orders`` is ``ge=0``), so an
+      # annotation-only check would accept a value the construction below then
+      # rejects — which is the all-or-nothing failure this exists to prevent.
+      AccountSettings(**{name: value})
+    except ValidationError as exc:
+      log.error(
+        "accounts.settings[%r] for account_id=%s is invalid: %s — using its default",
+        name,
+        account_id,
+        exc,
+      )
+      continue
+    kept[name] = value
 
-async def load_resolved_account_settings(
-  *,
-  account_repo: AccountRepository,
-  setting_repo: SettingRepository,
-  account_id: str,
-  market: MarketTypeEnum,
-  gateway: str,
-) -> AccountSettings:
-  """Read the account's row and the global defaults, and resolve them into the
-  block a worker runs on.
-
-  Used by the live push, where there is no handshake to piggyback on. A failed
-  read of either scope falls back to the defaults and logs: pushing the default
-  cap is wrong by at most one setting, while raising would turn a bot command
-  the owner already saw succeed into a 500.
-  """
-  try:
-    raw = await account_repo.get_settings(
-      account_id=account_id, market=market, gateway=gateway
-    )
-  except Exception as exc:
-    log.exception(
-      "accounts.settings lookup failed account_id=%s: %s — using defaults",
-      account_id,
-      exc,
-    )
-    raw = None
-
-  settings = parse_account_settings(raw, account_id)
-
-  try:
-    global_raw = await setting_repo.get(MAX_OPEN_ORDERS_KEY)
-  except Exception as exc:
-    log.exception(
-      "%s lookup failed account_id=%s: %s — using default %d",
-      MAX_OPEN_ORDERS_KEY,
-      account_id,
-      exc,
-      DEFAULT_MAX_OPEN_ORDERS,
-    )
-    global_raw = None
-
-  return resolve_account_settings(
-    settings, global_max_open_orders=parse_global_max_open_orders(global_raw)
-  )
+  # Cannot raise: every key left has already validated on its own.
+  return AccountSettings(**kept)
 
 
 async def push_worker_settings_update(

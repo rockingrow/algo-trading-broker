@@ -308,11 +308,6 @@ class SystemEventConsumer:
     # as the crypto settings to absorb reconnect-storm bursts.
     self._magic_map_cache: dict[str, int] | None = None
     self._magic_map_cached_at: float = 0.0
-    # Same reasoning for the broker-wide max_open_orders default: read on every
-    # handshake (both markets), identical for every worker, so it is cached on
-    # the same TTL rather than re-read once per reconnecting worker.
-    self._max_open_orders_cache: int | None = None
-    self._max_open_orders_cached_at: float = 0.0
 
   async def start(self) -> None:
     """Subscribe to the SYSTEM subject using the shared NATS connection."""
@@ -452,8 +447,8 @@ class SystemEventConsumer:
     deliberately *not* cached like the broker-wide settings: this one is per
     account, so a cache would only ever help a worker that reconnects twice in
     a row, and would be worth a stale block the moment a user runs a command
-    mid-storm. The global ``max_open_orders`` it resolves against *is* cached,
-    because that one read is identical for every worker in a reconnect storm.
+    mid-storm. The global ``max_open_orders`` it resolves against is uncached
+    for the same reason — see :meth:`_get_global_max_open_orders`.
 
     Not cached also means not fatal: a failed read logs and hands the worker
     the schema defaults, same as an account that has never run a command — then
@@ -479,29 +474,20 @@ class SystemEventConsumer:
     )
 
   async def _get_global_max_open_orders(self) -> int:
-    """Read the broker-wide ``max_open_orders`` default, reusing a cached read
-    for up to ``CRYPTO_SETTINGS_CACHE_TTL_SECONDS`` (shared with the other
-    broker-wide reads).
+    """Read the broker-wide ``max_open_orders`` default — the cap an account
+    that set none of its own inherits.
 
-    Every handshake needs it — it is what an account that set no cap of its own
-    inherits — so a reconnect storm would otherwise be one DB round trip per
-    worker for a value that is the same for all of them. Both hits and misses
-    are cached; worst case an admin who just changed the default waits up to
-    the TTL for it to reach the next handshake, and already-connected workers
-    get the live ``WORKER_SETTINGS_UPDATE`` push in the meantime.
+    Deliberately **not** cached, unlike the crypto settings and the magic map.
+    The ACK is the *durable* path: whatever a worker is told here is what it
+    runs on until it reconnects, so a cached read served inside its TTL does
+    not cost an admin "up to the TTL" — it hands a reconnecting worker the old
+    cap and leaves it there indefinitely, silently undoing the change for that
+    one worker. That is the same argument that keeps the per-account
+    ``settings`` read uncached, and it outweighs one ``SELECT`` per handshake:
+    the cost is bounded by reconnects, not by signal traffic, and a reconnect
+    storm already does one per-account read per worker anyway.
     """
-    now = time.monotonic()
-    if (
-      self._max_open_orders_cache is not None
-      and now - self._max_open_orders_cached_at < CRYPTO_SETTINGS_CACHE_TTL_SECONDS
-    ):
-      return self._max_open_orders_cache
-
-    self._max_open_orders_cache = parse_global_max_open_orders(
-      await self._settings.get(MAX_OPEN_ORDERS_KEY)
-    )
-    self._max_open_orders_cached_at = now
-    return self._max_open_orders_cache
+    return parse_global_max_open_orders(await self._settings.get(MAX_OPEN_ORDERS_KEY))
 
   async def _build_strategy_magic_map(self, strategies: list[str]) -> dict[str, int]:
     """Return the strategy → magic-number map filtered to *strategies*.

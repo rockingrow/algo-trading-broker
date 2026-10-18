@@ -115,11 +115,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call.
 
   Resolution lives in one place, `broker/services/account_settings_service.py`,
-  which both the handshake and the live push go through. The broker-wide read is
-  cached on the same short TTL as the other broker-wide settings, since every
-  handshake needs it and a reconnect storm would otherwise be one query per
-  worker for a value identical to all of them; the per-account row stays
-  uncached, as before.
+  which both the handshake and the live push go through. Neither the
+  per-account row nor the broker-wide default is cached: the ACK is the
+  *durable* path, so a cached read served inside a TTL would not cost an admin
+  "up to the TTL" — it would hand a reconnecting worker the old cap and leave
+  it there until that worker reconnected again, silently undoing the change for
+  that one worker.
+
+  `accounts.settings` is parsed **one field at a time**, mirroring the
+  per-field salvage the worker already does on the same block. Parsing it as a
+  unit meant a single hand-edited value took the whole blob down to its
+  defaults — so a `max_open_orders` of `"garbage"` turned a *blocked* account
+  into an unblocked one, on the ACK and on the live push, resuming trading on
+  an account an operator had stopped. Each field now falls back to its own
+  default and the rest survive.
 
   **Worker side (`algo-trading-worker`):** the matching release drops
   `MAX_OPEN_ORDERS` from `.env` entirely and enforces what the broker sends,
