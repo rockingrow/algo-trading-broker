@@ -131,6 +131,23 @@ class CryptoMaxLeverageRequest(BaseModel):
   )
 
 
+class MaxOpenOrdersRequest(BaseModel):
+  """Request body for POST /settings/max-open-orders.
+
+  ``ge=0`` rather than ``gt=0``: ``0`` is the documented way to disable the cap
+  on a worker, not an invalid value.
+  """
+
+  max_open_orders: int = Field(
+    ...,
+    ge=0,
+    description=(
+      "Broker-wide default cap on concurrently open positions, inherited by "
+      "every account that has not set its own. 0 disables the cap."
+    ),
+  )
+
+
 class StrategyMagicMapRequest(BaseModel):
   """Request body for POST /settings/strategy-magic-map.
 

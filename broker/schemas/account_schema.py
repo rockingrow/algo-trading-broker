@@ -69,6 +69,14 @@ class AccountSettings(BaseModel):
   ``settings.signal_blocked`` unconditionally, including for an account that
   has never run a command (``{}`` in the DB).
 
+  ``max_open_orders`` is the exception to "a default per field": its default is
+  ``None``, meaning *this account has set no cap of its own*. The broker fills
+  it in from the global ``max_open_orders`` BrokerSetting before the block
+  leaves for a worker (see ``SystemEventConsumer._build_account_settings``), so
+  what a worker receives is still always a concrete number — the ``None`` only
+  ever exists on the persisted row, where it is what makes the global default
+  changeable for every account that never overrode it.
+
   Unknown keys read back from the row are dropped by pydantic's default
   ``extra="ignore"`` — a worker only ever receives keys this broker version
   knows. They are not *erased*, though: writes go through a JSONB merge
@@ -81,7 +89,7 @@ class AccountSettings(BaseModel):
   """
 
   model_config = ConfigDict(
-    json_schema_extra={"example": {"signal_blocked": False}},
+    json_schema_extra={"example": {"signal_blocked": False, "max_open_orders": 5}},
   )
 
   # Written by POST /v1/telegram/{id}/commands/prevent: /prevent sets it True
@@ -91,6 +99,20 @@ class AccountSettings(BaseModel):
     description=(
       "True when the owner has blocked new entries for this account "
       "(bot /prevent); False after /allow."
+    ),
+  )
+
+  # Written by POST /v1/telegram/{id}/settings/max-open-orders (bot
+  # /maxorders). ``ge=0`` because 0 is a meaningful value on the worker — it
+  # disables the cap entirely — rather than a rejected one.
+  max_open_orders: Optional[int] = Field(
+    default=None,
+    ge=0,
+    description=(
+      "Cap on concurrently open positions for this account (bot /maxorders). "
+      "None on the persisted row means the account inherits the global "
+      "max_open_orders setting; the broker resolves it to a number before "
+      "sending the block to a worker. 0 disables the cap."
     ),
   )
 

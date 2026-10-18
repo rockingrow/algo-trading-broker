@@ -120,6 +120,7 @@ class BrokerClientUser(BrokerClient):
     POSITIONS = "{telegram_id}/positions"
     FLAT = "{telegram_id}/commands/flat"
     PREVENT = "{telegram_id}/commands/prevent"
+    MAX_OPEN_ORDERS = "{telegram_id}/settings/max-open-orders"
     UNLINK = "{telegram_id}/unlink"
     BROADCAST = "{telegram_id}/broadcast"
     BROADCAST_SUBSCRIBE = "{telegram_id}/broadcast/subscribe"
@@ -268,6 +269,34 @@ class BrokerClientUser(BrokerClient):
       )
     )
 
+  async def get_max_open_orders(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """The open-position cap in force for the user's active account.
+
+    Carries ``source`` ("account" or "global") and ``global_max_open_orders``
+    alongside the effective value, so the bot can say whether the number is the
+    user's own or inherited without a second call.
+    """
+    return self._json_or_none(
+      await self._request(
+        "GET", self._path(self.ENDPOINTS.MAX_OPEN_ORDERS, telegram_id=telegram_user_id)
+      )
+    )
+
+  async def set_max_open_orders(
+    self, telegram_user_id: int, max_open_orders: Optional[int]
+  ) -> Optional[dict[str, Any]]:
+    """Set the user's own cap, or clear it with ``None`` to inherit the global
+    default. ``0`` is a real value — it turns the cap off."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.MAX_OPEN_ORDERS, telegram_id=telegram_user_id),
+        json={"max_open_orders": max_open_orders},
+      )
+    )
+
   async def unlink(self, telegram_user_id: int) -> bool:
     """Clear the user's account binding. Returns True on success."""
     resp = await self._request(
@@ -332,6 +361,7 @@ class BrokerClientAdmin(BrokerClient):
     STRATEGY_MAGIC_MAP = "settings/strategy-magic-map"
     CRYPTO_ALLOWED_SYMBOL = "settings/crypto-allowed-symbol"
     CRYPTO_MAX_LEVERAGE = "settings/crypto-max-leverage"
+    MAX_OPEN_ORDERS = "settings/max-open-orders"
     PUBLIC_BROADCAST_CHAT_IDS = "settings/public-broadcast-chat-ids"
     PRIVATE_REPLY_NOTIFY = "settings/private-reply-notify"
     PUBLIC_REPLY_NOTIFY = "settings/public-reply-notify"
@@ -509,6 +539,24 @@ class BrokerClientAdmin(BrokerClient):
         "POST",
         self._path(self.ENDPOINTS.CRYPTO_MAX_LEVERAGE),
         json={"default_leverage": default_leverage},
+      )
+    )
+
+  async def get_max_open_orders(self) -> Optional[dict[str, Any]]:
+    """Current broker-wide ``max_open_orders`` default (numeric string; the
+    broker reports the fallback rather than an empty value when unset)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.MAX_OPEN_ORDERS))
+    )
+
+  async def set_max_open_orders(self, max_open_orders: int) -> Optional[dict[str, Any]]:
+    """Set the broker-wide ``max_open_orders`` default (0 or more, 0 disables
+    the cap) and push the resolved settings to every worker."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.MAX_OPEN_ORDERS),
+        json={"max_open_orders": max_open_orders},
       )
     )
 

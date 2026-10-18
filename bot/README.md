@@ -50,18 +50,20 @@ refreshed.
 ### Enduser commands
 
 `/start` (link), `/status`, `/trades`, `/flat`, `/prevent`, `/allow`,
-`/myaccounts`, `/link`, `/switch`, `/unlink`, `/subscribe`, `/unsubscribe`,
-`/help` — all but `/start` require a linked account, and are hidden until
-there is one.
+`/maxorders`, `/myaccounts`, `/link`, `/switch`, `/unlink`, `/subscribe`,
+`/unsubscribe`, `/help` — all but `/start` require a linked account, and are
+hidden until there is one.
 
-`FLAT`/`PREVENT`/`ALLOW` each require a confirmation tap.
+`FLAT`/`PREVENT`/`ALLOW` each require a confirmation tap. `/maxorders` is a
+short prompt-and-reply flow instead — it needs a number, not a yes/no, and it
+places no orders of its own.
 
 `/start` also takes the link code as a deep-link payload (`/start <code>`) and
 links the account immediately, skipping the "paste your UUID" step. That is what
 an `/admin_invite_url` link produces — see [Invite links](#invite-links).
 
 One linked account is **active** at a time; `/status`, `/trades`, `/flat`,
-`/prevent`, `/allow` and `/unlink` all act on it. `/myaccounts` lists the linked
+`/prevent`, `/allow`, `/maxorders` and `/unlink` all act on it. `/myaccounts` lists the linked
 accounts, `/link` adds one, and `/switch` lists them with a button per account
 to change the active one.
 
@@ -70,6 +72,34 @@ currently running (``is_running``) on the active account — and, whenever
 that count is above zero, the same trade table `/trades` renders, filtered
 to just those open positions. Backed by `GET
 /v1/telegram/{telegram_user_id}/positions`.
+
+#### `/maxorders` — the account's open-position cap
+
+Shows how many positions the active account may hold at once, says whether that
+number is the user's own or the broker-wide default, and reads a new one:
+
+| Reply | Effect |
+| ----- | ------ |
+| a number | That becomes the account's own cap |
+| `0` | The cap is disabled for that account |
+| `-` | The user's own value is cleared — the account goes back to inheriting the broker-wide default |
+| `/cancel` | Nothing changes |
+
+The prompt names the account it is about, and that account is pinned in the FSM
+data and re-checked before the write: the reply is a bare number, so a `/switch`
+in between would otherwise send it to an account whose cap the user never saw.
+When they no longer match, nothing is written and the bot says so.
+
+The bot checks the input is a non-negative whole number before calling the
+broker, so an obvious typo costs no round trip; the broker's own `ge=0` check
+stays the source of truth. Backed by `GET` + `POST
+/v1/telegram/{telegram_user_id}/settings/max-open-orders`, which reports the
+effective value together with a `source` of `account` or `global` — the same
+number means two different things, and only one of them is the user's to clear.
+An admin sets the inherited default with `/admin_max_orders`.
+
+Changing it does not wait for the worker to restart: the broker pushes the
+account's settings to the running worker and replays them on every reconnect.
 
 ### Live trade cards
 
@@ -123,6 +153,7 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_linkaccount` | Bind a Telegram user to an account directly (pick account → type user id) | `POST /admin/accounts/{uuid}/link-telegram` |
 | `/admin_invite_url [code]` | One-tap invite link for an account (picker if no arg) | `GET /v1/accounts` (picker only) |
 | `/admin_settings` | View + toggle block/silent/include-raw | `GET` + `POST /admin/settings/*` |
+| `/admin_max_orders` | View + set the **default** open-position cap every account inherits unless its owner set their own with `/maxorders` (`0` = no cap) | `GET` + `POST /admin/settings/max-open-orders` |
 | `/admin_magicmap [json]` | View + replace the strategy → magic-number map (paste JSON, or pass it inline) | `GET` + `POST /admin/settings/strategy-magic-map` |
 | `/admin_public_chats` | View + replace the chats the **public** signal broadcast goes to (comma-separated; `-` turns it off) | `GET` + `POST /admin/settings/public-broadcast-chat-ids` |
 | `/admin_private_reply_notify [enable\|disable]` | View, or set whether the **private** broadcast posts a reply notice on each new action (default enabled) | `GET` + `POST /admin/settings/private-reply-notify` |

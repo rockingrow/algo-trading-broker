@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -69,6 +69,49 @@ class PreventCommandRequest(BaseModel):
 
   enabled: bool = Field(
     True, description="True publishes BLOCK_SIGNAL, False publishes ALLOW_SIGNAL."
+  )
+
+
+class MaxOpenOrdersRequest(BaseModel):
+  """Set the caller's own cap on concurrently open positions.
+
+  ``ge=0`` rather than ``gt=0``: ``0`` is the documented way to turn the cap
+  off on the worker, not an invalid value. ``null`` clears the account's own
+  setting so it goes back to inheriting the broker-wide default — a distinct
+  intent from "no cap", which is why the field is nullable and required.
+  """
+
+  max_open_orders: Optional[int] = Field(
+    ...,
+    ge=0,
+    description=(
+      "Maximum concurrently open positions for this account. 0 disables the "
+      "cap; null clears the override and inherits the global default."
+    ),
+  )
+
+
+class MaxOpenOrdersResponse(BaseModel):
+  """The cap in force for the caller's account after a read or a write.
+
+  ``max_open_orders`` is the *effective* value the account's worker runs on, so
+  a caller can render it without knowing the two scopes exist. ``source`` says
+  which of them it came from, and ``global_max_open_orders`` is the value the
+  account would fall back to — together they let the bot show "5 (global
+  default)" versus "3 (yours)" and offer to clear an override.
+  """
+
+  max_open_orders: int = Field(
+    ..., description="Effective cap for this account's worker."
+  )
+  source: Literal["account", "global"] = Field(
+    ...,
+    description=(
+      "'account' when the owner set this value, 'global' when it is inherited."
+    ),
+  )
+  global_max_open_orders: int = Field(
+    ..., description="The broker-wide default this account falls back to."
   )
 
 

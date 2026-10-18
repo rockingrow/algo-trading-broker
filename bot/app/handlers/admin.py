@@ -54,6 +54,7 @@ from app.services.menu import CommandMenu
 from app.states import (
   AdminCryptoAllowedSymbol,
   AdminCryptoMaxLeverage,
+  AdminMaxOpenOrders,
   AdminLinkAccount,
   AdminPublicBroadcastChats,
   CreateAccount,
@@ -1005,6 +1006,83 @@ async def receive_admin_crypto_leverage(
 async def prompt_admin_crypto_leverage_text(message: Message) -> None:
   await message.answer(
     f"{emojis.WARNING} Please send the leverage as a numeric text value."
+  )
+
+
+# ── /admin_max_orders ───────────────────────────────────────────────
+# Show the broker-wide max_open_orders default and prompt for a new one. This is
+# the value an account *inherits*: a user who set their own cap with /maxorders
+# keeps it, so the confirmation says so rather than implying a system-wide
+# change. 0 is valid here — it disables the cap for every inheriting account.
+
+
+@router.message(Command("admin_max_orders", "max_orders"))
+async def cmd_admin_max_orders(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  await state.clear()
+  current = await broker_admin.get_max_open_orders()
+  if current is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch the current default.")
+    return
+  await state.set_state(AdminMaxOpenOrders.waiting_for_value)
+  value = html.escape(str(current.get("value") or ""))
+  await message.answer(
+    f"{emojis.GEAR} <b>Default max open positions</b>\n\n"
+    f"Current: <code>{value}</code>\n\n"
+    "Every account that has not set its own limit with /maxorders inherits "
+    "this one; the ones that did keep theirs.\n\n"
+    "Send the new default as a whole number (<code>0</code> = no limit). "
+    "Send /cancel to abort."
+  )
+
+
+@router.message(AdminMaxOpenOrders.waiting_for_value, Command("cancel"))
+async def cancel_admin_max_orders(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await message.answer("Cancelled.")
+
+
+@router.message(AdminMaxOpenOrders.waiting_for_value, F.text & ~F.text.startswith("/"))
+async def receive_admin_max_orders(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  try:
+    max_open_orders = int(raw)
+  except ValueError:
+    await message.answer(
+      f"{emojis.WARNING} Please send a whole number (e.g. <code>5</code>, or "
+      "<code>0</code> for no limit). Send /cancel to abort."
+    )
+    return
+  if max_open_orders < 0:
+    await message.answer(
+      f"{emojis.WARNING} The default cannot be negative. Send <code>0</code> to "
+      "disable the cap. Send /cancel to abort."
+    )
+    return
+
+  result = await broker_admin.set_max_open_orders(max_open_orders)
+  await state.clear()
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update the default. Run /admin_max_orders to retry."
+    )
+    return
+  value = html.escape(str(result.get("value") or ""))
+  await message.answer(
+    f"{emojis.CHECK} <b>Default max open positions updated</b>\n"
+    f"New value: <code>{value}</code>\n\n"
+    "<i>Pushed to every connected worker; accounts with their own limit are "
+    "unaffected.</i>"
+  )
+
+
+@router.message(AdminMaxOpenOrders.waiting_for_value, ~F.text)
+async def prompt_admin_max_orders_text(message: Message) -> None:
+  await message.answer(
+    f"{emojis.WARNING} Please send the default as a numeric text value."
   )
 
 

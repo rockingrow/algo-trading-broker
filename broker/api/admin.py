@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
+  MAX_OPEN_ORDERS_KEY,
   NOTIFICATION_INCLUDE_SIGNAL_RAW,
   NOTIFICATION_TIMEZONE_KEY,
   PRIVATE_REPLY_NOTIFY_KEY,
@@ -48,6 +49,7 @@ from broker.schemas.admin_schema import (
   CreateAccountRequest,
   CryptoAllowedSymbolRequest,
   CryptoMaxLeverageRequest,
+  MaxOpenOrdersRequest,
   NotificationTimezoneRequest,
   PublicBroadcastChatIdsRequest,
   ReplyNotifyRequest,
@@ -60,6 +62,12 @@ from broker.schemas.admin_schema import (
 from broker.schemas.publisher_schema import (
   AdminActionEnum,
   SystemActionEnum,
+)
+from broker.services.account_settings_service import (
+  parse_account_settings,
+  parse_global_max_open_orders,
+  push_worker_settings_update,
+  resolve_account_settings,
 )
 from broker.logger import get_logger
 from broker.openapi import AUTH_RESPONSES
@@ -201,6 +209,47 @@ async def _push_crypto_leverage_init(
       )
     except Exception as exc:
       log.exception("Failed to push CRYPTO_LEVERAGE_INIT to %s: %s", worker_id, exc)
+
+
+async def _push_max_open_orders(
+  publisher: SignalPublisher,
+  setting_repo: SettingRepository,
+  account_repo: AccountRepository,
+) -> None:
+  """Push the resolved settings block to every known worker after the
+  broker-wide ``max_open_orders`` default changed.
+
+  Every account is pushed, not only the ones that inherit the default: each gets
+  its own resolved block, so an account whose owner set their own cap simply
+  receives the value it already had. Filtering those out would mean reasoning
+  about each row twice to save one message on a subject the worker is already
+  subscribed to.
+
+  Best-effort, like the crypto push: the setting is committed and reaches every
+  worker on its next handshake regardless, so a failure is logged rather than
+  surfaced to the admin caller.
+  """
+  global_value = parse_global_max_open_orders(
+    await setting_repo.get(MAX_OPEN_ORDERS_KEY)
+  )
+
+  accounts = await account_repo.get_all()
+  if not accounts:
+    log.info("WORKER_SETTINGS_UPDATE push: no accounts to notify")
+    return
+
+  for account in accounts:
+    resolved = resolve_account_settings(
+      parse_account_settings(account.settings, account.account_id),
+      global_max_open_orders=global_value,
+    )
+    await push_worker_settings_update(
+      publisher,
+      account_id=account.account_id,
+      market=account.market,
+      gateway=account.gateway,
+      settings=resolved,
+    )
 
 
 def get_admin_router() -> APIRouter:
@@ -572,6 +621,66 @@ def get_admin_router() -> APIRouter:
     await _push_crypto_leverage_init(publisher, setting_repo, account_repo)
 
     return SettingValueResponse(setting=CRYPTO_MAX_LEVERAGE_KEY, value=value)
+
+  @router.get(
+    "/settings/max-open-orders",
+    tags=["settings"],
+    summary="Get the broker-wide open-position cap",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_max_open_orders(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Current MAX_OPEN_ORDERS_KEY value, reported as the default it resolves
+    to when unset — an admin reading this wants the cap accounts actually
+    inherit, not an empty string that hides it."""
+    value = parse_global_max_open_orders(await setting_repo.get(MAX_OPEN_ORDERS_KEY))
+    return SettingValueResponse(setting=MAX_OPEN_ORDERS_KEY, value=str(value))
+
+  @router.post(
+    "/settings/max-open-orders",
+    tags=["settings"],
+    summary="Set the broker-wide open-position cap",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_max_open_orders(
+    body: MaxOpenOrdersRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+    publisher: SignalPublisher = Depends(get_publisher),
+    account_repo: AccountRepository = Depends(get_account_repository),
+  ) -> SettingValueResponse:
+    """Set MAX_OPEN_ORDERS_KEY and push the resolved settings block to every
+    worker (they also pick it up on their next connect).
+
+    This is the default an account *inherits*, so it changes nothing for an
+    account whose owner set their own cap from the bot — theirs wins until they
+    clear it. Must be 0 or more, where 0 disables the cap (enforced by
+    MaxOpenOrdersRequest)."""
+    value = str(body.max_open_orders)
+
+    ok = await setting_repo.set(MAX_OPEN_ORDERS_KEY, value)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broker setting",
+      )
+
+    log.info("%s updated -> %s", MAX_OPEN_ORDERS_KEY, value)
+    await notifier.send_message(
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
+      f"Setting: <code>{MAX_OPEN_ORDERS_KEY}</code>\n"
+      f"Max open orders: <b>{value}</b>\n"
+      "Accounts with their own cap are unaffected.\n"
+    )
+
+    await _push_max_open_orders(publisher, setting_repo, account_repo)
+
+    return SettingValueResponse(setting=MAX_OPEN_ORDERS_KEY, value=value)
 
   @router.get(
     "/settings/strategy-magic-map",

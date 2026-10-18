@@ -47,6 +47,21 @@ class AdminCryptoMaxLeverage(StatesGroup):
   waiting_for_leverage = State()
 
 
+class SetMaxOpenOrders(StatesGroup):
+  """User flow: after seeing the cap in force for their active account, type a
+  new one (``0`` disables the cap, ``-`` clears their own and goes back to the
+  broker-wide default)."""
+
+  waiting_for_value = State()
+
+
+class AdminMaxOpenOrders(StatesGroup):
+  """Admin flow: after seeing the broker-wide default cap, type a new one
+  (0 or more; ``0`` disables the cap for every account that inherits it)."""
+
+  waiting_for_value = State()
+
+
 class AdminPublicBroadcastChats(StatesGroup):
   """Admin flow: after seeing the chats the public signal broadcast goes to,
   type a new comma-separated list (or ``-`` to turn the public flow off)."""
