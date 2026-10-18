@@ -128,12 +128,16 @@ class UserMessages:
   )
 
   @staticmethod
-  def format_max_open_orders(state: dict[str, Any]) -> str:
+  def format_max_open_orders(state: dict[str, Any], account_id: Any = None) -> str:
     """The cap in force, where it came from, and how to change it.
 
     ``source`` is spelled out rather than implied by the number: "5" means two
     different things depending on whether the user chose it or inherited it, and
     only one of them is theirs to clear.
+
+    The account is named because the reply that follows is a bare number: the
+    user has to be able to see which account they are about to change, and the
+    handler re-checks that same account before it writes.
     """
     limit = state.get("max_open_orders")
     inherited = state.get("source") != "account"
@@ -143,8 +147,10 @@ class UserMessages:
     )
     lines = [
       f"{emojis.GEAR} <b>Max open positions</b>\n",
-      f"Current: {shown} — {origin}\n",
     ]
+    if account_id is not None:
+      lines.append(f"Account: <code>{_esc(account_id)}</code>\n")
+    lines.append(f"Current: {shown} — {origin}\n")
     if not inherited:
       lines.append(
         f"Default if you clear it: <b>{_esc(state.get('global_max_open_orders'))}</b>\n"

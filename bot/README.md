@@ -85,6 +85,11 @@ number is the user's own or the broker-wide default, and reads a new one:
 | `-` | The user's own value is cleared — the account goes back to inheriting the broker-wide default |
 | `/cancel` | Nothing changes |
 
+The prompt names the account it is about, and that account is pinned in the FSM
+data and re-checked before the write: the reply is a bare number, so a `/switch`
+in between would otherwise send it to an account whose cap the user never saw.
+When they no longer match, nothing is written and the bot says so.
+
 The bot checks the input is a non-negative whole number before calling the
 broker, so an obvious typo costs no round trip; the broker's own `ge=0` check
 stays the source of truth. Backed by `GET` + `POST

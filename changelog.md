@@ -130,6 +130,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an account an operator had stopped. Each field now falls back to its own
   default and the rest survive.
 
+  **⚠️ Rollout step — do this BEFORE deploying.** `max_open_orders` is unset on
+  an existing broker, so it resolves to the default of `5`, while the worker
+  release below stops reading the `MAX_OPEN_ORDERS` line in its `.env`. Those
+  two together change how a running fleet trades: a host bootstrapped with
+  `make init` carries `MAX_OPEN_ORDERS=0` from the old `.env.example`, i.e.
+  **uncapped**, so after the upgrade it would silently start rejecting entries
+  beyond the 5th. Seed the setting with the value the fleet is on today first,
+  and the upgrade is a no-op:
+
+  ```bash
+  # 0 if your workers run uncapped today (the old .env.example default)
+  curl -X POST "$BROKER_URL/admin/settings/max-open-orders" \
+    -H "X-API-KEY: $BROKER_API_KEY" -H 'Content-Type: application/json' \
+    -d '{"max_open_orders": 0}'
+  ```
+
+  Or from the bot: `/admin_max_orders`. Then tighten it deliberately, per
+  account with `/maxorders` or fleet-wide with `/admin_max_orders`. Check what
+  each host is on with `grep MAX_OPEN_ORDERS .env` before you pick the value.
+
   **Worker side (`algo-trading-worker`):** the matching release drops
   `MAX_OPEN_ORDERS` from `.env` entirely and enforces what the broker sends,
   falling back to its own default of `5` only when the broker sends nothing.

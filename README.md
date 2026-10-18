@@ -1263,6 +1263,8 @@ Sets that default. Requires the `X-API-KEY` header.
 
 `max_open_orders` must be `0` or more (`422` otherwise); `0` disables the cap for every account that inherits it.
 
+> **⚠️ Seed this before rolling out the worker release that reads it.** The setting is unset on an existing broker, so it resolves to `5` — while the matching worker release stops reading its own `MAX_OPEN_ORDERS` env var. A worker host bootstrapped with `make init` carries `MAX_OPEN_ORDERS=0` from the old `.env.example`, i.e. **uncapped**, so the upgrade would silently start rejecting its entries beyond the 5th. POST the value the fleet is on today (`0` to stay uncapped) and the upgrade is a no-op; tighten the cap deliberately afterwards.
+
 This is the default to **inherit**, so it changes nothing for an account whose owner set their own cap with the bot's `/maxorders` — theirs wins until they clear it. On success the broker pushes a `SYSTEM.WORKER_SETTINGS_UPDATE` carrying each account's *resolved* `settings` block, addressed by its `<market>-<gateway>-<account_id>` worker id, so already-running workers apply the new cap immediately instead of at their next handshake. An account with no `gateway` recorded yet cannot be addressed and is skipped (and logged) — it reads the value from its first handshake, which is also what records the gateway.
 
 ---
