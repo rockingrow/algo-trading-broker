@@ -24,5 +24,9 @@ RUN uv sync --no-dev
 COPY README.md ./
 COPY app/ app/
 
+# Same reasoning as the broker image: the venv interpreter is the container's
+# main process, with no `uv run` wrapper holding ~30 MB and relaying signals.
+ENV PATH="/app/.venv/bin:${PATH}"
+
 ENTRYPOINT []
-CMD ["uv", "run", "--no-dev", "python", "-m", "app"]
+CMD ["python", "-m", "app"]

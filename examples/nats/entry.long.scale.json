@@ -11,6 +11,7 @@
   "tp1": 2370.0,
   "tp2": 2390.0,
   "risk_percent": 1.0,
+  "use_equity_sizing": true,
   "is_scale_position": true,
   "scale_strategy": "MT5_GOLD_M5_V1",
   "scaling": {

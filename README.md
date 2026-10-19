@@ -1,6 +1,13 @@
 # Algo Trading Broker
 
-A high-performance, decentralized **trading signal broker** built with FastAPI and NATS. It acts as a central hub between TradingView alerts and distributed execution nodes (VPS workers).
+A high-performance, decentralized **trading signal broker** built with FastAPI and NATS. It acts as a central hub between **signal producers** and distributed execution nodes (VPS workers).
+
+Two signal producers feed it today:
+
+- **TradingView** — Pine strategies posting their alert JSON to `POST /secret/webhook`.
+- **[Quant-Trading-Engine (QTE)](https://github.com/rockingrow/quant-trading-engine)** — an event-driven backtest/live engine that emits the *same* `WebhookPayload` shape, either to the same webhook or straight onto the broker's JetStream buffer.
+
+Neither is special-cased: one payload schema, one pipeline, one set of NATS subjects downstream. See [Signal producers](#signal-producers).
 
 ## ⚡ Quick Start
 
@@ -9,6 +16,12 @@ A high-performance, decentralized **trading signal broker** built with FastAPI a
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/)
 - Docker & Docker Compose
+- A [Tailscale](https://tailscale.com/) account — **optional**, off by
+  default. Only needed if you want NATS and Postgres locked to a private
+  tailnet instead of being reachable on every interface, which is recommended
+  for any non-local deployment. Tailscale itself runs as a container of this
+  stack; nothing is installed on the host. See
+  [Securing NATS with Tailscale](#-securing-nats-with-tailscale) below.
 
 ### 2. Installation
 
@@ -20,49 +33,217 @@ cp .env.example .env   # fill in values
 make install-dev
 ```
 
-### 3. Start Infrastructure
+### 3. Run the Broker
+
+The full Docker stack is the only setup that starts Postgres + NATS *and*
+applies pending Alembic migrations for you automatically (see
+[`scripts/docker-entrypoint.sh`](scripts/docker-entrypoint.sh)) — it is the
+most reliable way to run the broker:
 
 ```bash
-# Start PostgreSQL + NATS via Docker
-docker compose up -d postgres nats
+make dev     # full stack via Docker, hot-reload on code change
+# or
+make start   # full stack via Docker, no hot-reload
 ```
 
-### 4. Run Database Migrations
+Running the broker directly on the host (`make run`) is only for fast local
+iteration on broker code — it does **not** start Postgres/NATS or apply
+migrations, so both must already be reachable and migrated first
+(`docker compose up -d postgres nats`, then `make db-upgrade`):
 
 ```bash
-make db-upgrade
+make run     # requires Postgres + NATS already reachable and migrated
 ```
 
-### 5. Run the Broker
+The Telegram bot is a separate optional service under [`bot/`](bot/) with its
+own BotFather token and uv project (`docker compose up -d bot`). It reads the
+same root `.env`. See [`bot/README.md`](bot/README.md) for setup.
 
-```bash
-# Run locally (requires postgres and nats to be reachable)
-make run
+---
 
-# Or run the full stack via Docker with hot-reload
-make dev
+## 🔒 Securing NATS with Tailscale
+
+> **Optional — not a prerequisite.** Everything below is gated behind
+> `TAILSCALE_ENABLED` in `.env`, which defaults to `false`. With it off the
+> stack runs exactly as before Tailscale existed. Turn it on when you want the
+> transport hardening described here; leave it off for local dev, or if you
+> secure NATS some other way (firewall rules, a private network, your own VPN).
+
+With the switch off, `docker-compose.yml` publishes the NATS client, NATS
+monitoring and Postgres ports on every interface of the host (`0.0.0.0`) —
+on a VPS, the public internet — and `NATS_TOKEN` / the Postgres password are
+the only protection. With it on, the stack gets its own node on your
+[Tailscale](https://tailscale.com/) tailnet (a WireGuard mesh VPN) and the
+host ports close to the outside world:
+
+```
+                 tailnet (WireGuard, policy-filtered)
+engine / worker ─────────────► algo-broker:4222 ─┐  `tailscale` container
+operator laptop ─────────────► algo-broker:8222 ─┤  (Tailscale Serve,
+                               algo-broker:5432 ─┤   serve.json, rendered
+                                                 │    from .env)
+                                                 │
+                                   trading_net   ├─► nats:4222 / nats:8222
+                                                 └─► postgres:5432
+
+public internet ──► https://<FQDN>/ ──► broker:80
+                    (Serve HTTPS + Funnel — the only route to the broker's
+                     HTTP API; port 80 itself is on neither the host's
+                     public address nor the tailnet)
+host ports: 127.0.0.1:{NATS_PORT,NATS_MONITOR_PORT,POSTGRES_PORT,WEBHOOK_PORT}
+            — nothing on the VPS' public address at all
 ```
 
-### 6. (Optional) Run the Telegram Bot
+| | `TAILSCALE_ENABLED=false` (default) | `TAILSCALE_ENABLED=true` |
+| --- | --- | --- |
+| `tailscale` container | not pulled, not started | started (profile `tailscale`) |
+| NATS 4222 / 8222 on the host | `0.0.0.0` | `127.0.0.1` |
+| Postgres on the host | `0.0.0.0` | `127.0.0.1` |
+| `WEBHOOK_PORT` on the host | `0.0.0.0` | `127.0.0.1` |
+| TradingView posts to | `http://<host address>:WEBHOOK_PORT/…` | `https://<FQDN>/<prefix>/secret/webhook` (Funnel) |
+| Remote NATS clients connect to | `nats://<host address>:NATS_PORT` | `nats://<TAILSCALE_HOSTNAME>:4222` |
+| Who may connect | anyone holding `NATS_TOKEN` | tailnet members the policy allows, *and* holding `NATS_TOKEN` |
 
-```bash
-docker compose up -d bot
-```
+`make dev` / `make start` / `make stop` read the switch and derive the rest
+(the compose profile and the bind address, `PRIVATE_BIND_ADDRESS`) — there is
+no IP to copy into `.env`, and nothing to install on the host. A bare
+`docker compose up` does not read the switch: it binds `0.0.0.0` and does not
+start the container, so use the `make` targets on a server.
 
-The bot is a separate service under [`bot/`](bot/) with its own BotFather token
-and uv project. It reads the same root `.env`. See
-[`bot/README.md`](bot/README.md) for setup and local development.
+The container runs Tailscale in userspace mode — no `/dev/net/tun`, no
+`NET_ADMIN` — and forwards connections with Tailscale Serve instead of sharing
+its network namespace with NATS, so restarting it only makes remote NATS
+clients reconnect; the broker's own NATS connection is never touched.
+
+### Setup
+
+1. **Tailnet policy.** Paste [`config/tailscale/policy.hujson`](config/tailscale/policy.hujson)
+   into the admin console's [Access controls](https://login.tailscale.com/admin/acls/file)
+   (or push it with `tailscale/gitops-acl-action`). It defines one tag per
+   role — `tag:broker`, `tag:engine`, `tag:ingester`, `tag:worker` — and allows
+   only the NATS connections the pipeline makes:
+
+   | From | To | Port |
+   | --- | --- | --- |
+   | `tag:ingester` | `tag:engine` | 4222 |
+   | `tag:engine`, `tag:worker` | `tag:broker` | 4222 |
+   | admins' own devices | every tagged node | any (monitoring 8222, Postgres 5432, SSH) |
+
+   Everything else is denied, and the file's `tests` block makes the console
+   refuse an edit that would break one of these paths. Enable **MagicDNS**
+   under [DNS](https://login.tailscale.com/admin/dns) so nodes resolve each
+   other by name.
+
+2. **Auth key.** [Settings → Keys](https://login.tailscale.com/admin/settings/keys)
+   → *Generate auth key*: tag it `tag:broker`, pre-approved. A tagged node's
+   key never expires, so the broker does not fall off the tailnet after 180
+   days.
+
+3. **`.env`:**
+
+   ```env
+   TAILSCALE_ENABLED=true
+   TAILSCALE_AUTHKEY=tskey-auth-...
+   TAILSCALE_HOSTNAME=algo-broker      # the MagicDNS name other servers use
+   TAILSCALE_DNS_NAME=rudd-komodo.ts.net   # the tailnet's domain (admin console → DNS)
+   ```
+
+   The two names together are this node's FQDN, which Tailscale Serve needs to
+   bind its HTTPS handler. `make start`/`make dev` render it into
+   `config/tailscale/serve.json` from `serve.json.template`; the rendered file
+   is generated, not tracked, because `tailscaled` reads no environment
+   variables inside it. Run `make tailscale-serve-config` by itself after
+   editing either name — the directory is watched, so a running container
+   picks it up without a restart.
+
+   What the rendered file serves:
+
+   | Serve entry | Reachable from | Forwards to |
+   | --- | --- | --- |
+   | TCP 4222 / 8222 | tailnet (policy-filtered) | `nats:4222` / `nats:8222` |
+   | TCP 5432 | tailnet (admin devices only) | `postgres:5432` |
+   | HTTPS 443 `/` | **the public internet** (`AllowFunnel`) | `http://broker:WEBHOOK_PORT` |
+
+   The broker's HTTP port is **not** forwarded onto the tailnet, and with
+   Tailscale on it is not published on the host's public address either (see
+   the table above). Funnel on 443 is therefore the only route to the broker's
+   HTTP API, and `@WEBHOOK_PORT@` in the template is rendered from the same
+   `.env` the app reads, so the proxy target follows `WEBHOOK_PORT` when it
+   moves.
+
+   > **Do not narrow this handler to the webhook path.** It is the obvious
+   > hardening idea and it breaks every signal. Tailscale Serve strips the
+   > mount point before proxying, and a mount matches its whole subtree —
+   > measured against a live tailnet:
+   >
+   > | Mount | Request | What the broker receives |
+   > | --- | --- | --- |
+   > | `/<prefix>/secret/webhook` | the same path | `POST /` → **404** |
+   > | `/probeA` | `/probeA/hello` | `GET /hello` |
+   > | `/probeA/` | `/probeA/hello` | `GET /hello` |
+   > | `/` | `/<prefix>/v1/health` | unchanged → `200` |
+   >
+   > So mounting the webhook's own path makes the broker answer 404 for every
+   > alert, and the shallowest mount that would leave `/secret/webhook` intact
+   > is `/<prefix>`, which forwards `/v1` and `/admin` too. Exposing a single
+   > path needs a route that the stripped remainder can hit — an application
+   > change, not a `serve.json` one.
+   > `test_the_funnel_handler_stays_mounted_at_the_root` pins this.
+
+   The 443 handler is a [Funnel](https://tailscale.com/kb/1223/funnel): it
+   gives the node a public, Tailscale-terminated HTTPS name, so TradingView
+   (which is not on the tailnet) can POST to
+   `https://<TAILSCALE_HOSTNAME>.<TAILSCALE_DNS_NAME>/secret/webhook` without
+   the host publishing `WEBHOOK_PORT` itself. It is the one entry in the file
+   that is **not** tailnet-only — Funnel bypasses the tailnet policy
+   entirely, so everything FastAPI serves is reachable from the internet
+   behind `BROKER_API_PREFIX`, and the webhook token/HMAC plus the
+   `X-API-KEY` guard are what stand in front of it. The `*.ts.net` name is
+   discoverable from public Certificate Transparency logs, so treat the
+   prefix as the secret it is and rotate it with `WEBHOOK_SECRET`. Funnel
+   also has to
+   be enabled for the tailnet in the admin console
+   ([Settings → Funnel](https://login.tailscale.com/admin/settings/funnel)) and
+   the node needs `funnel` in its policy attributes, or the handler is
+   rejected at startup. Drop the `Web` and `AllowFunnel` blocks from
+   `serve.json.template` if you do not want a public endpoint — keep sending
+   TradingView to the published `WEBHOOK_PORT` instead.
+
+4. **Start** — `make start` (or `make dev`), then check it joined:
+
+   ```bash
+   make tailscale-status   # tailnet peers + the Serve forwards and HTTPS handler
+   ```
+
+   The key is only used for the first login: the node's identity lives in the
+   `tailscale_state` volume and `TS_AUTH_ONCE` keeps a restart from logging in
+   again, so a single-use key is fine. Left empty, the container prints a
+   login URL instead (`make tailscale-status` shows it).
+
+**On every other server** (engine, the MT5 VPS running the ingester and the
+worker): install Tailscale — or run the same image beside a Docker stack —
+join with a key tagged for that role, and point its NATS client at
+`nats://<TAILSCALE_HOSTNAME>:4222` with the matching `NATS_TOKEN`. A client
+inside Docker without host networking cannot resolve MagicDNS; give it the
+broker node's tailnet IP (`make tailscale-status`) instead.
+
+**To turn it off**, set `TAILSCALE_ENABLED=false`, then `make stop` and
+`make start`: `make stop` always takes the `tailscale` container down with the
+rest, and the ports go back to `0.0.0.0`. `NATS_TOKEN` is then your only NATS
+protection, so keep the ports behind a firewall if the host is not local. The
+node stays in the tailnet (offline) until you remove it from the admin
+console; the `tailscale_state` volume lets it rejoin as the same node later.
 
 ---
 
 ## ✨ Features
 
-- **Webhook Hub**: Receives and validates TradingView JSON alerts (with optional HMAC signature verification). Every alert is persisted (`status=QUEUED`) and pushed onto a **NATS JetStream** stream so the HTTP request returns as soon as the message is durably queued — the fan-out to workers runs in a background consumer, which closes the `Webhook delivery failed — server closed the connection unexpectedly` failure mode from holding the request open across the pipeline.
+- **Webhook Hub**: Receives and validates signal JSON from **TradingView** and from **[QTE](https://github.com/rockingrow/quant-trading-engine)** on the same `POST /secret/webhook` endpoint, against the same payload schema (with optional HMAC signature verification). Every alert is persisted (`status=QUEUED`) and pushed onto a **NATS JetStream** stream so the HTTP request returns as soon as the message is durably queued — the fan-out to workers runs in a background consumer, which closes the `Webhook delivery failed — server closed the connection unexpectedly` failure mode from holding the request open across the pipeline.
 - **Persistence**: Logs every signal (with a `QUEUED` → `PUBLISHED` status), trade, and account snapshot to **PostgreSQL** via Alembic-managed migrations.
 - **Distribution**: Fan-out signals via **NATS** — each strategy publishes to its own dedicated subject so workers subscribe only to what they need. A durable JetStream consumer (`broker_signal_handler`) does the fan-out so a broker restart mid-fan-out replays the message instead of losing it.
 - **Signal replay on reconnect**: Every `WORKER_CONNECTED` handshake is answered with a `retry_signals` list holding every signal persisted in the last `max_retry_timeout` seconds whose strategy the worker announced — so a worker that just came back online catches up without needing external help.
 - **Strategy magic map**: The same handshake reply carries a `strategy_magic_map` (both markets) — the strategy → magic-number map from the `strategy_magic_map` setting, filtered to the strategies the worker announced. Editable via `POST /admin/settings/strategy-magic-map` or the Telegram bot's `/admin_magicmap`.
-- **Per-account settings that survive a reconnect**: What an owner sets from the bot (today `/prevent` and `/allow`) is stored on the account as a JSONB `settings` blob and replayed to the worker in the `settings` block of every handshake reply — so a worker that restarts comes back blocked if that is how it was left, instead of silently accepting signals again.
+- **Per-account settings that survive a reconnect**: What an owner sets from the bot (`/prevent`, `/allow`, `/maxorders`) is stored on the account as a JSONB `settings` blob and replayed to the worker in the `settings` block of every handshake reply — so a worker that restarts comes back blocked if that is how it was left, instead of silently accepting signals again. Settings with a broker-wide default (`max_open_orders`) are resolved per account before they are sent, so the worker receives one concrete value and never needs the global one. A change also goes out immediately as a `SYSTEM.WORKER_SETTINGS_UPDATE`, so a running worker does not wait for a reconnect.
 - **Trade Feedback**: Workers report executed positions back to the broker via the NATS `TRADE` subject (no REST endpoint required).
 - **Account Tracking**: Worker accounts are auto-upserted from every incoming trade event.
 - **API Key Auth**: Management endpoints (`/accounts`, `/settings/*`) are protected by an `X-API-KEY` header validated against `BROKER_API_KEY`.
@@ -76,7 +257,8 @@ and uv project. It reads the same root `.env`. See
 
 ```mermaid
 graph TD
-    TV[TradingView Alert] -- "POST :8080/webhook" --> Broker
+    TV[TradingView Alert] -- "POST :80/secret/webhook" --> Broker
+    QTE[Quant-Trading-Engine] -- "POST :80/secret/webhook (http transport)" --> Broker
     subgraph "Broker Node (This Repo)"
         Broker[FastAPI Webhook Server]
         DB[(PostgreSQL)]
@@ -93,6 +275,7 @@ graph TD
         NATS -- "TRADE events" --> Consumer[TradeEventConsumer]
         Consumer -- "Upsert Trade + Account" --> DB
     end
+    QTE -. "publish SIGNALS.{strategy} (nats transport)" .-> JS
     NATS -- "{strategy}" --> W1
     NATS -- "{strategy}" --> W2
     NATS -- "{strategy}" --> WN
@@ -109,6 +292,18 @@ graph TD
         WNB -. "NATS TRADE event" .-> NATS
     end
 ```
+
+### Signal producers
+
+Both producers speak the same [`WebhookPayload`](#post-secretwebhook); the broker cannot tell them apart, and nothing downstream — persistence, block gate, fan-out, broadcast — branches on the origin.
+
+| Producer | How it reaches the broker | Auth |
+| -------- | ------------------------- | ---- |
+| **TradingView** | `POST /secret/webhook` from the alert's webhook URL. | In-payload `token` + optional HMAC `X-Signature`. |
+| **[QTE](https://github.com/rockingrow/quant-trading-engine)** — `http` transport | The same `POST /secret/webhook`. The right choice when QTE and the broker do not share a trusted NATS cluster. | Same as above. |
+| **[QTE](https://github.com/rockingrow/quant-trading-engine)** — `nats` transport (its default) | Publishes `{"payload": {...}}` straight to the JetStream subject `SIGNALS.<strategy>` — the very buffer the webhook writes to — so the signal keeps the broker's persistence and retry without the HTTP hop. | **Access to the NATS cluster is the auth**: this path skips the `token` check, so keep that cluster private (or token-protected). |
+
+QTE pins what it relies on in its own [`docs/broker-contract.md`](https://github.com/rockingrow/quant-trading-engine/blob/main/docs/broker-contract.md); this repo's schema stays the source of truth, so a field added here (e.g. `position.use_equity_sizing`) is what that page tracks.
 
 ---
 
@@ -140,12 +335,13 @@ algo-trading-broker/
 │   └── tests/           # Bot pytest suite (own pyproject.toml / uv project)
 ├── alembic/             # Alembic migration environment and version scripts
 ├── bruno/               # Bruno API client collections
+├── config/tailscale/    # Tailnet policy (ACL) and the Serve forwards of the tailscale container
 ├── examples/            # Example webhook / NATS / worker JSON payloads
 ├── scripts/             # Utility scripts (docker-entrypoint, ensure_keys)
 ├── tests/               # Pytest unit tests
 ├── Makefile             # Automation shortcuts (uv, Docker, Alembic, linters)
 ├── Dockerfile           # Production container definition
-├── docker-compose.yml   # Infrastructure (PostgreSQL + NATS + Broker)
+├── docker-compose.yml   # Infrastructure (PostgreSQL + NATS + Broker, optional Tailscale)
 └── pyproject.toml       # uv dependencies & tool config
 ```
 
@@ -241,7 +437,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
   "timestamp": "2026-06-30T00:00:00+00:00",
   "strategy_magic_map": { "wt_cross_v1": 20260617 },
   "retry_signals": [],
-  "settings": { "signal_blocked": true },
+  "settings": { "signal_blocked": true, "max_open_orders": 3 },
   "crypto_leverage_init": {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10
@@ -291,7 +487,8 @@ The `settings` block of the ACK carries what the account's **owner** set from th
 ```json
 {
   "settings": {
-    "signal_blocked": true
+    "signal_blocked": true,
+    "max_open_orders": 3
   }
 }
 ```
@@ -299,6 +496,31 @@ The `settings` block of the ACK carries what the account's **owner** set from th
 | Key | Type | Set by | Meaning |
 | --- | ---- | ------ | ------- |
 | `signal_blocked` | bool (default `false`) | bot `/prevent` → `true`, `/allow` → `false` | The owner has blocked new entries for this account. Same state the `BLOCK_SIGNAL` / `ALLOW_SIGNAL` ADMIN messages push live |
+| `max_open_orders` | int (never `null` on the wire) | bot `/maxorders`, else the `max_open_orders` `BrokerSetting` | How many positions the account may hold at once; `0` disables the cap. This is what the worker enforces as its `MAX_OPEN_ORDERS` limit |
+
+**`max_open_orders` has two scopes, and the worker sees one.** The owner's own
+value lives in `accounts.settings`; when they have set none, the account
+inherits the broker-wide `max_open_orders` `BrokerSetting` (default `5` when
+that row is unset or unreadable). The broker resolves the two **before** it
+replies, so the ACK always carries a concrete number and a worker never has to
+know a global default exists. On the worker side this replaces its old
+`MAX_OPEN_ORDERS` env var, which no longer exists: a worker falls back to its
+own built-in default of `5` only if the broker sends no value at all.
+
+Both scopes are editable at runtime, each by whoever owns it:
+
+| Scope | Edited by | Applies to |
+| ----- | --------- | ---------- |
+| Account | bot `/maxorders`, or `POST /v1/telegram/{id}/settings/max-open-orders` | That one account. Sending `null` clears the override and goes back to inheriting |
+| Broker-wide | bot `/admin_max_orders`, or `POST /admin/settings/max-open-orders` | Every account that has **not** set its own; the ones that did keep theirs |
+
+A change does not wait for the worker to reconnect: both endpoints push the
+account's resolved `settings` block to the worker(s) concerned as a SYSTEM
+`WORKER_SETTINGS_UPDATE` — the same block, the same values and the same
+worker-side code path as the ACK's, so the live push and the next handshake can
+never disagree. The push is best-effort (an account with no `gateway` recorded
+yet has no worker id to address, and a NATS failure is logged, not surfaced):
+the stored value is the contract, and the next handshake re-delivers it.
 
 **Why it is in the handshake at all.** A command like `/prevent` publishes an ADMIN message, which only reaches a worker that is connected *right now*. Before this block existed, a worker that restarted came back **unblocked** — it had no way to learn that its owner had stopped it while it was away. `POST /v1/telegram/{id}/commands/prevent` now writes `signal_blocked` to the account **before** publishing, and every handshake replays it: the ADMIN message is the live push, the column is the durable state, and a worker reconciles to it on every connect.
 
@@ -306,7 +528,7 @@ Enforcement lives in the worker — the broker records and reports the setting, 
 
 The block is read fresh from the row on every handshake (deliberately **not** cached like the broker-wide settings, which are per-broker and shared by every worker): a command run between two connects must reach the second one. Unknown keys in the column are dropped from the payload, so a worker only ever receives keys this broker version knows — they are not erased from the row, since writes merge (`settings || patch`) rather than replace.
 
-Adding a setting is a field on `AccountSettings` (`broker/schemas/account_schema.py`) plus its key in `broker/constants.py`, written from the command's endpoint — no migration, the column is a blob.
+Adding a setting is a field on `AccountSettings` (`broker/schemas/account_schema.py`) plus its key in `broker/constants.py`, written from the command's endpoint — no migration, the column is a blob. A setting that also has a broker-wide default resolves in `broker/services/account_settings_service.py`, which is the single place both the handshake and the live push go through.
 
 #### Fire-and-forget (backward compatible)
 
@@ -334,7 +556,8 @@ Empty when the worker announced no strategies, or when there is nothing recent t
       "sl": 2340.0,
       "tp1": 2370.0,
       "tp2": 2390.0,
-      "risk_percent": 1.0
+      "risk_percent": 1.0,
+      "use_equity_sizing": true
     }
   ]
 }
@@ -357,6 +580,29 @@ The broker looks up every **crypto account** in the `accounts` table and address
 ```
 
 Both `symbols` and `default_leverage` are read back from `BrokerSetting`, so whichever setting the admin did *not* just change is included from the DB. The push is best-effort: the setting is already persisted (and still reaches workers on their next handshake), so if the complementary setting is missing or invalid, a crypto account has no `gateway` recorded yet, or a publish fails — the affected message is logged and skipped while the endpoint still returns `200`.
+
+The same pattern covers the account `settings` block, for both markets. A change
+to `max_open_orders` — by its owner from the bot's `/maxorders`
+(`POST /v1/telegram/{id}/settings/max-open-orders`) or by an admin changing the
+broker-wide default (`POST /admin/settings/max-open-orders`) — publishes a
+`WORKER_SETTINGS_UPDATE` carrying that account's **resolved** block:
+
+```json
+{
+  "action": "WORKER_SETTINGS_UPDATE",
+  "account_id": "FOREX-MT5-12345678",
+  "timestamp": "2026-06-30T00:05:00+00:00",
+  "settings": { "signal_blocked": false, "max_open_orders": 3 }
+}
+```
+
+The whole block goes out, not just the field that changed: the worker applies it
+through the very same code path as the ACK's `settings`, which reads every
+setting it knows. An account-scoped change pushes to that one account; a change
+to the broker-wide default pushes one message per account, each carrying the
+value *that* account resolves to — so an account with its own cap receives the
+value it already had rather than the new default. Best-effort on the same terms
+as above.
 
 ---
 
@@ -381,7 +627,7 @@ BROKER_API_KEY=api_key
 
 # ── Webhook ──────────────────────────────────────────
 WEBHOOK_HOST=0.0.0.0
-WEBHOOK_PORT=80            # docker-compose defaults this to 8080 instead
+WEBHOOK_PORT=80
 
 # Seconds an idle keep-alive connection is held open. Must exceed the gap
 # between TradingView alerts: TradingView reuses pooled connections and
@@ -405,6 +651,16 @@ NATS_HOST=localhost        # overridden to "nats" inside Docker
 NATS_PORT=4222
 NATS_MONITOR_PORT=8222     # HTTP monitoring dashboard (compose only)
 NATS_TOKEN=changeme        # shared secret; leave blank = no auth
+
+# ── Tailscale (optional) ─────────────────────────────
+# One switch. true = start the `tailscale` container, which joins the tailnet
+# as TAILSCALE_HOSTNAME and forwards NATS/Postgres onto it; the host ports
+# then bind 127.0.0.1 only. See "Securing NATS with Tailscale".
+TAILSCALE_ENABLED=false
+TAILSCALE_AUTHKEY=         # tskey-auth-…, tagged tag:broker; first login only
+TAILSCALE_HOSTNAME=algo-broker
+TAILSCALE_DNS_NAME=        # tailnet domain, e.g. rudd-komodo.ts.net; with the
+                           # hostname it is the FQDN Serve binds
 
 # ── PostgreSQL ────────────────────────────────────────
 POSTGRES_HOST=localhost    # overridden to "postgres" inside Docker
@@ -441,7 +697,7 @@ TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_BROK
 # Full reference: bot/README.md → Configuration
 BOT_TELEGRAM_TOKEN=
 TELEGRAM_ADMIN_IDS=            # comma-separated admin user ids, e.g. 123,456
-BOT_BROKER_BASE_URL=http://localhost:8080   # → http://broker:8080 in Docker
+BOT_BROKER_BASE_URL=http://localhost:80   # → http://broker:80 in Docker
 BOT_LOG_LEVEL=INFO
 BOT_REQUEST_TIMEOUT=10.0
 ```
@@ -581,11 +837,44 @@ environment if you really need to:
 | `make stop` | Stop Docker stack |
 | `make logs` | Tail broker container logs (last 500 lines) |
 | `make logging` | Follow broker container logs live |
+| `make status` | Containers, then a read-only check of every link: PostgreSQL, NATS, JetStream, the API, the engine and the workers — see below |
+| `make tailscale-status` | Tailnet status and Serve forwards of the `tailscale` container (when enabled) |
 | `make simulate-nats` | Replay an example NATS payload against the running stack |
 | `make format` | Format code with Ruff |
 | `make lint` | Run Ruff check |
 | `make check` | Alias for `make lint` |
 | `make fix` | Format and auto-fix linting issues |
+
+### `make status`
+
+Prints the stack's containers (and the tailnet peers, with Tailscale on), then
+runs `python -m broker.status` inside the broker container and exits non-zero
+if one of the stack's own services is down:
+
+```text
+Broker status
+  [ OK ] PostgreSQL    postgres:5432/algo_trading_broker, 2 account(s)
+  [ OK ] NATS          nats:4222
+  [ OK ] JetStream     SIGNALS holds 0 undelivered signal(s); broker_signal_handler is pulling
+  [ OK ] Broker API    GET 127.0.0.1:80/v1/health answered 200
+  [ OK ] Engine (QTE)  connected as qte-broker-sink from 172.18.0.3
+  [WARN] Workers       1 connected, 1 known account(s) offline
+                       online   FOREX-MT5-123456  from 172.18.0.3  strategies: MT5_GOLD_M5_V1
+                       offline  CRYPTO-BINANCE-7654321  last activity 2026-10-11 21:04 UTC
+```
+
+Neither the engine nor a worker has a ping in its contract, so nothing is sent
+to them. They are read off the NATS server's own client list (`/connz` on the
+monitoring port): QTE names its connection `qte-broker-sink`, and a worker is
+the client subscribed to its private `ADMIN.<market>.<gateway>.<account_id>`
+subject. Connected workers are then set against the `accounts` table, so an
+account whose worker dropped off is listed as offline. A client that is
+neither shows under **Other clients**. With Tailscale on, every remote client
+arrives through the `tailscale` container and carries its address.
+
+A missing engine or worker is a warning, not a failure: a deployment fed by
+TradingView alone has no engine, and an account may be offline on purpose.
+Every probe is read-only.
 
 ### Database (Alembic)
 
@@ -607,9 +896,9 @@ FastAPI auto-generates interactive API documentation. With the server running:
 
 | Page | URL | Notes |
 | ---- | --- | ----- |
-| Swagger UI | `http://localhost:8080/docs` | Try endpoints; click **Authorize** to set `X-API-KEY`. |
-| ReDoc | `http://localhost:8080/redoc` | Read-only reference. |
-| OpenAPI schema | `http://localhost:8080/openapi.json` | Raw spec. |
+| Swagger UI | `http://localhost:80/docs` | Try endpoints; click **Authorize** to set `X-API-KEY`. |
+| ReDoc | `http://localhost:80/redoc` | Read-only reference. |
+| OpenAPI schema | `http://localhost:80/openapi.json` | Raw spec. |
 
 Set `DOCS_ENABLED=false` in `.env` to disable all three in production.
 
@@ -621,7 +910,7 @@ All routes are grouped under versioned or purpose-scoped prefixes:
 | ------ | ------ | ----------- |
 | `/v1` | API | Public API endpoints (accounts, trades, health) |
 | `/admin` | Admin | Management endpoints (settings, trading actions) |
-| `/secret` | Webhook | TradingView webhook receiver |
+| `/secret` | Webhook | Signal webhook receiver (TradingView, QTE) |
 
 If `BROKER_API_PREFIX` is set (e.g. `abc123xyz`), every route is mounted under that secret segment:
 
@@ -639,7 +928,7 @@ The prefix acts as a URL secret — an attacker who knows the IP or domain still
 Management endpoints require an API key passed in the `X-API-KEY` header, validated against `BROKER_API_KEY`:
 
 ```bash
-curl http://localhost:8080/v1/accounts -H "X-API-KEY: $BROKER_API_KEY"
+curl http://localhost:80/v1/accounts -H "X-API-KEY: $BROKER_API_KEY"
 ```
 
 Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset, protected endpoints return `500`. The `/v1/health` and `/secret/webhook` endpoints are **not** key-protected (`/secret/webhook` uses its own in-payload `token`).
@@ -691,7 +980,7 @@ Returns `{"status": "ok"}`. No authentication required.
 
 ### POST `/secret/webhook`
 
-Receives signals from TradingView. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
+Receives signals from **TradingView** and from **[Quant-Trading-Engine](https://github.com/rockingrow/quant-trading-engine)** — one endpoint, one payload schema, one `token`, no per-producer branch anywhere downstream. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
 
 The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the response is still `202`, with `status=deferred`, and the enqueue is retried in the background (see [JetStream signal pipeline](#jetstream-signal-pipeline)). `503` means the enqueue failed *and* could not be deferred — the signal was dropped.
 
@@ -712,6 +1001,7 @@ The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the respon
     "sl": 1890.0,
     "tp1": 1920.0,
     "tp2": 1950.0,
+    "use_equity_sizing": true,
     "is_running": true,
     "is_scale_position": true,
     "scaling": {
@@ -747,6 +1037,16 @@ per-signal `signal_id` the broker mints on persist is still unique per
 alert (workers keep deduping on it) — the two ids serve different jobs and
 both travel on every downstream NATS payload.
 
+**Several cycles on one symbol + strategy at the same time:** a producer may
+run more than one trade on the same `symbol` + `strategy` concurrently. Each
+one mints its own `signal_uxid` and carries the full action trail from entry to
+exit under that id; the broker keys a cycle on `(symbol, strategy,
+signal_uxid)`, so the concurrent trades stay separate records and separate
+Telegram messages, and a `TP1` belonging to one of them never lands on
+another. Nothing else about the payload changes — the producer only has to keep
+one `signal_uxid` per trade and not reuse it for a second, overlapping trade on
+the same symbol and strategy.
+
 #### Position fields — `tp1`/`tp2`/`sl` vs `scaling`
 
 A TradingView strategy can contain **multiple sub-strategies** running under the same parent strategy name. Each sub-strategy may apply different risk/reward profiles to the same signal — for example, a `LOW_RR_TIER` sub-strategy is designed to catch entries more frequently but accepts a tighter TP and higher relative risk, which means the effective TP, SL, and quantity differ from the base signal values.
@@ -756,6 +1056,7 @@ To support this, the `position` block carries two sets of exit levels:
 | Field | Purpose |
 | ----- | ------- |
 | `tp1`, `tp2`, `sl` | Base levels from the **primary** strategy logic — always present. |
+| `use_equity_sizing` | `true` when the worker should size the position off account **equity** (balance + floating P/L) instead of the plain balance. Optional — omitted (or `null`) leaves the worker's own default in place. Forwarded as-is on the NATS `SIGNAL` payload. |
 | `is_scale_position` | `true` when a sub-strategy wants to **scale into** an existing open position rather than open a new one. |
 | `scale_strategy` | Name of the sub-strategy that triggered the scale-in (e.g. `LOW_RR_TIER`). Lets workers apply sub-strategy-specific position sizing or risk rules. |
 | `scaling.tp`, `scaling.sl`, `scaling.quantity` | **Override** levels and size for the scale-in leg. These replace `tp1`/`sl`/`quantity` for the additional entry — they are forwarded on the NATS `SIGNAL` payload only when `is_scale_position` is `true`. |
@@ -933,6 +1234,81 @@ On success the broker also **pushes** a targeted `SYSTEM.CRYPTO_LEVERAGE_INIT` t
 
 ---
 
+### GET `/admin/settings/max-open-orders`
+
+Returns the broker-wide `max_open_orders` default — the cap an account inherits when its owner has set none of their own. Requires the `X-API-KEY` header.
+
+```json
+{
+  "setting": "max_open_orders",
+  "value": "5"
+}
+```
+
+`value` is the number the broker actually resolves to, so an unset or unreadable row reads as the built-in default (`5`) rather than an empty string.
+
+---
+
+### POST `/admin/settings/max-open-orders`
+
+Sets that default. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "max_open_orders": 5
+}
+```
+
+`max_open_orders` must be `0` or more (`422` otherwise); `0` disables the cap for every account that inherits it.
+
+> **⚠️ Seed this before rolling out the worker release that reads it.** The setting is unset on an existing broker, so it resolves to `5` — while the matching worker release stops reading its own `MAX_OPEN_ORDERS` env var. A worker host bootstrapped with `make init` carries `MAX_OPEN_ORDERS=0` from the old `.env.example`, i.e. **uncapped**, so the upgrade would silently start rejecting its entries beyond the 5th. POST the value the fleet is on today (`0` to stay uncapped) and the upgrade is a no-op; tighten the cap deliberately afterwards.
+
+This is the default to **inherit**, so it changes nothing for an account whose owner set their own cap with the bot's `/maxorders` — theirs wins until they clear it. On success the broker pushes a `SYSTEM.WORKER_SETTINGS_UPDATE` carrying each account's *resolved* `settings` block, addressed by its `<market>-<gateway>-<account_id>` worker id, so already-running workers apply the new cap immediately instead of at their next handshake. An account with no `gateway` recorded yet cannot be addressed and is skipped (and logged) — it reads the value from its first handshake, which is also what records the gateway.
+
+---
+
+### GET `/v1/telegram/{telegram_user_id}/settings/max-open-orders`
+
+The cap in force for the caller's **active** account, and where it came from. Requires the `X-API-KEY` header (the bot is the only caller).
+
+```json
+{
+  "max_open_orders": 3,
+  "source": "account",
+  "global_max_open_orders": 5
+}
+```
+
+`source` is `"account"` when the owner set this value and `"global"` when it is inherited — the same number means two different things, and only the first is theirs to clear. `404` when the Telegram user has no linked account.
+
+---
+
+### POST `/v1/telegram/{telegram_user_id}/settings/max-open-orders`
+
+Sets the owner's own cap for that account. Requires the `X-API-KEY` header.
+
+**Request Body:**
+
+```json
+{
+  "max_open_orders": 3
+}
+```
+
+| Value | Effect |
+| ----- | ------ |
+| `3` (any int ≥ 0) | That account is capped at 3 open positions |
+| `0` | The cap is disabled for that account |
+| `null` | The override is cleared — the account goes back to inheriting the broker-wide default |
+
+A negative value is `422`. The response is the same shape as the `GET`, reporting the effective value after the write.
+
+The value is **persisted before it is published**, like `/commands/prevent`: `accounts.settings` is what every handshake replays, so a DB failure fails the call outright (`500`, nothing published), while a failed push still leaves the intent recorded for the worker to pick up when it reconnects. On success the broker pushes the account's resolved `settings` block as a `SYSTEM.WORKER_SETTINGS_UPDATE` so a running worker applies it right away.
+
+---
+
 ### GET `/admin/settings/strategy-magic-map`
 
 Returns the current `strategy_magic_map` broker setting as JSON text (`{}` when unset). Requires the `X-API-KEY` header.
@@ -1039,8 +1415,8 @@ user with no linked account sees `/start` and nothing else — every other
 command, `/help` included, needs an account behind it — and the full menu
 appears the moment they link. Each id in `TELEGRAM_ADMIN_IDS` additionally gets
 the admin menu (`/admin_accounts`, `/admin_newaccount`, `/admin_trades`,
-`/admin_flat`, `/admin_rotate`, `/admin_settings`, …), which is not gated on
-linking.
+`/admin_flat`, `/admin_rotate`, `/admin_settings`, `/admin_max_orders`, …),
+which is not gated on linking.
 
 **Onboarding / auth flow**
 
@@ -1069,7 +1445,7 @@ drops the caller's own.
 
 For each user, exactly one of their linked accounts is **active** at a time, and
 every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
-`/allow`, `/unlink`) acts on whichever one that is.
+`/allow`, `/maxorders`, `/unlink`) acts on whichever one that is.
 
 - `/link` — add another account (paste a second token). The first account
   linked becomes active automatically; adding more does not change the
@@ -1090,6 +1466,7 @@ repairs the row.
 | `/flat` | `FLAT` | — (an action, not a state) | Close positions for the **active** account. |
 | `/prevent` | `BLOCK_SIGNAL` | `settings.signal_blocked = true` | Block new signals (worker must honor it). |
 | `/allow` | `ALLOW_SIGNAL` | `settings.signal_blocked = false` | Re-enable new signals. |
+| `/maxorders` | — (SYSTEM `WORKER_SETTINGS_UPDATE`, not ADMIN) | `settings.max_open_orders` | Cap on concurrently open positions for the **active** account; `0` = no cap, `-` clears it and inherits the broker-wide default. |
 
 > `BLOCK_SIGNAL` / `ALLOW_SIGNAL` are scoped by `account_id` in the `AdminSignal`
 > payload. Enforcement is the **worker's** responsibility — worker code lives
@@ -1129,7 +1506,7 @@ and local development.
 | ------------------ | ---------------- | --------------------------------------- |
 | `id` | UUID (PK) | Unique record identifier |
 | `strategy` | String(50) | Strategy name that generated the signal |
-| `signal_uxid` | String(16) (Nullable) | Cycle correlator — 16-char lowercase-hex short uuid shared by every signal of one trade (entry + TPs + SL + FLAT). Ties a signal to its `broadcast_messages` row so the trade renders as one edited-in-place Telegram message. |
+| `signal_uxid` | String(16) (Nullable) | Cycle correlator — 16-char lowercase-hex short uuid shared by every signal of one trade (entry + TPs + SL + FLAT). Ties a signal to its `broadcast_messages` row — together with the row's `symbol` and `strategy`, the cycle key — so the trade renders as one edited-in-place Telegram message, even while other trades run on the same symbol and strategy. |
 | `symbol` | String(50) | Trading symbol (e.g., XAUUSD) |
 | `timeframe` | String(20) | Chart timeframe (e.g., M15) |
 | `timestamp` | DateTime | Signal generation time from TradingView |
@@ -1188,7 +1565,7 @@ and local development.
 | `market` | Enum | `FOREX` or `CRYPTO` |
 | `gateway` | String(50) | Exchange the account trades through, e.g. `MT5`, `BINANCE` (nullable) |
 | `last_activity_at` | DateTime | Timestamp of the last TRADE event received |
-| `settings` | JSONB | What the owner set from the bot, e.g. `{"signal_blocked": true}` from `/prevent`. `NOT NULL`, defaults to `{}`; sent to the worker in the `settings` block of every `WORKER_CONNECTED_ACK` — see [Account settings](#account-settings) |
+| `settings` | JSONB | What the owner set from the bot — `{"signal_blocked": true}` from `/prevent`, `{"max_open_orders": 3}` from `/maxorders`. `NOT NULL`, defaults to `{}`; sent to the worker in the `settings` block of every `WORKER_CONNECTED_ACK` — see [Account settings](#account-settings). A key absent (or `null`) means the account inherits the broker-wide default for that setting |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
@@ -1406,11 +1783,12 @@ position on the same symbol.
 | `private_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/private-reply-notify` | Whether the **private** broadcast posts a reply notice under the cycle's message on each new action (see "Broadcast update notices" above). `"0"` silences the reply only — the message itself keeps being edited in place. Bot: `/admin_private_reply_notify [enable\|disable]`. |
 | `public_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/public-reply-notify` | Same as above, for the **public** broadcast. Bot: `/admin_public_reply_notify [enable\|disable]`. |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
+| `max_open_orders` | `"5"` (unset = `5`) | `POST` / `GET /admin/settings/max-open-orders` | Broker-wide cap on concurrently open positions, inherited by every account whose `accounts.settings` carries no `max_open_orders` of its own. `"0"` disables the cap. Resolved per account and sent in the `settings` block of each `WORKER_CONNECTED_ACK`, and pushed live as `SYSTEM.WORKER_SETTINGS_UPDATE`. Bot: `/admin_max_orders`. |
 
 ### `broadcast_messages` table
 
 One row per signal *cycle*: everything the broker has seen for one trade
-(``strategy`` + ``signal_uxid``) rolled up into a single record. The row's
+(``symbol`` + ``strategy`` + ``signal_uxid``) rolled up into a single record. The row's
 ``events`` list — an ordered JSONB array of the actions in the order they
 arrived — is what the Telegram message body is rendered from every time an
 edit is due, so the operator sees the full timeline in one place instead of
@@ -1429,7 +1807,11 @@ one message per action.
 | `last_broadcast_at` | DateTime (Nullable) | Timestamp of the last successful dispatcher run for this cycle |
 | `createdAt` / `updatedAt` | DateTime | Record insertion / last-update times |
 
-**Unique constraint:** `(strategy, signal_uxid)` — the cycle key.
+**Unique constraint:** `(symbol, strategy, signal_uxid)` — the cycle key. The
+symbol is part of it because one `symbol` + `strategy` pair can run several
+cycles at once (see [POST `/secret/webhook`](#post-secretwebhook)): the cycle id
+is what separates the concurrent trades, and the symbol is what keeps an id
+minted for one symbol from colliding with another's.
 
 ### `broadcast_message_chats` table
 

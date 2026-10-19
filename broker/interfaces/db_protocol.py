@@ -208,6 +208,7 @@ class BroadcastMessageRepository(Protocol):
   async def record_worker_execution(
     self,
     *,
+    symbol: str,
     strategy: str,
     signal_uxid: str,
     worker_id: str,

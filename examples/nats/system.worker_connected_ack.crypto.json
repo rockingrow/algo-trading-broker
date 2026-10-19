@@ -7,10 +7,14 @@
   },
   "retry_signals": [],
   "settings": {
-    "signal_blocked": true
+    "signal_blocked": true,
+    "max_open_orders": 3
   },
   "crypto_leverage_init": {
-    "symbols": ["BTC", "ETH"],
+    "symbols": [
+      "BTC",
+      "ETH"
+    ],
     "default_leverage": 10
   }
 }

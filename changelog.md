@@ -5,6 +5,239 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-19
+
+### Changed
+
+- **The broker's HTTP port is off the public internet and off the tailnet.**
+  `docker-compose.yml` publishes it on `PRIVATE_BIND_ADDRESS` like the NATS and
+  Postgres ports, so with Tailscale on it binds `127.0.0.1` instead of
+  `0.0.0.0`. It was the one FastAPI surface reachable by the VPS' public IP
+  alone, which is what the `.env` / `phpunit` / `wp-admin` scanners were
+  finding; `ufw` does not cover it either, because Docker's DNAT rules are
+  traversed before ufw's `INPUT` chain. Nothing in the stack needed it
+  published: the bot and the `tailscale` container both reach `broker:80` over
+  `trading_net`.
+
+  `config/tailscale/serve.json.template` drops the tailnet TCP forward for port
+  80, and `config/tailscale/policy.hujson` drops the matching `tcp:80` grant for
+  `tag:worker`, which then described a forward that no longer exists. Funnel on
+  443 is the only route to the HTTP API; its proxy target is rendered from
+  `WEBHOOK_PORT` rather than hardcoded to 80, so moving the port no longer
+  breaks the webhook with a 502 that looks like a broker fault.
+
+  **Operational note:** a worker or admin device that called the broker's HTTP
+  API over the tailnet loses that route. Workers talk to the broker over NATS
+  (4222, unchanged); anything else has to run on the host. Re-run `make
+  tailscale-serve-config` after pulling, and re-paste `policy.hujson` into the
+  Tailscale admin console - Tailscale does not read it from the repository.
+
+  **Reverted before release: restricting Funnel to the webhook path.** An
+  earlier revision of this entry claimed the 443 handler served only
+  `/<prefix>/secret/webhook`. It cannot: Tailscale Serve strips the mount point
+  before proxying, and a mount matches its whole subtree. Mounting the webhook's
+  own path made the broker receive `POST /` and answer 404 for every alert -
+  observed in production, with signals lost, since TradingView never re-sends.
+  The shallowest mount that leaves `/secret/webhook` intact is `/<prefix>`,
+  which forwards `/v1` and `/admin` too, so exposing a single path needs a route
+  the stripped remainder can hit - an application change, not a `serve.json`
+  one. The handler stays at `/`; the measurements are recorded in the Makefile,
+  in README and in `test_the_funnel_handler_stays_mounted_at_the_root`, which
+  fails if anyone narrows it again.
+
+- **Several signal cycles per `symbol` + `strategy` at the same time** — a
+  producer may now run more than one trade on the same symbol and strategy
+  concurrently. Each one carries its own `signal_uxid` and its full action trail
+  from entry to exit, and the broker keys a broadcast cycle on
+  `(symbol, strategy, signal_uxid)` instead of `(strategy, signal_uxid)`, so the
+  concurrent trades stay separate records and separate Telegram messages — a
+  `TP1` belonging to one of them can no longer land on another.
+
+  The webhook and NATS payloads are unchanged; the only requirement on a
+  producer is the one that already held — one `signal_uxid` per trade, not
+  reused by a second overlapping trade.
+
+  **Migration `d4e5f6a7b8c9`** replaces `broadcast_messages`' unique constraint
+  `uq_broadcast_messages_strategy_signal_uxid` with
+  `uq_broadcast_messages_symbol_strategy_signal_uxid` on
+  `(symbol, strategy, signal_uxid)`. The new constraint is weaker than the old
+  one, so no existing row can violate it and no data is rewritten.
+  `BroadcastMessageRepository.record_worker_execution` takes a `symbol` argument
+  accordingly (the worker path reads it off the signal's row).
+
+- **Containers run the venv interpreter directly, and every service has a
+  memory ceiling.** The broker and bot images dropped the `uv run` wrapper
+  from `CMD` in favour of `/app/.venv/bin` on `PATH`. `uv run` does not
+  exec, so it stayed alive as the container's main process: ~30 MB per
+  service, and one more hop between `docker stop`'s SIGTERM and FastAPI's
+  shutdown handler. `scripts/docker-entrypoint.sh` runs `alembic upgrade
+  head` through the same venv, and `make status` and the `db-*` targets
+  exec `python`/`alembic` in the container instead of `uv run`. uv stays in
+  the image as the build-time installer; nothing invokes it at runtime
+  (`alembic` is a production dependency, so it ships in the image).
+
+  `docker-compose.yml` gives postgres, nats, broker, bot and tailscale a
+  `mem_limit` totalling ~2.3 GB. On a host without swap and without caps,
+  the kernel OOM killer chooses by score and can take Postgres instead of
+  the container that leaked; a cap keeps the kill on the offender, which
+  `restart: always` then brings back. No image rebuild changes behaviour —
+  `make dev` or `make start` picks both up.
+
+### Added
+
+- **`max_open_orders` — the open-position cap now comes from the broker, and a
+  bot user can set their own.** Two scopes feed one value: the account's own,
+  in the `accounts.settings` JSONB blob, over a broker-wide default in the new
+  `max_open_orders` `BrokerSetting` (unset or unreadable = `5`). The broker
+  resolves the two before it answers a handshake, so the `settings` block of
+  every `WORKER_CONNECTED_ACK` carries a concrete number and a worker never has
+  to know the global default exists. `0` is a value, not an absence: it
+  disables the cap, and only an absent (or `null`) account key means "inherit".
+
+  Both scopes are editable at runtime by whoever owns them. An account's owner
+  uses the bot's new `/maxorders` (`GET`/`POST
+  /v1/telegram/{id}/settings/max-open-orders`), which reports the effective
+  value plus a `source` of `account` or `global` so the bot can tell "3 because
+  I chose it" from "5 because nobody has"; sending `-` clears the override. An
+  admin changes the default with `/admin_max_orders` (`GET`/`POST
+  /admin/settings/max-open-orders`), which leaves every account that set its
+  own cap alone.
+
+  A change does not wait for a reconnect. Both endpoints publish the account's
+  *resolved* block on the new SYSTEM `WORKER_SETTINGS_UPDATE` action — the same
+  block, values and worker-side code path as the ACK's, so the live push and the
+  next handshake cannot disagree. The admin endpoint sends one message per
+  account, each carrying the value *that* account resolves to. Best-effort on
+  the terms the crypto push already set: the stored value is the contract, an
+  account with no `gateway` recorded yet has no worker id to address, and a
+  publish failure is logged rather than failing the command — it is persisted
+  before it is published, like `/prevent`, so a DB failure is what fails the
+  call.
+
+  Resolution lives in one place, `broker/services/account_settings_service.py`,
+  which both the handshake and the live push go through. Neither the
+  per-account row nor the broker-wide default is cached: the ACK is the
+  *durable* path, so a cached read served inside a TTL would not cost an admin
+  "up to the TTL" — it would hand a reconnecting worker the old cap and leave
+  it there until that worker reconnected again, silently undoing the change for
+  that one worker.
+
+  `accounts.settings` is parsed **one field at a time**, mirroring the
+  per-field salvage the worker already does on the same block. Parsing it as a
+  unit meant a single hand-edited value took the whole blob down to its
+  defaults — so a `max_open_orders` of `"garbage"` turned a *blocked* account
+  into an unblocked one, on the ACK and on the live push, resuming trading on
+  an account an operator had stopped. Each field now falls back to its own
+  default and the rest survive.
+
+  **⚠️ Rollout step — do this BEFORE deploying.** `max_open_orders` is unset on
+  an existing broker, so it resolves to the default of `5`, while the worker
+  release below stops reading the `MAX_OPEN_ORDERS` line in its `.env`. Those
+  two together change how a running fleet trades: a host bootstrapped with
+  `make init` carries `MAX_OPEN_ORDERS=0` from the old `.env.example`, i.e.
+  **uncapped**, so after the upgrade it would silently start rejecting entries
+  beyond the 5th. Seed the setting with the value the fleet is on today first,
+  and the upgrade is a no-op:
+
+  ```bash
+  # 0 if your workers run uncapped today (the old .env.example default)
+  curl -X POST "$BROKER_URL/admin/settings/max-open-orders" \
+    -H "X-API-KEY: $BROKER_API_KEY" -H 'Content-Type: application/json' \
+    -d '{"max_open_orders": 0}'
+  ```
+
+  Or from the bot: `/admin_max_orders`. Then tighten it deliberately, per
+  account with `/maxorders` or fleet-wide with `/admin_max_orders`. Check what
+  each host is on with `grep MAX_OPEN_ORDERS .env` before you pick the value.
+
+  **Worker side (`algo-trading-worker`):** the matching release drops
+  `MAX_OPEN_ORDERS` from `.env` entirely and enforces what the broker sends,
+  falling back to its own default of `5` only when the broker sends nothing.
+  No migration — `accounts.settings` is a blob and `broker_settings` is a
+  key/value table. New examples `examples/nats/system.worker_settings_update.json`
+  and the updated `system.worker_connected_ack*.json`; Bruno requests under
+  `bruno/admin/Settings/` and `bruno/telegram/user/`.
+
+- **`make status` — every link the broker depends on, on one screen.** Prints
+  the stack's containers (and the tailnet peers when `TAILSCALE_ENABLED` is
+  on), then runs the new `python -m broker.status` inside the broker
+  container: PostgreSQL, NATS, the `SIGNALS` stream and whether `SignalWorker`
+  is pulling from it, the API's `/v1/health`, and who is connected to NATS —
+  the engine (QTE's `qte-broker-sink` connection) and the workers (the client
+  subscribed to each private `ADMIN.<market>.<gateway>.<account_id>` subject),
+  set against the `accounts` table so a missing worker is listed as offline.
+  The engine and the workers are read off the server's `/connz` monitoring
+  endpoint; nothing is sent to them and nothing is written. The exit code is
+  non-zero only when one of the stack's own services is down. New setting
+  `NATS_MONITOR_PORT` (default `8222`, already in `.env.example` as the host
+  side of the mapping); `docker-compose.yml` pins it to `8222` inside the
+  broker container, as it does `NATS_PORT`. The image has to be rebuilt once
+  (`make start`) before the command exists in the container.
+
+- **Tailscale Serve config is rendered from `.env`, and can publish the
+  webhook over HTTPS.** `config/tailscale/serve.json` is no longer tracked:
+  `make dev`/`make start` (and `make tailscale-serve-config` on its own)
+  render it from the new `config/tailscale/serve.json.template`, substituting
+  this deployment's tailnet FQDN. Serve addresses its HTTPS handler by full
+  DNS name and `tailscaled` expands no environment variables inside
+  `TS_SERVE_CONFIG`, so the name could not stay committed without baking one
+  deployment into the repository. New setting `TAILSCALE_DNS_NAME` (the
+  tailnet domain, admin console → DNS); with `TAILSCALE_HOSTNAME` it forms
+  that FQDN, and `make tailscale-serve-config` fails fast when
+  `TAILSCALE_ENABLED` is true and either is missing. The Makefile now reads
+  `.env` through one `env-value` helper that strips comments, quotes and CRLF
+  the way docker compose does.
+
+  The template adds two entries the old file did not have: an HTTPS handler on
+  443 proxying `/` to `broker:80`, and `AllowFunnel` for it. **That handler is
+  public** — Funnel terminates TLS at Tailscale and forwards from the
+  internet, so TradingView can POST to
+  `https://<hostname>.<dns-name>/secret/webhook` without the host publishing
+  `WEBHOOK_PORT`, and the webhook token/HMAC plus `X-API-KEY` are the only
+  guard in front of it. Funnel must be enabled for the tailnet and the node
+  must carry the `funnel` attribute; remove the `Web`/`AllowFunnel` blocks
+  from the template to keep the node tailnet-only.
+
+- **Optional Tailscale-secured NATS and Postgres, as a container** — one `.env`
+  switch, `TAILSCALE_ENABLED` (default **`false`**). Turned on, `make dev`/
+  `make start` also start a `tailscale` container (`tailscale/tailscale`,
+  profile `tailscale`) that joins the tailnet as `TAILSCALE_HOSTNAME` and, via
+  Tailscale Serve (`config/tailscale/serve.json`), forwards its tailnet ports
+  4222 (NATS), 8222 (NATS monitoring) and 5432 (Postgres) to the stack; the
+  NATS and Postgres host ports are then published on `127.0.0.1` only, so the
+  tailnet is the only way in from another machine. Other services connect to
+  `nats://<TAILSCALE_HOSTNAME>:4222`. Nothing is installed on the host and no
+  tailnet IP is copied into `.env`: the only other variables are
+  `TAILSCALE_AUTHKEY` (first login only — the node identity is kept in the new
+  `tailscale_state` volume) and `TAILSCALE_HOSTNAME`. Turned off, the container
+  is never pulled and every port binds `0.0.0.0` as before. The switch is read
+  by the Makefile (`PRIVATE_BIND_ADDRESS`); a bare `docker compose up` ignores
+  it and binds `0.0.0.0`.
+  New `config/tailscale/policy.hujson` is the tailnet policy for the whole
+  deployment — `tag:ingester` → `tag:engine:4222`,
+  `tag:engine`/`tag:worker` → `tag:broker:4222`, admins → everything — with a
+  `tests` block the admin console runs on every save. New
+  `make tailscale-status`; `make stop` now also stops the `tailscale`
+  container.
+  Inside the stack NATS now always listens on 4222/8222: `NATS_PORT` and
+  `NATS_MONITOR_PORT` only move the host side of the mapping, exactly like
+  `POSTGRES_PORT` (the broker container is given `NATS_PORT=4222`). Nothing
+  changes with the defaults.
+  **If you ran the earlier `dev` version of this feature** (Tailscale installed
+  on the host, `TAILSCALE_IP` in `.env`): `TAILSCALE_IP`, the
+  `tailscale-check` container and `make check-tailscale` are gone. Remove
+  `TAILSCALE_IP`, add `TAILSCALE_AUTHKEY`/`TAILSCALE_HOSTNAME`, and repoint
+  remote NATS clients at the new node's name. The host's own Tailscale can
+  stay (for SSH) or be removed; it is a separate node and no longer carries
+  NATS.
+
+- **`position.use_equity_sizing` on the webhook payload** — an optional boolean
+  telling the worker to size the position off account **equity** (balance plus
+  floating P/L) instead of the plain balance. It is accepted on the webhook
+  `position` block, forwarded unchanged on the NATS `SIGNAL` payload
+  (`TradingSignal`) and captured in the broadcast event. Omitting it (or
+  sending `null`) keeps the previous behaviour: the worker's own default.
+
 ## [1.1.3] - 2026-08-21
 
 ### Added

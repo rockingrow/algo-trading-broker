@@ -117,6 +117,7 @@ class UserMessages:
     "/flat — Close all positions\n"
     "/prevent — Block new orders\n"
     "/allow — Allow new orders\n"
+    "/maxorders — Max open positions\n"
     "/status — Account info + open positions\n"
     "/myaccounts — List linked accounts\n"
     "/link — Add another account\n"
@@ -125,6 +126,54 @@ class UserMessages:
     "/subscribe — Live trade alerts\n"
     "/unsubscribe — Stop trade alerts"
   )
+
+  @staticmethod
+  def format_max_open_orders(state: dict[str, Any], account_id: Any = None) -> str:
+    """The cap in force, where it came from, and how to change it.
+
+    ``source`` is spelled out rather than implied by the number: "5" means two
+    different things depending on whether the user chose it or inherited it, and
+    only one of them is theirs to clear.
+
+    The account is named because the reply that follows is a bare number: the
+    user has to be able to see which account they are about to change, and the
+    handler re-checks that same account before it writes.
+    """
+    limit = state.get("max_open_orders")
+    inherited = state.get("source") != "account"
+    shown = "<b>no limit</b>" if limit == 0 else f"<b>{_esc(limit)}</b>"
+    origin = (
+      "the broker-wide default" if inherited else "your own setting for this account"
+    )
+    lines = [
+      f"{emojis.GEAR} <b>Max open positions</b>\n",
+    ]
+    if account_id is not None:
+      lines.append(f"Account: <code>{_esc(account_id)}</code>\n")
+    lines.append(f"Current: {shown} — {origin}\n")
+    if not inherited:
+      lines.append(
+        f"Default if you clear it: <b>{_esc(state.get('global_max_open_orders'))}</b>\n"
+      )
+    lines.append(
+      "\nThis caps how many positions your account may hold at once. A new entry "
+      "beyond it is not placed — it is recorded as rejected and reported back.\n\n"
+      "Send a new number (<code>0</code> = no limit), <code>-</code> to go back to "
+      "the default, or /cancel to abort."
+    )
+    return "".join(lines)
+
+  @staticmethod
+  def format_max_open_orders_updated(state: dict[str, Any]) -> str:
+    limit = state.get("max_open_orders")
+    shown = "<b>no limit</b>" if limit == 0 else f"<b>{_esc(limit)}</b>"
+    suffix = " (the broker-wide default)" if state.get("source") != "account" else ""
+    return (
+      f"{emojis.CHECK} <b>Max open positions updated</b>\n"
+      f"Now: {shown}{suffix}\n\n"
+      "<i>Your worker has been notified, and will apply it on reconnect "
+      "regardless.</i>"
+    )
 
   @staticmethod
   def format_broadcast_subscription(subscribed: bool) -> str:
@@ -243,7 +292,8 @@ class UserMessages:
     if data:
       blocks.append(
         f"<b>{emojis.CHART} Open positions</b> · times in "
-        f"{format_utc_label(tz_offset_hours)}\n\n" + _trades_table(data, tz_offset_hours)
+        f"{format_utc_label(tz_offset_hours)}\n\n"
+        + _trades_table(data, tz_offset_hours)
       )
     return "\n\n".join(blocks)
 
@@ -394,6 +444,7 @@ class AdminMessages:
     "/admin_magicmap — Edit strategy magic map\n"
     "/admin_crypto_symbols — Set crypto allowed symbols\n"
     "/admin_crypto_leverage — Set crypto max leverage\n"
+    "/admin_max_orders — Set the default max open positions\n"
     "/admin_public_chats — Public broadcast chats\n"
     "/admin_private_reply_notify — Toggle private broadcast reply notify\n"
     "/admin_public_reply_notify — Toggle public broadcast reply notify\n"

@@ -31,7 +31,9 @@ only to the strategies it handles, so it never sees another strategy's traffic.
 - **Entry / target / stop payloads** are a full `TradingSignal`: `signal_id`,
   `signal_uxid`, `timestamp`, `strategy`, `action`, `symbol`, `price`,
   `quantity`, plus the
-  optional `sl` / `tp1` / `tp2` / `risk_percent` risk levels. A **scale-in**
+  optional `sl` / `tp1` / `tp2` / `risk_percent` risk levels and the
+  optional `use_equity_sizing` flag (size off account equity instead of
+  balance). A **scale-in**
   additionally sets `is_scale_position: true`, `scale_strategy`, and a `scaling`
   block (`tp` / `sl` / `quantity`) describing the add.
 - **The FLAT directive** is a lighter payload carrying only `signal_id`,
@@ -116,12 +118,22 @@ travels inside one `WORKER_CONNECTED_ACK`:
   handler and de-duplicate by `signal_id`. Always present; `[]` means nothing
   to replay.
 - `settings` — the worker's own `accounts.settings` blob: what its owner set
-  from the bot, today `signal_blocked` (`/prevent` → `true`, `/allow` →
-  `false`). Always present and always complete — an account that has never run
-  a command gets the defaults — so a worker connecting after a restart, or
-  reconnecting after being offline, honours what was set while it was away
-  instead of coming up unblocked. The `BLOCK_SIGNAL`/`ALLOW_SIGNAL` ADMIN
-  message stays the *live* push; this is the durable copy.
+  from the bot — `signal_blocked` (`/prevent` → `true`, `/allow` → `false`) and
+  `max_open_orders` (`/maxorders`). Always present and always complete — an
+  account that has never run a command gets the defaults — so a worker
+  connecting after a restart, or reconnecting after being offline, honours what
+  was set while it was away instead of coming up unblocked. The
+  `BLOCK_SIGNAL`/`ALLOW_SIGNAL` ADMIN message and the `WORKER_SETTINGS_UPDATE`
+  below stay the *live* push; this is the durable copy.
+
+  `max_open_orders` caps how many positions the account may hold at once (`0` =
+  no cap) and is **always a number here**, never `null`: it has two scopes on
+  the broker — the account's own value in `accounts.settings`, and the
+  broker-wide `max_open_orders` setting it falls back to (default `5`) — and the
+  broker resolves them before replying, so a worker never has to know the global
+  default exists. It is also what the worker enforces instead of its own
+  `MAX_OPEN_ORDERS` env var, which no longer exists: a worker falls back to its
+  built-in default of `5` only if the broker sends no value at all.
 - `crypto_leverage_init` — allowed `symbols` + `default_leverage`, **only** for
   a crypto worker; `null` for every other market.
 
@@ -130,6 +142,7 @@ travels inside one `WORKER_CONNECTED_ACK`:
 | `WORKER_CONNECTED_ACK` | reply inbox (or `SYSTEM` for a fire-and-forget worker) | Handshake accepted; carries the worker's whole initial configuration | forex: [`system.worker_connected_ack.json`](system.worker_connected_ack.json) — crypto: [`system.worker_connected_ack.crypto.json`](system.worker_connected_ack.crypto.json) |
 | `WORKER_CONNECTED_ERROR` | reply inbox | Handshake received but the broker could not build the initial config (carries `reason`). Sent *instead of* the ACK, never after it | [`system.worker_connected_error.json`](system.worker_connected_error.json) |
 | `CRYPTO_LEVERAGE_INIT` | `SYSTEM` | Push allowed crypto `symbols` + `default_leverage` to workers that are **already connected**, after an admin changes the setting. A worker's connect-time copy rides inside the ACK instead | [`system.crypto_leverage_init.json`](system.crypto_leverage_init.json) |
+| `WORKER_SETTINGS_UPDATE` | `SYSTEM` | Push the account's resolved `settings` block to a worker that is **already connected**, after its owner changes a value from the bot (`/maxorders`) or an admin changes the broker-wide default. Same block, same values and same worker-side code path as the ACK's, so the two can never disagree. A worker that was offline for the change picks it up in its next handshake | [`system.worker_settings_update.json`](system.worker_settings_update.json) |
 
 ---
 

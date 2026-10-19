@@ -3,6 +3,8 @@ import json
 from broker.constants import (
   CRYPTO_ALLOWED_SYMBOL_KEY,
   CRYPTO_MAX_LEVERAGE_KEY,
+  DEFAULT_MAX_OPEN_ORDERS,
+  MAX_OPEN_ORDERS_KEY,
   STRATEGY_MAGIC_MAP_KEY,
 )
 from broker.schemas.account_schema import MarketTypeEnum
@@ -486,7 +488,150 @@ async def test_ack_settings_ignores_unknown_keys():
 
   settings = publisher.acks[0]["settings"]
   assert settings.signal_blocked is True
-  assert settings.model_dump() == {"signal_blocked": True}
+  # max_open_orders is absent from the blob, so the worker is handed the global
+  # default rather than a null it would have to interpret.
+  assert settings.model_dump() == {
+    "signal_blocked": True,
+    "max_open_orders": DEFAULT_MAX_OPEN_ORDERS,
+  }
+
+
+# ── max_open_orders: account value, else the global default ────────────────
+#
+# Two scopes feed one field. The worker must never have to know that: whatever
+# it is told is the number it enforces, so every path below has to resolve to a
+# concrete value.
+
+
+async def test_max_open_orders_falls_back_to_the_global_setting():
+  accounts = FakeAccountRepo(settings={})
+  consumer, _repo, publisher = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+      CRYPTO_MAX_LEVERAGE_KEY: "10",
+      MAX_OPEN_ORDERS_KEY: "12",
+    },
+    accounts=accounts,
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert publisher.acks[0]["settings"].max_open_orders == 12
+
+
+async def test_max_open_orders_prefers_the_accounts_own_value():
+  accounts = FakeAccountRepo(settings={"max_open_orders": 3})
+  consumer, _repo, publisher = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+      CRYPTO_MAX_LEVERAGE_KEY: "10",
+      MAX_OPEN_ORDERS_KEY: "12",
+    },
+    accounts=accounts,
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert publisher.acks[0]["settings"].max_open_orders == 3
+
+
+async def test_account_max_open_orders_of_zero_is_not_mistaken_for_unset():
+  # 0 means "no cap" and is a deliberate choice, so it must win over the global
+  # default rather than reading as "nothing set here".
+  accounts = FakeAccountRepo(settings={"max_open_orders": 0})
+  consumer, _repo, publisher = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+      CRYPTO_MAX_LEVERAGE_KEY: "10",
+      MAX_OPEN_ORDERS_KEY: "12",
+    },
+    accounts=accounts,
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert publisher.acks[0]["settings"].max_open_orders == 0
+
+
+async def test_unset_global_max_open_orders_uses_the_documented_default():
+  consumer, _repo, publisher = _make_consumer(accounts=FakeAccountRepo(settings={}))
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert publisher.acks[0]["settings"].max_open_orders == DEFAULT_MAX_OPEN_ORDERS
+
+
+async def test_invalid_global_max_open_orders_uses_the_documented_default():
+  # A hand-edited row must not cost the worker its cap: the block still carries
+  # a number, so the guard keeps working.
+  consumer, _repo, publisher = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+      CRYPTO_MAX_LEVERAGE_KEY: "10",
+      MAX_OPEN_ORDERS_KEY: "lots",
+    },
+    accounts=FakeAccountRepo(settings={}),
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert publisher.acks[0]["settings"].max_open_orders == DEFAULT_MAX_OPEN_ORDERS
+
+
+async def test_a_changed_global_default_reaches_the_very_next_handshake():
+  """The ACK is the durable path: a worker reconnecting right after an admin
+  changed the default must get the new cap, not a cached one it would then keep
+  until its next reconnect."""
+  repo_settings = {
+    CRYPTO_ALLOWED_SYMBOL_KEY: "BTC,ETH",
+    CRYPTO_MAX_LEVERAGE_KEY: "10",
+    MAX_OPEN_ORDERS_KEY: "5",
+  }
+  consumer, repo, publisher = _make_consumer(
+    settings=repo_settings, accounts=FakeAccountRepo(settings={})
+  )
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+  assert publisher.acks[0]["settings"].max_open_orders == 5
+
+  # An admin raises the default; the next handshake is immediate.
+  await repo.set(MAX_OPEN_ORDERS_KEY, "12")
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  assert publisher.acks[1]["settings"].max_open_orders == 12
+
+
+async def test_one_invalid_setting_does_not_cost_the_others():
+  """A hand-edited ``max_open_orders`` must not take ``signal_blocked`` with
+  it: parsing the blob as one unit would hand the worker an *unblocked* account
+  and resume trading on one an operator had stopped."""
+  accounts = FakeAccountRepo(
+    settings={"signal_blocked": True, "max_open_orders": "garbage"}
+  )
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  settings = publisher.acks[0]["settings"]
+  assert settings.signal_blocked is True
+  assert settings.max_open_orders == DEFAULT_MAX_OPEN_ORDERS
+
+
+async def test_a_negative_stored_cap_falls_back_without_losing_the_block():
+  """``ge=0`` is a field constraint, so it has to be checked per field too —
+  checking the annotation alone would accept it here and raise on construction."""
+  accounts = FakeAccountRepo(settings={"signal_blocked": True, "max_open_orders": -1})
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  settings = publisher.acks[0]["settings"]
+  assert settings.signal_blocked is True
+  assert settings.max_open_orders == DEFAULT_MAX_OPEN_ORDERS
+
+
+async def test_invalid_account_blob_still_resolves_max_open_orders():
+  # The blob is unusable, so signal_blocked falls back to its default — but the
+  # worker is still told a concrete cap rather than being left with null.
+  accounts = FakeAccountRepo(settings={"signal_blocked": "not-a-bool"})
+  consumer, _repo, publisher = _make_consumer(accounts=accounts)
+  await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
+
+  settings = publisher.acks[0]["settings"]
+  assert settings.signal_blocked is False
+  assert settings.max_open_orders == DEFAULT_MAX_OPEN_ORDERS
 
 
 async def test_ack_settings_fall_back_to_defaults_when_the_blob_is_invalid():
@@ -689,11 +834,14 @@ async def test_second_handshake_within_ttl_reuses_cached_settings():
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
   await consumer.handle_subject_system(FakeMsg(_worker_connected_payload()))
 
-  # Both handshakes got a reply, but the DB was only queried once.
+  # Both handshakes got a reply, but the crypto pair was only queried once.
   assert len(publisher.acks) == 2
   assert len(repo.get_many_calls) == 1
-  # get() (the non-atomic, per-key path) must not be used at all.
-  assert repo.get_calls == []
+  # The broker-wide max_open_orders default is the exception: it is read fresh
+  # on every handshake, because the ACK is durable and a cached read would
+  # strand a reconnecting worker on the old cap. See
+  # SystemEventConsumer._get_global_max_open_orders.
+  assert repo.get_calls == [MAX_OPEN_ORDERS_KEY, MAX_OPEN_ORDERS_KEY]
 
 
 async def test_cache_miss_fetches_both_settings_in_one_query():
@@ -1098,4 +1246,9 @@ async def test_magic_map_read_is_cached_within_ttl():
   await consumer.handle_subject_system(FakeMsg(payload))
   await consumer.handle_subject_system(FakeMsg(payload))
   assert len(publisher.acks) == 2
-  assert repo.get_calls == [STRATEGY_MAGIC_MAP_KEY]
+  # The magic map is cached across the two handshakes; max_open_orders is not.
+  assert repo.get_calls == [
+    STRATEGY_MAGIC_MAP_KEY,
+    MAX_OPEN_ORDERS_KEY,
+    MAX_OPEN_ORDERS_KEY,
+  ]

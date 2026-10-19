@@ -4,14 +4,24 @@ services:
   # ─────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: algo_trading_postgres
+    container_name: algo_trading_broker_postgres
     restart: always
+    # Memory ceilings, not reservations. The host has no swap, so without a
+    # per-container cap the kernel OOM killer picks its victim by score and
+    # is as likely to take Postgres — the signal audit log — as the container
+    # that actually leaked. A cap keeps the blast radius on the offender,
+    # which `restart: always` then brings back. Budget across the stack is
+    # ~2.3 GB of a 4 GB box; raise a single value rather than all of them.
+    mem_limit: 768m
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
       POSTGRES_USER: ${POSTGRES_USER:-algo_trading}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algotrading_broker_db_password}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Host-side port for tools on this machine (`make run`, a DB client).
+      # PRIVATE_BIND_ADDRESS is set by `make dev`/`make start` from
+      # TAILSCALE_ENABLED — see the `tailscale` service below.
+      - "${PRIVATE_BIND_ADDRESS:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,16 +33,74 @@ services:
       - trading_net
 
   # ─────────────────────────────────────────────────────────────────
+  # TAILSCALE — this stack's own node on the tailnet (profile `tailscale`,
+  # enabled by `make dev`/`make start` only when .env sets
+  # TAILSCALE_ENABLED=true). Nothing is installed on the host.
+  #
+  # The container joins the tailnet as TAILSCALE_HOSTNAME and, through
+  # Tailscale Serve (config/tailscale/serve.json), forwards its tailnet
+  # ports 4222/8222/5432 to nats and postgres over trading_net. The broker's
+  # HTTP port is not forwarded onto the tailnet: the only route to it from
+  # outside trading_net is Funnel on 443. Other
+  # servers therefore reach this broker at nats://<TAILSCALE_HOSTNAME>:4222
+  # and never need its tailnet IP; which of them may is decided by the
+  # tailnet policy (config/tailscale/policy.hujson), not here.
+  #
+  # While it is on, the Makefile publishes the NATS and Postgres host ports
+  # on 127.0.0.1 only (PRIVATE_BIND_ADDRESS), so the tailnet is the only way
+  # in from another machine. The webhook port stays public: TradingView is
+  # not on the tailnet.
+  #
+  # Userspace networking (the image's default): no /dev/net/tun and no
+  # NET_ADMIN, and nats/postgres keep their own network namespace, so a
+  # restart of this container only drops remote NATS clients for as long as
+  # it takes them to reconnect — the broker itself never loses NATS.
+  # ─────────────────────────────────────────────────────────────────
+  tailscale:
+    image: tailscale/tailscale:stable
+    container_name: algo_trading_broker_tailscale
+    profiles: ["tailscale"]
+    restart: always
+    mem_limit: 128m
+    environment:
+      # Needed only for the first login: the node's identity is kept in the
+      # tailscale_state volume, and TS_AUTH_ONCE stops a restart from logging
+      # in again with a single-use key that has already been spent.
+      TS_AUTHKEY: ${TAILSCALE_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: ${TAILSCALE_HOSTNAME:-algo-broker}
+      # Must be a tag the auth key may apply (policy.hujson → tagOwners).
+      TS_EXTRA_ARGS: --advertise-tags=tag:broker
+      TS_STATE_DIR: /var/lib/tailscale
+      # The directory is watched, not just the file: editing serve.json is
+      # applied live, without restarting the container.
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - ./config/tailscale:/config:ro
+    networks:
+      - trading_net
+
+  # ─────────────────────────────────────────────────────────────────
   # NATS — message broker (broker <-> workers)
   # ─────────────────────────────────────────────────────────────────
   nats:
     image: nats:2.10-alpine
-    container_name: algo_trading_nats
+    container_name: algo_trading_broker_nats
     restart: always
+    # JetStream keeps the SIGNALS stream on disk, so this bounds buffers
+    # and connection state, not the stream itself.
+    mem_limit: 512m
     ports:
-      - "${NATS_PORT:-4222}:${NATS_PORT:-4222}"                       # client connections (workers connect from outside)
-      - "${NATS_MONITOR_PORT:-8222}:${NATS_MONITOR_PORT:-8222}"       # HTTP monitoring dashboard
-    command: ["-js", "-sd", "/data/jetstream", "--port", "${NATS_PORT:-4222}", "--auth", "${NATS_TOKEN:-changeme}", "--http_port", "${NATS_MONITOR_PORT:-8222}"]
+      # Inside the stack NATS always listens on 4222/8222; NATS_PORT and
+      # NATS_MONITOR_PORT only move the host side, like POSTGRES_PORT.
+      # PRIVATE_BIND_ADDRESS comes from `make dev`/`make start`: 0.0.0.0
+      # with Tailscale off (workers connect to this host's address), and
+      # 127.0.0.1 with it on (remote clients come in through the `tailscale`
+      # service instead). A bare `docker compose up` falls back to 0.0.0.0.
+      - "${PRIVATE_BIND_ADDRESS:-0.0.0.0}:${NATS_PORT:-4222}:4222"  # NATS client port — any service connecting to the broker's NATS
+      - "${PRIVATE_BIND_ADDRESS:-0.0.0.0}:${NATS_MONITOR_PORT:-8222}:8222"  # HTTP monitoring dashboard
+    command: ["-js", "-sd", "/data/jetstream", "--port", "4222", "--auth", "${NATS_TOKEN:-changeme}", "--http_port", "8222"]
     volumes:
       - nats_data:/data/jetstream
     networks:
@@ -46,7 +114,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        WEBHOOK_PORT: "${WEBHOOK_PORT:-8080}"
+        WEBHOOK_PORT: "${WEBHOOK_PORT:-80}"
     develop:
       watch:
         - action: sync+restart
@@ -57,22 +125,34 @@ services:
         - action: rebuild
           path: ./uv.lock
     image: algo-trading-broker:latest
-    container_name: algo_trading_broker
+    container_name: algo_trading_broker_broker
     restart: always
+    mem_limit: 512m
     depends_on:
       postgres:
         condition: service_healthy
       nats:
         condition: service_started
     ports:
-      - "${WEBHOOK_PORT:-8080}:${WEBHOOK_PORT:-8080}"      # TradingView webhook
+      # The webhook's host-side port, for a local curl and for `make status`.
+      # PRIVATE_BIND_ADDRESS (from TAILSCALE_ENABLED, like nats/postgres above)
+      # closes it to 127.0.0.1 when Tailscale is on: TradingView then arrives
+      # through Funnel on 443, and the bot and the `tailscale`
+      # container reach broker:80 over trading_net, so nothing needs this port
+      # published on the VPS' public address. Published on 0.0.0.0 it is the
+      # one FastAPI surface the whole internet can enumerate by IP alone —
+      # which is exactly what the endpoint scanners find.
+      - "${PRIVATE_BIND_ADDRESS:-0.0.0.0}:${WEBHOOK_PORT:-80}:${WEBHOOK_PORT:-80}"
     env_file:
       - .env
     environment:
       WEBHOOK_HOST: "0.0.0.0"
-      WEBHOOK_PORT: "${WEBHOOK_PORT:-8080}"                # use unprivileged port for Windows compatibility
+      WEBHOOK_PORT: "${WEBHOOK_PORT:-80}"                # container runs as root, so it may bind 80
       NATS_HOST: "nats"   # Docker service name, overrides NATS_HOST=localhost from .env
+      NATS_PORT: "4222"   # container's real listen port; overrides host-mapping NATS_PORT from .env
+      NATS_MONITOR_PORT: "8222"   # same, for the monitoring endpoint `make status` reads
       POSTGRES_HOST: postgres             # service name resolves via docker network
+      POSTGRES_PORT: "5432"                # container's real listen port; overrides host-mapping POSTGRES_PORT from .env
       POSTGRES_DB: ${POSTGRES_DB:-algo_trading_broker}
       POSTGRES_USER: ${POSTGRES_USER:-algo_trading}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algotrading_broker_db_password}
@@ -97,8 +177,9 @@ services:
         - action: rebuild
           path: ./bot/pyproject.toml
     image: algo-trading-bot:latest
-    container_name: algo_trading_bot
+    container_name: algo_trading_broker_bot
     restart: always
+    mem_limit: 384m
     depends_on:
       broker:
         condition: service_started
@@ -106,7 +187,7 @@ services:
       - .env
     environment:
       # Reach the broker over the internal docker network (no public port needed).
-      BOT_BROKER_BASE_URL: "http://broker:${WEBHOOK_PORT:-8080}"
+      BOT_BROKER_BASE_URL: "http://broker:${WEBHOOK_PORT:-80}"
     volumes:
       - ./logs:/app/logs
     networks:
@@ -115,6 +196,7 @@ services:
 volumes:
   postgres_data:
   nats_data:
+  tailscale_state:
 
 networks:
   trading_net:

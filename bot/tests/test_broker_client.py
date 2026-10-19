@@ -10,7 +10,7 @@ from app.services.broker_client import BrokerClientAdmin, BrokerClientUser
 
 def _client(handler, api_prefix=""):
   return BrokerClientUser(
-    base_url="http://broker:8080",
+    base_url="http://broker:80",
     api_key="secret-key",
     api_prefix=api_prefix,
     transport=httpx.MockTransport(handler),
@@ -19,7 +19,7 @@ def _client(handler, api_prefix=""):
 
 def _admin_client(handler, api_prefix=""):
   return BrokerClientAdmin(
-    base_url="http://broker:8080",
+    base_url="http://broker:80",
     api_key="secret-key",
     api_prefix=api_prefix,
     transport=httpx.MockTransport(handler),

@@ -195,7 +195,7 @@ async def test_publish_system_ack():
   # nothing to send, so a worker can parse them unconditionally.
   assert body["strategy_magic_map"] == {}
   assert body["retry_signals"] == []
-  assert body["settings"] == {"signal_blocked": False}
+  assert body["settings"] == {"signal_blocked": False, "max_open_orders": None}
   assert body["crypto_leverage_init"] is None
 
 
@@ -222,7 +222,7 @@ async def test_publish_system_ack_carries_the_whole_handshake_config():
   assert body["strategy_magic_map"] == {"MT5_GOLD_M5_V1": 20260409}
   assert len(body["retry_signals"]) == 1
   assert body["retry_signals"][0]["signal_id"] == "sig-1"
-  assert body["settings"] == {"signal_blocked": True}
+  assert body["settings"] == {"signal_blocked": True, "max_open_orders": None}
   assert body["crypto_leverage_init"] == {
     "symbols": ["BTC", "ETH"],
     "default_leverage": 10,

@@ -11,6 +11,7 @@
     "risk_percent": 3.0,
     "is_running": false,
     "tp1_percent": 30.0,
+    "use_equity_sizing": true,
     "move_sl_to_be": true
   },
   "indicators": {},

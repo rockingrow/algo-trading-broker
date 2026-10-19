@@ -10,5 +10,6 @@
   "sl": 2360.0,
   "tp1": 2330.0,
   "tp2": 2310.0,
-  "risk_percent": 1.0
+  "risk_percent": 1.0,
+  "use_equity_sizing": true
 }

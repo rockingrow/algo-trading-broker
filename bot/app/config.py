@@ -33,7 +33,7 @@ class BotSettings(BaseSettings):
   # Broker HTTP API the bot talks to.
   BROKER_API_KEY: str
   BROKER_API_PREFIX: str = ""  # secret URL segment, if the broker uses one
-  BOT_BROKER_BASE_URL: str = "http://broker:8080"
+  BOT_BROKER_BASE_URL: str = "http://broker:80"
 
   # Bot behaviour.
   # Page sizes are not here: they're sized to each table's width, so they live

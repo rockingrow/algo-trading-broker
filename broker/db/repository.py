@@ -1024,8 +1024,9 @@ class SqlAlchemyBroadcastMessageRepository:
     action: SignalActionEnum,
     event: dict,
   ) -> BroadcastMessage | None:
-    """Find-or-create the cycle for ``(strategy, signal_uxid)``, append *event*
-    to it and log the change. Returns the up-to-date row, or None on failure.
+    """Find-or-create the cycle for ``(symbol, strategy, signal_uxid)``, append
+    *event* to it and log the change. Returns the up-to-date row, or None on
+    failure.
 
     This is one call rather than a get + create/update pair because the unique
     key is exactly what makes the cycle idempotent: two signals of the same
@@ -1042,7 +1043,7 @@ class SqlAlchemyBroadcastMessageRepository:
     for attempt in (1, 2):
       try:
         async with get_session() as session:
-          row = await self._locked_cycle(session, strategy, signal_uxid)
+          row = await self._locked_cycle(session, symbol, strategy, signal_uxid)
           incoming_status = status_for_action(action)
 
           if row is None:
@@ -1066,7 +1067,8 @@ class SqlAlchemyBroadcastMessageRepository:
             await session.flush()
             await session.refresh(row)
             log.info(
-              "broadcast cycle opened strategy=%s signal_uxid=%s action=%s",
+              "broadcast cycle opened symbol=%s strategy=%s signal_uxid=%s action=%s",
+              symbol,
               strategy,
               signal_uxid,
               action.value,
@@ -1077,7 +1079,9 @@ class SqlAlchemyBroadcastMessageRepository:
             # A replay: the cycle already shows this line, so there is nothing
             # to deliver. Returning the row keeps the caller's flow uniform.
             log.debug(
-              "broadcast cycle replay ignored strategy=%s signal_uxid=%s action=%s",
+              "broadcast cycle replay ignored symbol=%s strategy=%s signal_uxid=%s "
+              "action=%s",
+              symbol,
               strategy,
               signal_uxid,
               action.value,
@@ -1101,7 +1105,9 @@ class SqlAlchemyBroadcastMessageRepository:
           await session.flush()
           await session.refresh(row)
           log.debug(
-            "broadcast cycle updated strategy=%s signal_uxid=%s action=%s seq=%d",
+            "broadcast cycle updated symbol=%s strategy=%s signal_uxid=%s "
+            "action=%s seq=%d",
+            symbol,
             strategy,
             signal_uxid,
             action.value,
@@ -1111,20 +1117,24 @@ class SqlAlchemyBroadcastMessageRepository:
       except IntegrityError:
         if attempt == 1:
           log.debug(
-            "broadcast cycle insert raced strategy=%s signal_uxid=%s — retrying",
+            "broadcast cycle insert raced symbol=%s strategy=%s signal_uxid=%s "
+            "— retrying",
+            symbol,
             strategy,
             signal_uxid,
           )
           continue
         log.exception(
-          "Failed to record broadcast event strategy=%s signal_uxid=%s",
+          "Failed to record broadcast event symbol=%s strategy=%s signal_uxid=%s",
+          symbol,
           strategy,
           signal_uxid,
         )
         return None
       except Exception as exc:
         log.exception(
-          "Failed to record broadcast event strategy=%s signal_uxid=%s: %s",
+          "Failed to record broadcast event symbol=%s strategy=%s signal_uxid=%s: %s",
+          symbol,
           strategy,
           signal_uxid,
           exc,
@@ -1135,6 +1145,7 @@ class SqlAlchemyBroadcastMessageRepository:
   async def record_worker_execution(
     self,
     *,
+    symbol: str,
     strategy: str,
     signal_uxid: str,
     worker_id: str,
@@ -1149,8 +1160,8 @@ class SqlAlchemyBroadcastMessageRepository:
     """Record that *worker_id* executed the cycle, and log the change.
 
     Returns the cycle (so the caller can log it), or None when there is no
-    cycle for ``(strategy, signal_uxid)`` — a worker can report a trade for a
-    signal that was never broadcast (Telegram off at the time, an older signal
+    cycle for ``(symbol, strategy, signal_uxid)`` — a worker can report a trade
+    for a signal that was never broadcast (Telegram off at the time, an older signal
     predating the cycle tables), and that is not an error.
 
     A repeat of the status a worker already showed is dropped without touching
@@ -1159,7 +1170,7 @@ class SqlAlchemyBroadcastMessageRepository:
     """
     try:
       async with get_session() as session:
-        row = await self._locked_cycle(session, strategy, signal_uxid)
+        row = await self._locked_cycle(session, symbol, strategy, signal_uxid)
         if row is None:
           return None
 
@@ -1220,7 +1231,9 @@ class SqlAlchemyBroadcastMessageRepository:
         await session.flush()
         await session.refresh(row)
         log.debug(
-          "broadcast worker recorded strategy=%s signal_uxid=%s worker_id=%s status=%s",
+          "broadcast worker recorded symbol=%s strategy=%s signal_uxid=%s "
+          "worker_id=%s status=%s",
+          symbol,
           strategy,
           signal_uxid,
           worker_id,
@@ -1229,7 +1242,9 @@ class SqlAlchemyBroadcastMessageRepository:
         return row
     except Exception as exc:
       log.exception(
-        "Failed to record broadcast worker strategy=%s signal_uxid=%s worker_id=%s: %s",
+        "Failed to record broadcast worker symbol=%s strategy=%s signal_uxid=%s "
+        "worker_id=%s: %s",
+        symbol,
         strategy,
         signal_uxid,
         worker_id,
@@ -1505,7 +1520,7 @@ class SqlAlchemyBroadcastMessageRepository:
   # ── Internals ──────────────────────────────────────────────────────
 
   async def _locked_cycle(
-    self, session: AsyncSession, strategy: str, signal_uxid: str
+    self, session: AsyncSession, symbol: str, strategy: str, signal_uxid: str
   ) -> Optional[BroadcastMessage]:
     """The cycle row for the key, locked ``FOR UPDATE`` for the transaction.
 
@@ -1513,10 +1528,15 @@ class SqlAlchemyBroadcastMessageRepository:
     extended and written back, so two concurrent writers without it would each
     append to the same snapshot and the second commit would silently drop the
     first one's line.
+
+    The key is the full ``(symbol, strategy, signal_uxid)`` triple — the same
+    columns as the table's unique constraint — so one symbol + strategy can
+    carry several live cycles at once and each one locks only its own row.
     """
     result = await session.execute(
       select(BroadcastMessage)
       .where(
+        BroadcastMessage.symbol == symbol,
         BroadcastMessage.strategy == strategy,
         BroadcastMessage.signal_uxid == signal_uxid,
       )

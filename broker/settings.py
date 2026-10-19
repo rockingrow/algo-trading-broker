@@ -72,6 +72,9 @@ class NatsSettings(BaseSettings):
 
   HOST: str = "localhost"  # overridden to "nats" inside Docker
   PORT: int = 4222
+  # HTTP monitoring endpoint (/connz), read by ``make status``. Overridden to
+  # 8222 inside Docker, like PORT: .env carries the host side of the mapping.
+  MONITOR_PORT: int = 8222
   TOKEN: str = ""  # token auth; leave blank = no auth
 
   @property

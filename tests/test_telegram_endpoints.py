@@ -13,10 +13,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from broker.constants import DEFAULT_MAX_OPEN_ORDERS, MAX_OPEN_ORDERS_KEY
 from broker.db.models import Account, Trade
 from broker.providers import (
   get_account_repository,
   get_publisher,
+  get_setting_repository,
   get_trade_repository,
 )
 from broker.router import get_core_router
@@ -129,9 +131,31 @@ class FakeTradeRepo:
 class FakePublisher:
   def __init__(self):
     self.admin_signals = []
+    self.settings_updates = []
 
   async def publish_admin_signal(self, **kwargs):
     self.admin_signals.append(kwargs)
+
+  async def publish_system_settings_update(self, **kwargs):
+    self.settings_updates.append(kwargs)
+
+
+class FakeSettingRepo:
+  """Just enough of the broker-wide settings for the endpoints that read a
+  global default (``max_open_orders``)."""
+
+  def __init__(self, values=None):
+    self.values = dict(values or {})
+
+  async def get(self, key):
+    return self.values.get(key)
+
+  async def get_many(self, keys):
+    return {k: v for k, v in self.values.items() if k in keys and v is not None}
+
+  async def set(self, key, value):
+    self.values[key] = value
+    return True
 
 
 def _make_account() -> Account:
@@ -175,16 +199,19 @@ def ctx():
   account_repo = FakeTgAccountRepo(_make_account())
   trade_repo = FakeTradeRepo([_make_trade()], total=1)
   publisher = FakePublisher()
+  setting_repo = FakeSettingRepo()
 
   app.dependency_overrides[get_account_repository] = lambda: account_repo
   app.dependency_overrides[get_trade_repository] = lambda: trade_repo
   app.dependency_overrides[get_publisher] = lambda: publisher
+  app.dependency_overrides[get_setting_repository] = lambda: setting_repo
   app.dependency_overrides[ensure_api_key] = lambda: None
 
   return {
     "client": TestClient(app),
     "account_repo": account_repo,
     "publisher": publisher,
+    "setting_repo": setting_repo,
   }
 
 
@@ -612,6 +639,160 @@ def test_relinking_same_account_is_idempotent(ctx):
 
   resp = ctx["client"].get(f"/v1/telegram/{TG_ID}/accounts", headers=_headers())
   assert len(resp.json()) == 1
+
+
+# ── max_open_orders ─────────────────────────────────────────────────
+#
+# The owner's own cap, over the broker-wide default. The endpoint reports the
+# *effective* value plus where it came from, so the bot can tell "5 because I
+# chose it" from "5 because nobody has" — only the first is theirs to clear.
+
+
+def _set_max_orders(ctx, value):
+  return ctx["client"].post(
+    f"/v1/telegram/{TG_ID}/settings/max-open-orders",
+    json={"max_open_orders": value},
+    headers=_headers(),
+  )
+
+
+def test_get_max_open_orders_falls_back_to_the_global_default(ctx):
+  _link(ctx)
+  ctx["setting_repo"].values[MAX_OPEN_ORDERS_KEY] = "7"
+
+  resp = ctx["client"].get(
+    f"/v1/telegram/{TG_ID}/settings/max-open-orders", headers=_headers()
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "max_open_orders": 7,
+    "source": "global",
+    "global_max_open_orders": 7,
+  }
+
+
+def test_get_max_open_orders_reports_an_unset_global_as_the_documented_default(ctx):
+  _link(ctx)
+  resp = ctx["client"].get(
+    f"/v1/telegram/{TG_ID}/settings/max-open-orders", headers=_headers()
+  )
+  assert resp.status_code == 200
+  body = resp.json()
+  assert body["max_open_orders"] == DEFAULT_MAX_OPEN_ORDERS
+  assert body["source"] == "global"
+
+
+def test_get_max_open_orders_prefers_the_accounts_own_value(ctx):
+  _link(ctx)
+  ctx["setting_repo"].values[MAX_OPEN_ORDERS_KEY] = "7"
+  ctx["account_repo"]._accounts[0].settings = {"max_open_orders": 2}
+
+  resp = ctx["client"].get(
+    f"/v1/telegram/{TG_ID}/settings/max-open-orders", headers=_headers()
+  )
+  assert resp.json() == {
+    "max_open_orders": 2,
+    "source": "account",
+    "global_max_open_orders": 7,
+  }
+
+
+def test_set_max_open_orders_persists_and_pushes(ctx):
+  _link(ctx)
+  ctx["account_repo"]._accounts[0].gateway = "MT5"
+
+  resp = _set_max_orders(ctx, 3)
+  assert resp.status_code == 200
+  assert resp.json()["max_open_orders"] == 3
+  assert resp.json()["source"] == "account"
+  # Persisted: this, not the push, is what the next handshake replays.
+  assert ctx["account_repo"]._accounts[0].settings["max_open_orders"] == 3
+
+  # Pushed live, addressed to the worker's composite id.
+  pushed = ctx["publisher"].settings_updates[-1]
+  assert pushed["account_id"] == "FOREX-MT5-acc-1"
+  assert pushed["settings"].max_open_orders == 3
+
+
+def test_set_max_open_orders_pushes_the_whole_resolved_block(ctx):
+  # The worker applies the push through its handshake code path, which reads
+  # every setting it knows — so the block carries them all, not just the one
+  # that changed.
+  _link(ctx)
+  ctx["account_repo"]._accounts[0].gateway = "MT5"
+  ctx["account_repo"]._accounts[0].settings = {"signal_blocked": True}
+
+  _set_max_orders(ctx, 4)
+
+  pushed = ctx["publisher"].settings_updates[-1]["settings"]
+  assert pushed.signal_blocked is True
+  assert pushed.max_open_orders == 4
+
+
+def test_set_max_open_orders_to_zero_is_kept_as_no_limit(ctx):
+  _link(ctx)
+  ctx["setting_repo"].values[MAX_OPEN_ORDERS_KEY] = "7"
+  ctx["account_repo"]._accounts[0].gateway = "MT5"
+
+  resp = _set_max_orders(ctx, 0)
+  assert resp.status_code == 200
+  # 0 is a choice, not an absence: it must not resolve back to the global 7.
+  assert resp.json() == {
+    "max_open_orders": 0,
+    "source": "account",
+    "global_max_open_orders": 7,
+  }
+  assert ctx["publisher"].settings_updates[-1]["settings"].max_open_orders == 0
+
+
+def test_set_max_open_orders_to_null_clears_the_override(ctx):
+  _link(ctx)
+  ctx["setting_repo"].values[MAX_OPEN_ORDERS_KEY] = "7"
+  ctx["account_repo"]._accounts[0].gateway = "MT5"
+  _set_max_orders(ctx, 2)
+
+  resp = _set_max_orders(ctx, None)
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "max_open_orders": 7,
+    "source": "global",
+    "global_max_open_orders": 7,
+  }
+  # The key stays in the blob as null, which reads as "no override".
+  assert ctx["account_repo"]._accounts[0].settings["max_open_orders"] is None
+  assert ctx["publisher"].settings_updates[-1]["settings"].max_open_orders == 7
+
+
+def test_set_max_open_orders_rejects_a_negative_value(ctx):
+  _link(ctx)
+  assert _set_max_orders(ctx, -1).status_code == 422
+
+
+def test_set_max_open_orders_skips_the_push_without_a_gateway(ctx):
+  # No handshake and no trade yet, so there is no worker id to address — the
+  # value still persists and reaches the worker on its first handshake.
+  _link(ctx)
+  assert ctx["account_repo"]._accounts[0].gateway is None
+
+  resp = _set_max_orders(ctx, 3)
+  assert resp.status_code == 200
+  assert ctx["account_repo"]._accounts[0].settings["max_open_orders"] == 3
+  assert ctx["publisher"].settings_updates == []
+
+
+def test_set_max_open_orders_fails_when_the_write_fails(ctx):
+  _link(ctx)
+
+  async def failing_update(account_uuid, patch):
+    return None
+
+  ctx["account_repo"].update_settings = failing_update
+  assert _set_max_orders(ctx, 3).status_code == 500
+  assert ctx["publisher"].settings_updates == []
+
+
+def test_set_max_open_orders_requires_a_linked_account(ctx):
+  assert _set_max_orders(ctx, 3).status_code == 404
 
 
 # ── auth enforcement ────────────────────────────────────────────────

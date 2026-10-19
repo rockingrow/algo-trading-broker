@@ -21,6 +21,7 @@ http:
           "price": 60100,
           "quantity": 2.2,
           "risk_percent": 3.0,
+          "use_equity_sizing": true,
           "is_running": false
         },
         "indicators": {},

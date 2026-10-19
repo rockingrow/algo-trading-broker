@@ -438,11 +438,18 @@ class BroadcastMessage(Base):
 
   A cycle is everything one trade emits: the LONG/SHORT entry, its TP1/TP2,
   its SL/R_SL, a FLAT. All of them carry the same ``signal_uxid`` in the
-  webhook payload, so the pair ``(strategy, signal_uxid)`` identifies the
-  cycle and is the unique key. The first signal of a cycle inserts this row and
-  posts one Telegram message per broadcast chat; every later signal finds this
-  row and *edits* those messages instead of posting new ones, which is the
+  webhook payload, so the triple ``(symbol, strategy, signal_uxid)`` identifies
+  the cycle and is the unique key. The first signal of a cycle inserts this row
+  and posts one Telegram message per broadcast chat; every later signal finds
+  this row and *edits* those messages instead of posting new ones, which is the
   whole point — a channel shows one live message per trade rather than five.
+
+  ``symbol`` is part of the key because one ``symbol`` + ``strategy`` pair now
+  runs several trades at once, each with its own ``signal_uxid`` and its own
+  full entry-to-exit action trail. Keying on the cycle id alone would let a
+  ``signal_uxid`` produced for one symbol swallow another symbol's cycle; with
+  the symbol in the key, concurrent cycles stay separate rows — and separate
+  Telegram messages — whatever the producer does with its ids.
 
   The full history lives in ``events`` (JSONB, append-only) because the
   message body is re-rendered from scratch on every update; ``actions``,
@@ -453,15 +460,18 @@ class BroadcastMessage(Base):
   __tablename__ = "broadcast_messages"
   __table_args__ = (
     UniqueConstraint(
+      "symbol",
       "strategy",
       "signal_uxid",
-      name="uq_broadcast_messages_strategy_signal_uxid",
+      name="uq_broadcast_messages_symbol_strategy_signal_uxid",
     ),
   )
 
   strategy: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
   signal_uxid: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
 
+  # Not separately indexed: the cycle key's unique index leads with ``symbol``,
+  # so a symbol lookup already has one.
   symbol: Mapped[str] = mapped_column(String(50), nullable=False)
   timeframe: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
@@ -502,7 +512,8 @@ class BroadcastMessage(Base):
 
   def __repr__(self) -> str:
     return (
-      f"<BroadcastMessage id={self.id} strategy={self.strategy} "
+      f"<BroadcastMessage id={self.id} symbol={self.symbol} "
+      f"strategy={self.strategy} "
       f"signal_uxid={self.signal_uxid} latest_action={self.latest_action} "
       f"status={self.status} last_seq={self.last_seq}>"
     )
