@@ -1306,7 +1306,9 @@ async def test_record_event_appends_to_an_open_cycle(monkeypatch):
   assert row is existing  # updated in place, not re-inserted
   assert row.actions == "LONG,TP1"
   assert row.latest_action == SignalActionEnum.TP1
-  assert row.status == BroadcastStatusEnum.RUNNING
+  # A partial take-profit does not close the cycle, but it does move its
+  # status off RUNNING so the message header can name the level reached.
+  assert row.status == BroadcastStatusEnum.TP1
   assert len(row.events) == 2
 
 
@@ -1339,6 +1341,15 @@ async def test_record_event_closes_the_cycle_on_a_terminal_action(monkeypatch):
   session = FakeSession(results=[[_cycle()]])
   row = await _record(monkeypatch, session, action=SignalActionEnum.SL)
   assert row.status == BroadcastStatusEnum.CLOSED
+
+
+async def test_record_event_keeps_a_cycle_at_tp1_after_a_scale_in(monkeypatch):
+  """A second entry on a cycle that already took its partial profit must not
+  take the status back to RUNNING."""
+  partial = _cycle(status=BroadcastStatusEnum.TP1, actions="LONG,TP1")
+  session = FakeSession(results=[[partial]])
+  row = await _record(monkeypatch, session, action=SignalActionEnum.LONG)
+  assert row.status == BroadcastStatusEnum.TP1
 
 
 async def test_record_event_never_reopens_a_closed_cycle(monkeypatch):

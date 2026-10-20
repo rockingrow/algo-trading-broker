@@ -105,6 +105,26 @@ def _action_icon(last_action: str, status: TradeStatusEnum) -> str:
     return _STATUS_EMOJI.get(status, em.DEFAULT_SIGNAL)
 
 
+def _header_status(trade: Trade, status: TradeStatusEnum) -> tuple[str, str]:
+  """Icon and word for the card's ``[STATUS]`` header.
+
+  The same three states the broadcast header carries (see
+  ``broker/domain/broadcast_status.py``): a partial take-profit leaves the rest
+  of the position live, so it reads ``TP1`` rather than ``RUNNING`` — a card
+  that still said RUNNING after a TP1 filled read as a trade that had given
+  nothing back yet. A worker reports that fill as the ``PARTIALLY_CLOSED``
+  status, as a ``TP1`` last action, or both, so either one is enough.
+  """
+  if status in TERMINAL_STATUSES:
+    return _CLOSE_ICON, "CLOSED"
+  if (
+    status == TradeStatusEnum.PARTIALLY_CLOSED
+    or _enum_value(trade.last_action) == SignalActionEnum.TP1.value
+  ):
+    return em.TP1, SignalActionEnum.TP1.value
+  return em.CYCLE_RUNNING, "RUNNING"
+
+
 def _last_action_block(trade: Trade, status: TradeStatusEnum) -> list[str]:
   """The boxed "Actions:" section, mirroring the broadcast message's own —
   the event that moved the trade, when it says something the entry action and
@@ -158,8 +178,7 @@ def format_trade_card(
   status = trade_status(trade)
   action = _enum_value(trade.action)
   terminal = status in TERMINAL_STATUSES
-  status_icon = _CLOSE_ICON if terminal else em.CYCLE_RUNNING
-  status_word = "CLOSED" if terminal else "RUNNING"
+  status_icon, status_word = _header_status(trade, status)
   price_label = "Close price" if terminal else "Price"
 
   lines = [

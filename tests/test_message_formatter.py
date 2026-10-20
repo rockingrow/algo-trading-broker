@@ -101,6 +101,34 @@ def test_closed_cycle_shows_the_closed_icon():
   assert "<b>CLOSED</b>" in msg
 
 
+def test_tp1_cycle_shows_the_tp1_icon_and_word():
+  """A partial take-profit is the third header state — the position is still
+  live, so neither RUNNING (nothing taken off) nor CLOSED (trade out) says it."""
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.TP1)
+  )
+  assert msg.startswith(f"[{em.TP1}TP1]")
+
+
+def test_tp2_cycle_still_shows_closed():
+  """TP2 takes the rest of the position off, so it keeps the closing header
+  rather than getting one of its own."""
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP2")], status=BroadcastStatusEnum.CLOSED)
+  )
+  assert msg.startswith(f"[{em.CYCLE_CLOSED}CLOSED]")
+
+
+def test_header_catches_up_with_a_cycle_recorded_before_the_tp1_status():
+  """A row written before the TP1 status existed still says RUNNING, but its
+  events say the partial fill happened — and the reply notice under the body
+  is rendered from those events, so the body has to agree with it."""
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.RUNNING)
+  )
+  assert msg.startswith(f"[{em.TP1}TP1]")
+
+
 def test_header_keeps_the_entry_emoji_after_the_cycle_closes():
   """The icon identifies the trade direction, so a SL must not turn a long
   cycle's header red."""
@@ -332,9 +360,9 @@ def test_worker_label_keeps_a_short_account_id_as_is():
 
 
 def test_notice_is_exactly_the_status_and_the_action():
-  record = _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.RUNNING)
+  record = _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.TP1)
   notice = format_broadcast_update_notice(record, 1)
-  assert notice == f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"
+  assert notice == f"[{em.TP1}TP1]\n{em.TP1} TP1"
   assert len(notice.splitlines()) == 2
 
 
@@ -345,13 +373,14 @@ def test_notice_of_a_closing_action_says_closed():
 
 
 def test_notice_of_an_earlier_action_is_not_back_dated_to_closed():
-  """The row's status is already CLOSED once the trade is out; an intermediate
-  TP1 was still announced while the position was running."""
+  """The row's status is already CLOSED once the trade is out; the
+  intermediate TP1 was still announced while the position was live, so its
+  notice keeps the status it had at the time."""
   record = _record(
     events=[_event(), _event("TP1"), _event("TP2")],
     status=BroadcastStatusEnum.CLOSED,
   )
-  assert format_broadcast_update_notice(record, 1).startswith(f"[{em.CYCLE_RUNNING}")
+  assert format_broadcast_update_notice(record, 1).startswith(f"[{em.TP1}TP1]")
   assert format_broadcast_update_notice(record, 2).startswith(f"[{em.CYCLE_CLOSED}")
 
 

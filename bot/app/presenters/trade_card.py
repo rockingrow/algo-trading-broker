@@ -77,6 +77,19 @@ def _action_icon(last_action: str, status: str) -> str:
   return _ACTION_EMOJI.get(last_action, _STATUS_EMOJI.get(status, emojis.SATELLITE))
 
 
+def _header_status(trade: dict[str, Any], status: str) -> tuple[str, str]:
+  """Icon and word for the card's ``[STATUS]`` header, mirroring the
+  broker-side twin: the three states a cycle walks through. A partial
+  take-profit leaves the rest of the position live, so it reads ``TP1`` rather
+  than ``RUNNING``; the worker reports that fill as the ``PARTIALLY_CLOSED``
+  status, as a ``TP1`` last action, or both, so either one is enough."""
+  if status in TERMINAL_TRADE_STATUSES:
+    return _CLOSE_ICON, "CLOSED"
+  if status == "PARTIALLY_CLOSED" or str(trade.get("last_action")) == "TP1":
+    return emojis.TP1, "TP1"
+  return emojis.CYCLE_RUNNING, "RUNNING"
+
+
 def _last_action_block(trade: dict[str, Any], status: str) -> list[str]:
   """The boxed "Actions:" section, mirroring the broker-side twin and the
   broadcast message's own — the event that moved the trade, when it says
@@ -114,8 +127,7 @@ def format_trade_card(
   status = str(trade.get("status"))
   action = str(trade.get("action"))
   terminal = status in TERMINAL_TRADE_STATUSES
-  status_icon = _CLOSE_ICON if terminal else emojis.CYCLE_RUNNING
-  status_word = "CLOSED" if terminal else "RUNNING"
+  status_icon, status_word = _header_status(trade, status)
   price_label = "Close price" if terminal else "Price"
 
   lines = [

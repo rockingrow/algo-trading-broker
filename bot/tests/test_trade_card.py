@@ -76,6 +76,26 @@ def test_summary_card_shows_the_essentials():
   assert "Strategy:" not in body
 
 
+def test_card_header_reads_tp1_after_a_partial_fill():
+  """Mirrors the broker-side card and the broadcast header: a partial
+  take-profit is its own state, neither RUNNING nor CLOSED."""
+  body = card.format_trade_card(
+    _trade(status="PARTIALLY_CLOSED", last_action="TP1"), 7.0
+  )
+  assert body.splitlines()[0] == f"[{emojis.TP1}TP1]"
+  assert "Price: <code>65000</code>" in body
+
+
+def test_card_header_reads_tp1_on_a_tp1_action_alone():
+  body = card.format_trade_card(_trade(last_action="TP1"), 7.0)
+  assert body.splitlines()[0] == f"[{emojis.TP1}TP1]"
+
+
+def test_card_header_reads_closed_once_the_rest_is_out():
+  body = card.format_trade_card(_trade(status="CLOSED", last_action="TP2"), 7.0)
+  assert body.splitlines()[0] == f"[{emojis.CYCLE_CLOSED}CLOSED]"
+
+
 def test_detailed_card_adds_the_bookkeeping_block():
   body = card.format_trade_card(_trade(), 7.0, detailed=True)
   assert "Strategy: <b>BTC-M15</b>" in body

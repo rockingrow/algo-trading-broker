@@ -60,14 +60,23 @@ class BroadcastAudienceEnum(str, Enum):
 class BroadcastStatusEnum(str, Enum):
   """Lifecycle of one broadcast signal cycle.
 
-  ``RUNNING`` — an entry (LONG/SHORT) opened the cycle and it is still live;
-  a TP1 keeps it running because part of the position remains open.
+  ``RUNNING`` — an entry (LONG/SHORT) opened the cycle and nothing has come
+  off the position yet.
+
+  ``TP1`` — a partial take-profit filled. The cycle is still live, so this is
+  not a close; it is its own status because the header names the level the
+  trade reached, and ``RUNNING`` would hide it.
 
   ``CLOSED`` — a terminal action (TP2, SL, R_SL, FLAT) ended it. The message
   keeps its history but stops advertising an open position.
+
+  The order is the order a cycle walks: see
+  ``broker/domain/broadcast_status.py``, which never lets a status move
+  backwards.
   """
 
   RUNNING = "RUNNING"
+  TP1 = "TP1"
   CLOSED = "CLOSED"
 
 
