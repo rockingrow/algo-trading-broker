@@ -713,8 +713,8 @@ async def test_a_follow_up_replies_to_the_edited_message_in_every_audience():
   private_message_id = repo.chats[cycle.id]["-100"].message_id
   public_message_id = repo.chats[cycle.id]["-300"].message_id
   assert channel.replied == [
-    ("-100", private_message_id, f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"),
-    ("-300", public_message_id, f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"),
+    ("-100", private_message_id, f"[{em.TP1}TP1]\n{em.TP1} TP1"),
+    ("-300", public_message_id, f"[{em.TP1}TP1]\n{em.TP1} TP1"),
   ]
 
 
@@ -745,7 +745,7 @@ async def test_events_delivered_together_get_one_notice_each():
   await dispatcher.dispatch(cycle.id)
 
   assert [text for _, _, text in channel.replied] == [
-    f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1",
+    f"[{em.TP1}TP1]\n{em.TP1} TP1",
     f"[{em.CYCLE_CLOSED}CLOSED]\n{em.TP2} TP2",
   ]
 
@@ -1217,7 +1217,7 @@ def test_market_of_reads_the_event_then_the_trade():
 
 
 def test_only_terminal_actions_close_a_cycle():
-  running = [SignalActionEnum.LONG, SignalActionEnum.SHORT, SignalActionEnum.TP1]
+  running = [SignalActionEnum.LONG, SignalActionEnum.SHORT]
   closing = [
     SignalActionEnum.TP2,
     SignalActionEnum.SL,
@@ -1226,6 +1226,12 @@ def test_only_terminal_actions_close_a_cycle():
   ]
   assert all(status_for_action(a) == BroadcastStatusEnum.RUNNING for a in running)
   assert all(status_for_action(a) == BroadcastStatusEnum.CLOSED for a in closing)
+
+
+def test_tp1_gets_its_own_status_without_closing_the_cycle():
+  """A partial take-profit leaves the rest of the position open, so it is not
+  a close — but it is not RUNNING either, which would hide the fill."""
+  assert status_for_action(SignalActionEnum.TP1) == BroadcastStatusEnum.TP1
 
 
 def test_closed_is_terminal():
@@ -1237,3 +1243,30 @@ def test_closed_is_terminal():
     merge_status(BroadcastStatusEnum.RUNNING, BroadcastStatusEnum.CLOSED)
     == BroadcastStatusEnum.CLOSED
   )
+  assert (
+    merge_status(BroadcastStatusEnum.CLOSED, BroadcastStatusEnum.TP1)
+    == BroadcastStatusEnum.CLOSED
+  )
+
+
+def test_tp1_does_not_fall_back_to_running():
+  """A scale-in entry arriving after the partial fill must not take the header
+  back to RUNNING, which reads as a trade that has given nothing back."""
+  assert (
+    merge_status(BroadcastStatusEnum.TP1, BroadcastStatusEnum.RUNNING)
+    == BroadcastStatusEnum.TP1
+  )
+  assert (
+    merge_status(BroadcastStatusEnum.RUNNING, BroadcastStatusEnum.TP1)
+    == BroadcastStatusEnum.TP1
+  )
+  assert (
+    merge_status(BroadcastStatusEnum.TP1, BroadcastStatusEnum.CLOSED)
+    == BroadcastStatusEnum.CLOSED
+  )
+
+
+def test_an_unrecognised_stored_status_is_read_as_running():
+  """A bare string from a fake or a partially loaded row still merges."""
+  assert merge_status("MYSTERY", BroadcastStatusEnum.TP1) == BroadcastStatusEnum.TP1
+  assert merge_status("TP1", BroadcastStatusEnum.RUNNING) == BroadcastStatusEnum.TP1

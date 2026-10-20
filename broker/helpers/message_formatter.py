@@ -62,6 +62,9 @@ def format_number(value) -> str:
 
 _STATUS_ICONS = {
   BroadcastStatusEnum.RUNNING: em.CYCLE_RUNNING,
+  # The partial take-profit borrows the TP1 action's own glyph, so the header
+  # and the line it came from read as the same event.
+  BroadcastStatusEnum.TP1: em.TP1,
   BroadcastStatusEnum.CLOSED: em.CYCLE_CLOSED,
 }
 
@@ -228,6 +231,14 @@ def format_broadcast_message(
     status = BroadcastStatusEnum(_enum_value(status))
   except ValueError:
     status = BroadcastStatusEnum.RUNNING
+
+  # Fold the status from the events too, the way the reply notices do, so the
+  # body and the notice posted under it cannot disagree: a cycle recorded
+  # before the TP1 status existed still carries RUNNING on the row while its
+  # events already say a partial take-profit filled. Merged rather than
+  # replaced, so a row the events alone would not close stays closed.
+  if events:
+    status = merge_status(status, _status_through(events, len(events) - 1, status))
 
   status_icon = _STATUS_ICONS.get(status, em.CYCLE_RUNNING)
   timeframe = f" ({format_timeframe(record.timeframe)})" if record.timeframe else ""

@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The broadcast header has a third state: `[🎯TP1]`.** A cycle whose `TP1`
+  filled read `[⏳RUNNING]`, the same as an entry that had given nothing back
+  yet — the one thing the header is there to tell apart. `TP1` is now its own
+  `broadcast_messages.status`, so the header walks `RUNNING` → `TP1` →
+  `CLOSED`:
+
+  - `TP1` renders `[🎯TP1]` in the cycle's message body and in the two-line
+    reply notice posted under it.
+  - `TP2`, `SL`, `R_SL` and `FLAT` still render `[🏁CLOSED]` — `TP2` takes the
+    rest of the position off, so it closes the cycle rather than getting a
+    header of its own.
+  - The status only moves forward (`broker/domain/broadcast_status.py`):
+    `CLOSED` stays terminal against a replayed or late `TP1`, and `TP1` is
+    sticky against a scale-in entry that would otherwise take the header back
+    to `RUNNING`.
+  - The owner-facing trade card reads the same three words off the *trade's*
+    own status: `PARTIALLY_CLOSED`, or a `TP1` last action, renders `[🎯TP1]`.
+    Both renderers changed — `broker/helpers/trade_card.py` and the bot's
+    mirror in `bot/app/presenters/trade_card.py`.
+
+  **Migration:** `e5f6a7b8c9d0` — apply it **before** restarting the broker:
+  a broker running ahead of the migration fails the status write with an
+  invalid-enum error, and `record_event` rolls the transaction back with the
+  appended event in it, so that TP1 line would never reach the message body.
+  The revision adds the `TP1` label to the
+  `broadcaststatusenum` Postgres type (inserted before `CLOSED`, so the enum's
+  order matches the lifecycle). Existing rows are not rewritten: a cycle that
+  is mid-TP1 right now keeps `RUNNING` in the column until its next action
+  arrives, but its message still renders `[🎯TP1]` — the body header is folded
+  from the cycle's stored events as well as read off the row, which is how the
+  reply notices have always been rendered and what keeps the two from
+  disagreeing.
+  The downgrade moves any `TP1` row back to `RUNNING` and leaves the label in
+  place, since Postgres cannot drop an enum value.
+
 ## [1.2.0] - 2026-10-19
 
 ### Changed

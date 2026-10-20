@@ -766,9 +766,9 @@ and public):
 ```
 
 That is the whole notice — the cycle's status at that point (`RUNNING` /
-`CLOSED`) and the action that produced it (`TP1`, `TP2`, `SL`, `R_SL`,
-`FLAT`, …). It notifies, and being a reply it points straight back at the full
-body, so nothing is duplicated.
+`TP1` / `CLOSED`, see below) and the action that produced it (`TP1`, `TP2`,
+`SL`, `R_SL`, `FLAT`, …). It notifies, and being a reply it points straight
+back at the full body, so nothing is duplicated.
 
 Notes:
 
@@ -794,6 +794,30 @@ Notes:
   `/admin_public_reply_notify [enable|disable]` commands. A notice skipped this
   way still counts as delivered (`notified_event_count` advances), so
   re-enabling later does not replay the trade's backlog into the chat.
+
+### The three header states
+
+The `[STATUS]` bracket at the top of a cycle's message — and of the owner's
+trade card — carries one of three states, so a glance at the header says where
+the trade stands:
+
+| Header | When | Why not the next one |
+| --- | --- | --- |
+| `[⏳RUNNING]` | the entry (`LONG` / `SHORT`) is live and nothing has come off it | — |
+| `[🎯TP1]` | `TP1` filled: part of the position is booked, the rest is still open | not `CLOSED`, because the trade is still in the market |
+| `[🏁CLOSED]` | a closing action arrived — `TP2`, `SL`, `R_SL` or `FLAT` | `TP2` takes the rest of the position off, so it closes the cycle rather than getting a header of its own |
+
+The status only ever moves forward. `CLOSED` is terminal, so a replayed or
+late `TP1` cannot advertise the position as live again; `TP1` is sticky the
+same way, so a scale-in entry arriving after the partial fill does not take
+the header back to `RUNNING`. The owner-facing trade card renders the same
+three words from the *trade's* own status instead (`PARTIALLY_CLOSED`, or a
+`TP1` last action, reads as `[🎯TP1]`).
+
+The body's header is folded from the cycle's stored events as well as read off
+`broadcast_messages.status`, the way the reply notices are, so a cycle recorded
+before `TP1` was a status still renders `[🎯TP1]` instead of contradicting the
+notice posted under it.
 
 ### Not in `.env`
 
@@ -1801,7 +1825,7 @@ one message per action.
 | `signal_uxid` | String(16) | 16-char lowercase-hex cycle correlator (matches `signals.signal_uxid`) |
 | `symbol` | String(50) | Symbol carried on the entry signal |
 | `timeframe` | String(20) (Nullable) | Chart timeframe carried on the entry signal |
-| `status` | Enum | `RUNNING` until a closing action arrives (TP2, R_SL, SL, FLAT); then `CLOSED` |
+| `status` | Enum | `RUNNING` on the entry, `TP1` once the partial take-profit fills, `CLOSED` when a closing action arrives (TP2, R_SL, SL, FLAT). Never moves backwards — see [The three header states](#the-three-header-states) |
 | `events` | JSONB | Ordered list of stored action events — action, price/qty/levels, timestamp, attempt number, indicator/input dumps |
 | `last_seq` | Integer | Sequence number of the most recent write-log entry against this cycle (see below) |
 | `last_broadcast_at` | DateTime (Nullable) | Timestamp of the last successful dispatcher run for this cycle |
