@@ -51,13 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The bot's confirmation names the account and says the others are unchanged;
     the `/help` text and the command-menu descriptions say "active account".
 
-  **Migration:** `486671e7d451` — apply it **before** restarting the broker.
-  The revision adds the column and drops `trade_broadcast_subscriptions`. A new
-  broker on the old schema fails every query that loads a whole link row —
-  linking from `/start` and `link-telegram` included — and finds no card
-  recipients; an old broker on the new schema finds none either, because it joins
-  the dropped table. Both fail soft (logged, no crash), so the symptom is quiet:
-  cards stop and linking is refused until the schema and the code match.
+  **Migration:** `486671e7d451`. `scripts/docker-entrypoint.sh` runs
+  `alembic upgrade head` (under `set -e`) before the broker starts, so a
+  container deploy applies it by itself and there is nothing to run by hand.
+  The revision adds the column and drops `trade_broadcast_subscriptions`.
+
+  **Rolling back is not just an image swap.** The previous image does not know
+  this revision, so its entrypoint's `alembic upgrade head` fails with `Can't
+  locate revision identified by '486671e7d451'` and the container never starts.
+  Run `make db-downgrade` first (it recreates `trade_broadcast_subscriptions`
+  empty). The code also fails soft against a schema it was not written for —
+  started by hand with `make run` on an unmigrated database it finds no card
+  recipients and refuses linking, because every query that loads a whole link
+  row breaks — so the symptom there is quiet, not a crash.
 
   **Every existing subscription is cleared — nothing is backfilled.** All links
   start with cards off, so after the deploy nobody gets a trade card until they
