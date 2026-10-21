@@ -16,7 +16,7 @@ flag cannot be folded back into a per-user row without guessing which account
 the user meant — and drops the column.
 
 Revision ID: 486671e7d451
-Revises: d4e5f6a7b8c9
+Revises: e5f6a7b8c9d0
 Create Date: 2026-10-21 00:00:00.000000
 
 """
@@ -26,7 +26,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
 revision = "486671e7d451"
-down_revision = "d4e5f6a7b8c9"
+down_revision = "e5f6a7b8c9d0"
 branch_labels = None
 depends_on = None
 
