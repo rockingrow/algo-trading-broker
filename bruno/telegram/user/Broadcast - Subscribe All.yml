@@ -1,0 +1,15 @@
+info:
+  name: Broadcast - Subscribe All
+  type: http
+  seq: 12
+
+http:
+  method: POST
+  url: "{{url}}/v1/telegram/{{process.env.telegram_user_id}}/broadcast/subscribe-all"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

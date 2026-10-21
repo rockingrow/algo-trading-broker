@@ -7,7 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/subscribeall` and `/unsubscribeall` switch live trade cards on or off for
+  every linked account at once.** With the opt-in per account, a user holding
+  several accounts needed a `/switch` plus `/subscribe` round for each one; the
+  bulk pair covers all of them in one command and replies with how many accounts
+  it touched. They compose with the per-account pair: `/subscribeall`, then
+  `/switch` and `/unsubscribe` on one account, leaves the others on.
+
+  - `POST /v1/telegram/{telegram_user_id}/broadcast/subscribe-all` and
+    `…/unsubscribe-all` run one `UPDATE account_bot_links SET
+    trade_cards_enabled` over the caller's links. Response:
+    `{"subscribed": bool, "accounts": n}`; `404` when the caller holds no link,
+    `500` when the write fails. Idempotent, and no new migration.
+  - The switch covers the links held **now**: an account linked later starts
+    off, and the bot's reply says so.
+  - Command names are lowercase because Telegram only accepts `[a-z0-9_]`.
+  - New `bruno/telegram/user` requests: `Broadcast - Subscribe All` and
+    `Broadcast - Unsubscribe All`.
+
 ### Changed
+
+- **`/subscribe` and `/unsubscribe` act on the active account, not on every
+  account the user holds.** The live-trade-card opt-in was one row per Telegram
+  user, so a user linked to accounts A and B who subscribed got cards for both
+  and could not turn B off alone. It is now per account and follows `/switch`
+  like `/flat` and `/maxorders` do: `/switch` to B, `/unsubscribe`, and A keeps
+  its cards.
+
+  - The flag is `account_bot_links.trade_cards_enabled` (default `false`);
+    `trade_broadcast_subscriptions` and its model are gone. `list_broadcast_targets`
+    now filters on the flag instead of joining that table.
+  - It lives on the link, so `/unlink` and `/admin_rotate` discard it with the
+    link. Before, the per-user row survived an unlink and silently resumed cards
+    for the next account the user linked.
+  - `GET` / `POST /v1/telegram/{telegram_user_id}/broadcast[/subscribe|/unsubscribe]`
+    resolve the caller's active account and answer `404` when nothing is linked
+    (they used to work for an unlinked id). The response keeps `subscribed` and
+    adds `account_id`, `market` and `gateway`, so the bot can name the account it
+    really changed. Request shape and URLs are unchanged; the `bruno/` collection notes
+    describe the new behaviour.
+  - The bot's confirmation names the account and says the others are unchanged;
+    the `/help` text and the command-menu descriptions say "active account".
+
+  **Migration:** `486671e7d451`. `scripts/docker-entrypoint.sh` runs
+  `alembic upgrade head` (under `set -e`) before the broker starts, so a
+  container deploy applies it by itself and there is nothing to run by hand.
+  The revision adds the column and drops `trade_broadcast_subscriptions`.
+
+  **Rolling back is not just an image swap.** The previous image does not know
+  this revision, so its entrypoint's `alembic upgrade head` fails with `Can't
+  locate revision identified by '486671e7d451'` and the container never starts.
+  Run `make db-downgrade` first (it recreates `trade_broadcast_subscriptions`
+  empty). The code also fails soft against a schema it was not written for —
+  started by hand with `make run` on an unmigrated database it finds no card
+  recipients and refuses linking, because every query that loads a whole link
+  row breaks — so the symptom there is quiet, not a crash.
+
+  **Every existing subscription is cleared — nothing is backfilled.** All links
+  start with cards off, so after the deploy nobody gets a trade card until they
+  `/subscribe` again, once per account they want (`/switch` between them). Tell
+  users before rolling this out. The downgrade recreates the old table empty:
+  a per-account flag cannot be folded back into a per-user row without guessing
+  which account the user meant.
 
 - **The broadcast header has a third state: `[🎯TP1]`.** A cycle whose `TP1`
   filled read `[⏳RUNNING]`, the same as an entry that had given nothing back

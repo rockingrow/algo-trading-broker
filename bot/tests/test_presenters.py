@@ -430,3 +430,52 @@ def test_format_account_created_includes_spoilered_invite_url():
   assert "<tg-spoiler>https://t.me/b?start=abc</tg-spoiler>" in out
   # The raw token stays available alongside the link.
   assert "<tg-spoiler>new-tok</tg-spoiler>" in out
+
+
+def test_broadcast_subscription_names_the_account_it_applied_to():
+  account = {"account_id": "acc-2", "market": "CRYPTO", "gateway": "BINANCE"}
+
+  on = messages.UserMessages.format_broadcast_subscription(True, account)
+  off = messages.UserMessages.format_broadcast_subscription(False, account)
+
+  for out in (on, off):
+    assert "<code>acc-2</code>" in out
+    assert "(CRYPTO/BINANCE)" in out
+    # The opt-in is per account — the reply has to say the rest are untouched.
+    assert "other linked accounts are unchanged" in out
+  assert "Subscribed" in on and "Unsubscribed" not in on
+  assert "Unsubscribed" in off
+
+
+def test_broadcast_subscription_tolerates_a_missing_gateway_and_escapes_html():
+  out = messages.UserMessages.format_broadcast_subscription(
+    True, {"account_id": "<b>x</b>", "market": "FOREX", "gateway": None}
+  )
+
+  assert "&lt;b&gt;x&lt;/b&gt;" in out
+  assert "(FOREX)" in out
+  assert "None" not in out
+
+
+def test_broadcast_subscription_all_states_how_many_accounts_it_covered():
+  on = messages.UserMessages.format_broadcast_subscription_all(
+    True, {"subscribed": True, "accounts": 3}
+  )
+  off = messages.UserMessages.format_broadcast_subscription_all(
+    False, {"subscribed": False, "accounts": 3}
+  )
+
+  assert "Subscribed" in on and "Unsubscribed" not in on
+  assert "all accounts (3)" in on and "3 linked accounts" in on
+  assert "Unsubscribed" in off and "all accounts (3)" in off
+  # A later link starts off — the confirmation is where the user learns that.
+  assert "link later starts off" in on
+
+
+def test_broadcast_subscription_all_uses_the_singular_for_one_account():
+  out = messages.UserMessages.format_broadcast_subscription_all(
+    True, {"subscribed": True, "accounts": 1}
+  )
+
+  assert "1 linked account" in out
+  assert "1 linked accounts" not in out

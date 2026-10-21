@@ -165,10 +165,13 @@ async def cb_switch_account(call: CallbackQuery, broker: BrokerClientUser) -> No
   await call.answer()
 
 
-# ── /subscribe, /unsubscribe — completed-trade broadcast opt-in ───────
-# A per-user preference (spans every linked account), toggled here. Lives on
-# the protected router so only linked owners can opt in — an unlinked user has
-# no account whose trades could complete.
+# ── /subscribe, /unsubscribe — live trade-card opt-in ─────────────────
+# A per-account preference that follows the *active* account, like /flat and
+# /maxorders: /switch to B, then /subscribe, turns cards on for B only. The
+# broker resolves the active account and echoes it back, and the reply names
+# that account — not the one this update started with, which a concurrent
+# /switch may have moved. Lives on the protected router: an unlinked user has
+# no account to subscribe.
 
 
 @router.message(Command("subscribe"))
@@ -179,7 +182,9 @@ async def cmd_subscribe(message: Message, broker: BrokerClientUser) -> None:
       f"{emojis.WARNING} Failed to update subscription. Try again later."
     )
     return
-  await message.answer(messages.UserMessages.format_broadcast_subscription(True))
+  await message.answer(
+    messages.UserMessages.format_broadcast_subscription(True, result)
+  )
 
 
 @router.message(Command("unsubscribe"))
@@ -190,7 +195,40 @@ async def cmd_unsubscribe(message: Message, broker: BrokerClientUser) -> None:
       f"{emojis.WARNING} Failed to update subscription. Try again later."
     )
     return
-  await message.answer(messages.UserMessages.format_broadcast_subscription(False))
+  await message.answer(
+    messages.UserMessages.format_broadcast_subscription(False, result)
+  )
+
+
+# /subscribeall and /unsubscribeall are the bulk form: one switch over every
+# account the user holds right now, no /switch round per account. Accounts linked
+# afterwards start off, as with any new link.
+
+
+@router.message(Command("subscribeall"))
+async def cmd_subscribe_all(message: Message, broker: BrokerClientUser) -> None:
+  result = await broker.subscribe_all_broadcast(message.from_user.id)
+  if result is None:
+    await message.answer(
+      f"{emojis.WARNING} Failed to update subscription. Try again later."
+    )
+    return
+  await message.answer(
+    messages.UserMessages.format_broadcast_subscription_all(True, result)
+  )
+
+
+@router.message(Command("unsubscribeall"))
+async def cmd_unsubscribe_all(message: Message, broker: BrokerClientUser) -> None:
+  result = await broker.unsubscribe_all_broadcast(message.from_user.id)
+  if result is None:
+    await message.answer(
+      f"{emojis.WARNING} Failed to update subscription. Try again later."
+    )
+    return
+  await message.answer(
+    messages.UserMessages.format_broadcast_subscription_all(False, result)
+  )
 
 
 @router.message(Command("unlink"))
