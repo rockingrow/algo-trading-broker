@@ -44,6 +44,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The downgrade moves any `TP1` row back to `RUNNING` and leaves the label in
   place, since Postgres cannot drop an enum value.
 
+### Fixed
+
+- **Revision `e5f6a7b8c9d0` is back in the chain.** It had been deleted after
+  the change above was merged, so a production broker ran the code that writes
+  `status = 'TP1'` against a `broadcaststatusenum` type that only knew
+  `RUNNING` and `CLOSED`. Every TP1 signal failed `record_event` with
+  `invalid input value for enum broadcaststatusenum: "TP1"` and rolled the
+  transaction back with the appended event in it, so the TP1 line never
+  reached the broadcast body. The fan-out to the workers was unaffected --
+  the signal was already published when the write failed. **Apply
+  `make db-upgrade` before the next TP1 arrives**; cycles that lost their TP1
+  event this way cannot have it back, since the body is rebuilt from the
+  stored events.
+
+- **Forwarded error logs are HTML-escaped.** `TelegramLogHandler` wraps a
+  record in `<pre>` and sends it with `parse_mode=HTML`, so a traceback
+  carrying an exception repr (`<class 'asyncpg...'>`) was rejected with
+  `can't parse entities: Unsupported start tag "class"` -- losing exactly the
+  alert worth forwarding. `TelegramLogNotification` now escapes the text
+  before boxing it. Every other channel is untouched: those bodies are markup
+  the formatters wrote on purpose.
+
 ## [1.2.0] - 2026-10-19
 
 ### Changed

@@ -277,6 +277,26 @@ async def test_log_chat_id_falls_back_to_the_management_list(monkeypatch):
   assert _targets_of(sent) == [("-100111", None), ("-100222", 7)]
 
 
+async def test_forwarded_log_text_is_html_escaped(monkeypatch):
+  """A traceback is arbitrary text; unescaped, Telegram rejects the message."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(ns.settings.telegram, "LOG_BOT_TOKEN", "")
+  monkeypatch.setattr(ns.settings.telegram, "LOG_CHAT_ID", "-100999")
+  sent = []
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder(sent))
+
+  await ns.TelegramLogNotification().send_message(
+    "<class 'asyncpg.exceptions.InvalidTextRepresentationError'>: boom"
+  )
+
+  assert len(sent) == 1
+  text = sent[0][1]["text"]
+  assert text.startswith("<pre>") and text.endswith("</pre>")
+  assert "&lt;class" in text
+  assert "<class" not in text
+
+
 async def test_non_200_is_handled_gracefully(monkeypatch):
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")

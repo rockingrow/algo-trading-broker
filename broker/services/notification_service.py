@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import html
 import logging
 import re
 import time
@@ -633,6 +634,16 @@ class TelegramLogNotification(TelegramNotification):
       chat_id=settings.telegram.LOG_CHAT_ID or settings.telegram.BROKER_LOG_CHAT_IDS,
       bot_token=settings.telegram.LOG_BOT_TOKEN or settings.telegram.BOT_TOKEN,
     )
+
+  def format_text(self, message_text: str) -> str:
+    """Escape before boxing: a forwarded log line is arbitrary text.
+
+    Every other channel's body is markup the formatter wrote on purpose, but a
+    traceback is not — an exception repr such as ``<class 'asyncpg.Error'>``
+    parses as an HTML start tag and Telegram rejects the whole message, which
+    loses exactly the alert that was worth forwarding.
+    """
+    return _box(html.escape(message_text))
 
 
 class _RecursionFilter(logging.Filter):
