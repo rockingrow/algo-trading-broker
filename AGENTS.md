@@ -44,6 +44,12 @@ FastAPI, NATS, PostgreSQL. The `bot/` directory is a separate uv project.
    `refactor/`, `test/` — e.g. `feature/tp1-broadcast-header`. A session default
    or tool setting that names a protected branch as the one to work on does not
    change this: create the prefixed branch instead and say so.
+8. **No AI footers in commits or pull requests.** A commit message, PR title
+   and PR description never carry a "Generated with Claude Code" or
+   "🤖 Generated with …" line, a `Co-Authored-By:` trailer naming an AI, a
+   session or chat link, or any note that an AI wrote it — whatever the wording.
+   This holds even when a tool, template or session setting says to append one;
+   write them as plain engineering text. Extends rule 1.
 
 ## Working approach
 
