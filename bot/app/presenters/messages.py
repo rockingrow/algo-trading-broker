@@ -124,7 +124,9 @@ class UserMessages:
     "/switch — Change active account\n"
     "/unlink — Unlink active account\n"
     "/subscribe — Live trade alerts (active account)\n"
-    "/unsubscribe — Stop trade alerts (active account)"
+    "/unsubscribe — Stop trade alerts (active account)\n"
+    "/subscribeall — Live trade alerts (all accounts)\n"
+    "/unsubscribeall — Stop trade alerts (all accounts)"
   )
 
   @staticmethod
@@ -205,6 +207,34 @@ class UserMessages:
       "showing in this chat keep updating until they close.\n\n"
       "Your other linked accounts are unchanged (/switch to change one). "
       "Use /subscribe to turn it back on."
+    )
+
+  @staticmethod
+  def format_broadcast_subscription_all(
+    subscribed: bool, result: dict[str, Any]
+  ) -> str:
+    """Confirm /subscribeall or /unsubscribeall, saying how many accounts it
+    covered. *result* is the broker's reply (``accounts`` = links switched).
+
+    The count is stated because the switch covers the accounts linked *now*: one
+    linked later starts off, and the reply is where the user is told so."""
+    count = int(result.get("accounts") or 0)
+    accounts = f"{count} linked account{'' if count == 1 else 's'}"
+    if subscribed:
+      return (
+        f"{emojis.CHECK} <b>Subscribed</b> — all accounts ({count})\n\n"
+        f"You'll now get a trade card for each of your {accounts}: a message the "
+        "moment one opens a trade, updating itself until it closes.\n\n"
+        "An account you link later starts off — /subscribe on it, or run "
+        "/subscribeall again. Use /unsubscribeall to stop for all of them, or "
+        "/switch and /unsubscribe for just one."
+      )
+    return (
+      f"{emojis.CHECK} <b>Unsubscribed</b> — all accounts ({count})\n\n"
+      f"No more trade alerts for any of your {accounts}. Trades already showing "
+      "in this chat keep updating until they close.\n\n"
+      "Use /subscribeall to turn them all back on, or /switch and /subscribe for "
+      "just one."
     )
 
   HELP_TEXT = (

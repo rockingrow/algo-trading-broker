@@ -3,8 +3,8 @@ broker/services/trade_card_service.py — Live trade cards for account owners.
 
 Every TRADE event a worker publishes lands here after the trade row has been
 upserted. For each owner of that account who has opted in for it (``/subscribe``
-in the bot, while that account is their active one) the service keeps exactly
-**one** Telegram message alive per trade:
+in the bot while that account is active, or ``/subscribeall`` for all of them)
+the service keeps exactly **one** Telegram message alive per trade:
 
 * first sighting  → post the card, with a Detail / Close button row,
 * status change   → edit that same message in place (OPENED → PARTIALLY_CLOSED

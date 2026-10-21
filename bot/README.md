@@ -51,8 +51,8 @@ refreshed.
 
 `/start` (link), `/status`, `/trades`, `/flat`, `/prevent`, `/allow`,
 `/maxorders`, `/myaccounts`, `/link`, `/switch`, `/unlink`, `/subscribe`,
-`/unsubscribe`, `/help` — all but `/start` require a linked account, and are
-hidden until there is one.
+`/unsubscribe`, `/subscribeall`, `/unsubscribeall`, `/help` — all but `/start`
+require a linked account, and are hidden until there is one.
 
 `FLAT`/`PREVENT`/`ALLOW` each require a confirmation tap. `/maxorders` is a
 short prompt-and-reply flow instead — it needs a number, not a yes/no, and it
@@ -109,6 +109,15 @@ account**, not per user: it follows `/switch` like `/flat` does, so with account
 A and B you can have cards on for A and off for B — `/switch` to the other
 account and repeat the command to change it. The reply names the account it
 applied to, and says the others are unchanged.
+
+`/subscribeall` and `/unsubscribeall` are the bulk form: one command switches
+trade cards on (or off) for **every account you hold right now**, with no
+`/switch` round per account. The reply says how many accounts it covered. They
+combine with the per-account pair — `/subscribeall`, then `/switch` to one
+account and `/unsubscribe`, leaves every other account on. The bulk switch is a
+one-off over your current links, not a standing preference: an account linked
+afterwards still starts off (run `/subscribeall` again, or `/subscribe` on it).
+Both need at least one linked account and are idempotent.
 
 A newly linked account starts **off**, and unlinking an account (`/unlink`, or an
 admin `/admin_rotate`) discards its opt-in with the link, so linking it again

@@ -200,6 +200,37 @@ async def cmd_unsubscribe(message: Message, broker: BrokerClientUser) -> None:
   )
 
 
+# /subscribeall and /unsubscribeall are the bulk form: one switch over every
+# account the user holds right now, no /switch round per account. Accounts linked
+# afterwards start off, as with any new link.
+
+
+@router.message(Command("subscribeall"))
+async def cmd_subscribe_all(message: Message, broker: BrokerClientUser) -> None:
+  result = await broker.subscribe_all_broadcast(message.from_user.id)
+  if result is None:
+    await message.answer(
+      f"{emojis.WARNING} Failed to update subscription. Try again later."
+    )
+    return
+  await message.answer(
+    messages.UserMessages.format_broadcast_subscription_all(True, result)
+  )
+
+
+@router.message(Command("unsubscribeall"))
+async def cmd_unsubscribe_all(message: Message, broker: BrokerClientUser) -> None:
+  result = await broker.unsubscribe_all_broadcast(message.from_user.id)
+  if result is None:
+    await message.answer(
+      f"{emojis.WARNING} Failed to update subscription. Try again later."
+    )
+    return
+  await message.answer(
+    messages.UserMessages.format_broadcast_subscription_all(False, result)
+  )
+
+
 @router.message(Command("unlink"))
 async def cmd_unlink(message: Message, account: dict[str, Any]) -> None:
   await message.answer(

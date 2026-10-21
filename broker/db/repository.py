@@ -859,9 +859,11 @@ class SqlAlchemyTradeBroadcastRepository:
 
   The opt-in is ``AccountBotLink.trade_cards_enabled``: one flag per
   ``(user, account)`` link. The API layer points it at the user's *active*
-  account, so ``/subscribe`` on account A says nothing about account B. It lives
-  on the link, which means unlinking (or an admin token rotation) deletes the
-  preference together with the access it belonged to."""
+  account, so ``/subscribe`` on account A says nothing about account B;
+  :meth:`subscribe_all` / :meth:`unsubscribe_all` are the bulk form, covering
+  every link the user holds right now. It lives on the link, which means
+  unlinking (or an admin token rotation) deletes the preference together with
+  the access it belonged to."""
 
   async def _set_enabled(
     self,
@@ -908,6 +910,60 @@ class SqlAlchemyTradeBroadcastRepository:
         exc,
       )
       return False
+
+  async def _set_enabled_everywhere(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum,
+    enabled: bool,
+  ) -> int | None:
+    platform_user_id = str(telegram_user_id)
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          update(AccountBotLink)
+          .where(
+            AccountBotLink.platform == platform,
+            AccountBotLink.platform_user_id == platform_user_id,
+          )
+          .values(trade_cards_enabled=enabled)
+        )
+        links = result.rowcount
+      log.info(
+        "Trade cards %s on every link telegram_user_id=%s links=%s",
+        "enabled" if enabled else "disabled",
+        telegram_user_id,
+        links,
+      )
+      return links
+    except Exception as exc:
+      log.exception(
+        "Failed to set trade cards enabled=%s on every link telegram_user_id=%s: %s",
+        enabled,
+        telegram_user_id,
+        exc,
+      )
+      return None
+
+  async def subscribe_all(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> int | None:
+    """Opt a bot user in to live trade cards for **every** account they are
+    linked to right now. Returns how many links it covers — ``0`` when the user
+    holds none, ``None`` when the write failed. Idempotent. Links made later
+    start off, as ever: this is a bulk switch, not a standing preference."""
+    return await self._set_enabled_everywhere(telegram_user_id, platform, True)
+
+  async def unsubscribe_all(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> int | None:
+    """Opt a bot user out of live trade cards for every account they are linked
+    to. Same return contract as :meth:`subscribe_all`."""
+    return await self._set_enabled_everywhere(telegram_user_id, platform, False)
 
   async def subscribe(
     self,

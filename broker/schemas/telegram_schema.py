@@ -144,6 +144,16 @@ class BroadcastSubscriptionResponse(BaseModel):
   gateway: Optional[str] = None
 
 
+class BroadcastBulkSubscriptionResponse(BaseModel):
+  """Outcome of switching live trade-card DMs on or off for **every** account
+  the caller is linked to (the bot's ``/subscribeall`` / ``/unsubscribeall``)."""
+
+  subscribed: bool
+  # How many linked accounts the switch covered — the caller's links at the
+  # moment of the call; an account linked afterwards starts off.
+  accounts: int
+
+
 class OpenPositionsResponse(BaseModel):
   """Currently running (open) trades for the caller's linked account.
 

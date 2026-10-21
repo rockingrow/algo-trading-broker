@@ -1228,6 +1228,61 @@ async def test_broadcast_toggle_without_a_link_reports_failure(monkeypatch):
   assert await repo.unsubscribe(42, uuid.uuid4()) is False
 
 
+async def test_broadcast_subscribe_all_updates_every_link_of_the_user(monkeypatch):
+  session = FakeSession(results=[["a", "b", "c"]])  # rowcount 3
+  _patch_session(monkeypatch, session)
+
+  links = await SqlAlchemyTradeBroadcastRepository().subscribe_all(42)
+
+  assert links == 3
+  sql, params = _compiled(session.statements[0])
+  assert sql.startswith("UPDATE account_bot_links SET trade_cards_enabled=")
+  # Scoped to the user, never to one account — that is the whole point.
+  assert "account_bot_links.platform_user_id =" in sql
+  assert "account_bot_links.account_id" not in sql
+  assert params["trade_cards_enabled"] is True
+  assert params["platform_user_id_1"] == "42"
+
+
+async def test_broadcast_unsubscribe_all_clears_every_link_of_the_user(monkeypatch):
+  session = FakeSession(results=[["a", "b"]])
+  _patch_session(monkeypatch, session)
+
+  links = await SqlAlchemyTradeBroadcastRepository().unsubscribe_all(42)
+
+  assert links == 2
+  sql, params = _compiled(session.statements[0])
+  assert "account_bot_links.account_id" not in sql
+  assert params["trade_cards_enabled"] is False
+  assert params["platform_user_id_1"] == "42"
+
+
+async def test_broadcast_all_with_no_link_reports_zero_not_failure(monkeypatch):
+  """Zero is "nothing to switch" (the API turns it into a 404); only a failed
+  write is None."""
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  repo = SqlAlchemyTradeBroadcastRepository()
+
+  assert await repo.subscribe_all(42) == 0
+
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+  assert await repo.unsubscribe_all(42) == 0
+
+
+async def test_broadcast_all_reports_none_when_the_write_fails(monkeypatch):
+  class ExplodingSession(FakeSession):
+    async def execute(self, stmt):
+      raise RuntimeError("db is down")
+
+  _patch_session(monkeypatch, ExplodingSession(results=[]))
+  repo = SqlAlchemyTradeBroadcastRepository()
+
+  assert await repo.subscribe_all(42) is None
+  assert await repo.unsubscribe_all(42) is None
+
+
 async def test_broadcast_is_subscribed_reads_the_flag_of_that_account(monkeypatch):
   account_uuid = uuid.uuid4()
   # on, off, and no link at all (an empty result reads as not subscribed).

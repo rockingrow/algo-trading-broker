@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from app.handlers.account import cmd_subscribe, cmd_unsubscribe
+from app.handlers.account import (
+  cmd_subscribe,
+  cmd_subscribe_all,
+  cmd_unsubscribe,
+  cmd_unsubscribe_all,
+)
 
 
 class FakeMessage:
@@ -37,6 +42,14 @@ class FakeBroker:
 
   async def unsubscribe_broadcast(self, telegram_user_id: int):
     self.calls.append(("unsubscribe", telegram_user_id))
+    return self._result
+
+  async def subscribe_all_broadcast(self, telegram_user_id: int):
+    self.calls.append(("subscribe_all", telegram_user_id))
+    return self._result
+
+  async def unsubscribe_all_broadcast(self, telegram_user_id: int):
+    self.calls.append(("unsubscribe_all", telegram_user_id))
     return self._result
 
 
@@ -82,6 +95,49 @@ async def test_unsubscribe_failure_is_reported_not_confirmed():
   message = FakeMessage()
 
   await cmd_unsubscribe(message, FakeBroker(None))
+
+  assert "Failed to update subscription" in message.last
+  assert "Unsubscribed" not in message.last
+
+
+# ── /subscribeall and /unsubscribeall ───────────────────────────────
+
+
+async def test_subscribe_all_reports_how_many_accounts_it_covered():
+  message = FakeMessage()
+  broker = FakeBroker({"subscribed": True, "accounts": 4})
+
+  await cmd_subscribe_all(message, broker)
+
+  assert broker.calls == [("subscribe_all", 777)]
+  assert "Subscribed" in message.last
+  assert "all accounts (4)" in message.last
+
+
+async def test_unsubscribe_all_reports_how_many_accounts_it_covered():
+  message = FakeMessage()
+  broker = FakeBroker({"subscribed": False, "accounts": 4})
+
+  await cmd_unsubscribe_all(message, broker)
+
+  assert broker.calls == [("unsubscribe_all", 777)]
+  assert "Unsubscribed" in message.last
+  assert "all accounts (4)" in message.last
+
+
+async def test_subscribe_all_failure_is_reported_not_confirmed():
+  message = FakeMessage()
+
+  await cmd_subscribe_all(message, FakeBroker(None))
+
+  assert "Failed to update subscription" in message.last
+  assert "Subscribed" not in message.last
+
+
+async def test_unsubscribe_all_failure_is_reported_not_confirmed():
+  message = FakeMessage()
+
+  await cmd_unsubscribe_all(message, FakeBroker(None))
 
   assert "Failed to update subscription" in message.last
   assert "Unsubscribed" not in message.last

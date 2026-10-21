@@ -993,6 +993,8 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `GET /v1/telegram/{telegram_user_id}/broadcast` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/broadcast/subscribe` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/broadcast/unsubscribe` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/broadcast/subscribe-all` | `X-API-KEY` |
+| `POST /v1/telegram/{telegram_user_id}/broadcast/unsubscribe-all` | `X-API-KEY` |
 
 The three `…/broadcast` endpoints act on the caller's **active account** (the one
 `POST …/active-account` selects), like `/flat` or `/maxorders`: the live trade
@@ -1001,6 +1003,14 @@ They answer `404` when the user has no linked account. Each response carries
 `subscribed` plus the account it was read from or written to —
 `account_id`, `market`, `gateway` — because the caller may have switched
 accounts since it last resolved one.
+
+`…/broadcast/subscribe-all` and `…/broadcast/unsubscribe-all` are the bulk form
+(the bot's `/subscribeall` and `/unsubscribeall`): one `UPDATE` of
+`trade_cards_enabled` over **every** `account_bot_links` row the caller holds, so
+they need no active account. They answer `{"subscribed": bool, "accounts": n}`,
+where `n` is how many links the switch covered; `404` when the caller holds none,
+`500` when the write failed. A link made afterwards starts off — the bulk switch
+is not a standing preference.
 
 ---
 
@@ -1625,7 +1635,7 @@ role/permission column — every linked user has the same rights.
 | `account_id` | UUID | FK → `accounts.id`, `ON DELETE CASCADE` |
 | `platform` | Enum | `TELEGRAM` |
 | `platform_user_id` | String(64) | The bot user's platform id. Stored as text, not a number: Telegram/Discord ids are numeric but Slack/Matrix ids are opaque strings |
-| `trade_cards_enabled` | Boolean | `false` by default. The user's opt-in to the [live trade card](#how-a-card-lives) **for this account** — flipped by the bot's `/subscribe` / `/unsubscribe` on the user's active account only |
+| `trade_cards_enabled` | Boolean | `false` by default. The user's opt-in to the [live trade card](#how-a-card-lives) **for this account** — flipped by the bot's `/subscribe` / `/unsubscribe` on the user's active account only, or on every link the user holds by `/subscribeall` / `/unsubscribeall` |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 

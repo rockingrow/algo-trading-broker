@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/subscribeall` and `/unsubscribeall` switch live trade cards on or off for
+  every linked account at once.** With the opt-in per account, a user holding
+  several accounts needed a `/switch` plus `/subscribe` round for each one; the
+  bulk pair covers all of them in one command and replies with how many accounts
+  it touched. They compose with the per-account pair: `/subscribeall`, then
+  `/switch` and `/unsubscribe` on one account, leaves the others on.
+
+  - `POST /v1/telegram/{telegram_user_id}/broadcast/subscribe-all` and
+    `…/unsubscribe-all` run one `UPDATE account_bot_links SET
+    trade_cards_enabled` over the caller's links. Response:
+    `{"subscribed": bool, "accounts": n}`; `404` when the caller holds no link,
+    `500` when the write fails. Idempotent, and no new migration.
+  - The switch covers the links held **now**: an account linked later starts
+    off, and the bot's reply says so.
+  - Command names are lowercase because Telegram only accepts `[a-z0-9_]`.
+  - New `bruno/telegram/user` requests: `Broadcast - Subscribe All` and
+    `Broadcast - Unsubscribe All`.
+
 ### Changed
 
 - **`/subscribe` and `/unsubscribe` act on the active account, not on every

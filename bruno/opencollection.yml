@@ -81,6 +81,8 @@ docs:
     | 7 | [Broadcast - Get](bruno/telegram/user/Broadcast%20-%20Get.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}/broadcast` | Whether live trade-card DMs are on for the caller's **active account**. Response: `subscribed` plus the `account_id`, `market`, `gateway` it was read from; `404` when nothing is linked |
     | 8 | [Broadcast - Subscribe](bruno/telegram/user/Broadcast%20-%20Subscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/subscribe` | No body. Turns cards on for the caller's **active account** only (switch with Set Active Account to change another); same response and `404` as Broadcast - Get |
     | 9 | [Broadcast - Unsubscribe](bruno/telegram/user/Broadcast%20-%20Unsubscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/unsubscribe` | No body. Turns cards off for the caller's **active account** only; other linked accounts keep theirs. Same response and `404` as Broadcast - Get |
+    | 12 | [Broadcast - Subscribe All](bruno/telegram/user/Broadcast%20-%20Subscribe%20All.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/subscribe-all` | No body. Turns cards on for **every** account the caller holds (the bot's `/subscribeall`). Response: `{"subscribed": true, "accounts": n}`; `404` when nothing is linked. Accounts linked afterwards start off |
+    | 13 | [Broadcast - Unsubscribe All](bruno/telegram/user/Broadcast%20-%20Unsubscribe%20All.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/unsubscribe-all` | No body. Turns cards off for every account the caller holds (the bot's `/unsubscribeall`). Same response and `404` as Subscribe All |
 
     ### `telegram/admin/` subfolder — trading control commands
 

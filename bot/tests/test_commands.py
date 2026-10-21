@@ -21,15 +21,15 @@ def _names(commands):
 
 
 def test_command_list_sizes():
-  assert len(USER_COMMANDS) == 14
+  assert len(USER_COMMANDS) == 16
   # 15 admin commands + 1 divider/header row.
   assert len(ADMIN_EXTRA_COMMANDS) == 16
   # Admin sees user commands plus the extras.
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)
   user_names = set(_names(USER_COMMANDS))
   assert user_names.issubset(set(_names(ADMIN_COMMANDS)))
-  # User commands include the live trade-card opt-in.
-  assert {"subscribe", "unsubscribe"} <= user_names
+  # User commands include the live trade-card opt-in, for one account and for all.
+  assert {"subscribe", "unsubscribe", "subscribeall", "unsubscribeall"} <= user_names
   # Admin commands are prefixed and grouped after the divider.
   admin_names = set(_names(ADMIN_COMMANDS))
   assert {
@@ -84,4 +84,4 @@ def test_menu_for_linked_admin_is_the_full_admin_menu():
 def test_menu_for_returns_a_copy_callers_cannot_corrupt():
   menu = menu_for(linked=True, is_admin=False)
   menu.clear()
-  assert len(USER_COMMANDS) == 14
+  assert len(USER_COMMANDS) == 16

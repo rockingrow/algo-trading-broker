@@ -296,9 +296,11 @@ class AccountBotLink(Base):
   Telegram DM posted when this account opens a trade and edited in place as it
   moves) *for this account*. It lives on the link because the preference is
   "this user wants alerts for this account": ``/subscribe`` and
-  ``/unsubscribe`` flip it on the user's active account only, and unlinking
-  deletes the row, so the preference can never outlive the access it belongs
-  to. A new link starts off.
+  ``/unsubscribe`` flip it on the user's active account only, while
+  ``/subscribeall`` and ``/unsubscribeall`` flip it on every link the user
+  holds at that moment. Unlinking deletes the row, so the preference can never
+  outlive the access it belongs to. A new link starts off, whatever was run
+  before.
   """
 
   __tablename__ = "account_bot_links"

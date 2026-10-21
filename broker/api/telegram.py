@@ -50,6 +50,7 @@ from broker.services.account_settings_service import (
   resolve_account_settings,
 )
 from broker.schemas.telegram_schema import (
+  BroadcastBulkSubscriptionResponse,
   BroadcastSubscriptionResponse,
   CommandResultResponse,
   FlatCommandRequest,
@@ -510,6 +511,11 @@ def get_telegram_router() -> APIRouter:
   # ``/switch`` selects) exactly as ``/flat`` or ``/maxorders`` do, so a user
   # with accounts A and B can have cards on for A and off for B. That makes
   # these account-scoped like the rest — 404 when nothing is linked.
+  #
+  # ``…/subscribe-all`` and ``…/unsubscribe-all`` are the bulk form: one switch
+  # over every account the caller holds, for a user who wants all of them on (or
+  # off) without a ``/switch`` round per account. They need no active account,
+  # only at least one link.
 
   def _subscription_response(
     account: Account, subscribed: bool
@@ -572,5 +578,48 @@ def get_telegram_router() -> APIRouter:
         detail="Failed to update broadcast subscription",
       )
     return _subscription_response(account, False)
+
+  def _bulk_subscription_response(
+    links: int | None, subscribed: bool
+  ) -> BroadcastBulkSubscriptionResponse:
+    """Map the repository's count to a response: ``None`` is a failed write
+    (500), ``0`` means the caller holds no link at all (404)."""
+    if links is None:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broadcast subscription",
+      )
+    if links == 0:
+      raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="No account linked to this Telegram user",
+      )
+    return BroadcastBulkSubscriptionResponse(subscribed=subscribed, accounts=links)
+
+  @router.post(
+    "/{telegram_user_id}/broadcast/subscribe-all",
+    summary="Opt in to live trade-card DMs for every account the caller holds",
+    response_model=BroadcastBulkSubscriptionResponse,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
+  )
+  async def subscribe_all_broadcast(
+    telegram_user_id: int,
+    broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
+  ) -> BroadcastBulkSubscriptionResponse:
+    links = await broadcast_repo.subscribe_all(telegram_user_id)
+    return _bulk_subscription_response(links, True)
+
+  @router.post(
+    "/{telegram_user_id}/broadcast/unsubscribe-all",
+    summary="Opt out of live trade-card DMs for every account the caller holds",
+    response_model=BroadcastBulkSubscriptionResponse,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
+  )
+  async def unsubscribe_all_broadcast(
+    telegram_user_id: int,
+    broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
+  ) -> BroadcastBulkSubscriptionResponse:
+    links = await broadcast_repo.unsubscribe_all(telegram_user_id)
+    return _bulk_subscription_response(links, False)
 
   return router

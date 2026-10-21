@@ -125,6 +125,8 @@ class BrokerClientUser(BrokerClient):
     BROADCAST = "{telegram_id}/broadcast"
     BROADCAST_SUBSCRIBE = "{telegram_id}/broadcast/subscribe"
     BROADCAST_UNSUBSCRIBE = "{telegram_id}/broadcast/unsubscribe"
+    BROADCAST_SUBSCRIBE_ALL = "{telegram_id}/broadcast/subscribe-all"
+    BROADCAST_UNSUBSCRIBE_ALL = "{telegram_id}/broadcast/unsubscribe-all"
 
   async def link(self, token: str, telegram_user_id: int) -> Optional[dict[str, Any]]:
     """Bind a Telegram user to an account via its link token (None if invalid)."""
@@ -337,6 +339,35 @@ class BrokerClientUser(BrokerClient):
       await self._request(
         "POST",
         self._path(self.ENDPOINTS.BROADCAST_UNSUBSCRIBE, telegram_id=telegram_user_id),
+      )
+    )
+
+  async def subscribe_all_broadcast(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Opt the user in to live trade-card DMs for **every** account they hold
+    (``{"subscribed": True, "accounts": n}``), or None on failure — including a
+    user with no linked account, which the broker answers with 404."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(
+          self.ENDPOINTS.BROADCAST_SUBSCRIBE_ALL, telegram_id=telegram_user_id
+        ),
+      )
+    )
+
+  async def unsubscribe_all_broadcast(
+    self, telegram_user_id: int
+  ) -> Optional[dict[str, Any]]:
+    """Opt the user out of live trade-card DMs for every account they hold.
+    Same reply shape and failure contract as :meth:`subscribe_all_broadcast`."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(
+          self.ENDPOINTS.BROADCAST_UNSUBSCRIBE_ALL, telegram_id=telegram_user_id
+        ),
       )
     )
 

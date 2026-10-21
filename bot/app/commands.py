@@ -39,6 +39,10 @@ USER_COMMANDS = [
   BotCommand(
     command="unsubscribe", description="Stop trade alerts for the active account"
   ),
+  BotCommand(command="subscribeall", description="Live trade alerts for all accounts"),
+  BotCommand(
+    command="unsubscribeall", description="Stop trade alerts for all accounts"
+  ),
   BotCommand(command="help", description="Help"),
 ]
 

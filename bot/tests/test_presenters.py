@@ -455,3 +455,27 @@ def test_broadcast_subscription_tolerates_a_missing_gateway_and_escapes_html():
   assert "&lt;b&gt;x&lt;/b&gt;" in out
   assert "(FOREX)" in out
   assert "None" not in out
+
+
+def test_broadcast_subscription_all_states_how_many_accounts_it_covered():
+  on = messages.UserMessages.format_broadcast_subscription_all(
+    True, {"subscribed": True, "accounts": 3}
+  )
+  off = messages.UserMessages.format_broadcast_subscription_all(
+    False, {"subscribed": False, "accounts": 3}
+  )
+
+  assert "Subscribed" in on and "Unsubscribed" not in on
+  assert "all accounts (3)" in on and "3 linked accounts" in on
+  assert "Unsubscribed" in off and "all accounts (3)" in off
+  # A later link starts off — the confirmation is where the user learns that.
+  assert "link later starts off" in on
+
+
+def test_broadcast_subscription_all_uses_the_singular_for_one_account():
+  out = messages.UserMessages.format_broadcast_subscription_all(
+    True, {"subscribed": True, "accounts": 1}
+  )
+
+  assert "1 linked account" in out
+  assert "1 linked accounts" not in out

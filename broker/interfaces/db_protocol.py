@@ -178,6 +178,18 @@ class TradeBroadcastRepository(Protocol):
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool: ...
 
+  async def subscribe_all(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> int | None: ...
+
+  async def unsubscribe_all(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> int | None: ...
+
   async def list_broadcast_targets(
     self,
     account_id: str,
