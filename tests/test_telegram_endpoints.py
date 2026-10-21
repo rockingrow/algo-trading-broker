@@ -19,6 +19,7 @@ from broker.providers import (
   get_account_repository,
   get_publisher,
   get_setting_repository,
+  get_trade_broadcast_repository,
   get_trade_repository,
 )
 from broker.router import get_core_router
@@ -576,6 +577,141 @@ def test_switch_active_account_not_owned(multi_ctx):
     headers=_headers(),
   )
   assert resp.status_code == 404
+
+
+# ── trade-card opt-in follows the active account ───────────────────
+
+
+class FakeTgBroadcastRepo:
+  """In-memory stand-in for ``TradeBroadcastRepository`` mirroring the real
+  model: the opt-in is a flag on one ``(platform_user_id, account)`` link, so
+  ``flags`` holds exactly those pairs. ``fail`` makes every write report the
+  database error the real repository signals with ``False``."""
+
+  def __init__(self):
+    self.flags: set[tuple[str, uuid.UUID]] = set()
+    self.fail = False
+
+  async def subscribe(self, telegram_user_id, account_uuid, platform=None):
+    if self.fail:
+      return False
+    self.flags.add((str(telegram_user_id), account_uuid))
+    return True
+
+  async def unsubscribe(self, telegram_user_id, account_uuid, platform=None):
+    if self.fail:
+      return False
+    self.flags.discard((str(telegram_user_id), account_uuid))
+    return True
+
+  async def is_subscribed(self, telegram_user_id, account_uuid, platform=None):
+    return (str(telegram_user_id), account_uuid) in self.flags
+
+
+@pytest.fixture
+def broadcast_ctx(multi_ctx):
+  """``multi_ctx`` (two accounts) plus the opt-in repository, with TG_ID linked
+  to both — ``acc-1`` first, so it is the active one."""
+  broadcast_repo = FakeTgBroadcastRepo()
+  overrides = multi_ctx["client"].app.dependency_overrides
+  overrides[get_trade_broadcast_repository] = lambda: broadcast_repo
+  _link_both(multi_ctx)
+  accounts = {a.account_id: a for a in multi_ctx["account_repo"]._accounts}
+  return {**multi_ctx, "broadcast_repo": broadcast_repo, "accounts": accounts}
+
+
+def _switch_to(ctx, account: Account) -> None:
+  resp = ctx["client"].post(
+    f"/v1/telegram/{TG_ID}/active-account",
+    json={"account_id": str(account.id)},
+    headers=_headers(),
+  )
+  assert resp.status_code == 200
+
+
+def test_subscribe_applies_to_the_active_account_only(broadcast_ctx):
+  client = broadcast_ctx["client"]
+  acc1 = broadcast_ctx["accounts"]["acc-1"]
+
+  resp = client.post(f"/v1/telegram/{TG_ID}/broadcast/subscribe", headers=_headers())
+
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "subscribed": True,
+    "account_id": "acc-1",
+    "market": "FOREX",
+    "gateway": None,
+  }
+  # The other linked account was not touched.
+  assert broadcast_ctx["broadcast_repo"].flags == {(str(TG_ID), acc1.id)}
+  resp = client.get(f"/v1/telegram/{TG_ID}/broadcast", headers=_headers())
+  assert resp.json()["subscribed"] is True
+  assert resp.json()["account_id"] == "acc-1"
+
+
+def test_switching_account_changes_which_account_subscribe_targets(broadcast_ctx):
+  client = broadcast_ctx["client"]
+  acc1, acc2 = broadcast_ctx["accounts"]["acc-1"], broadcast_ctx["accounts"]["acc-2"]
+  client.post(f"/v1/telegram/{TG_ID}/broadcast/subscribe", headers=_headers())
+
+  _switch_to(broadcast_ctx, acc2)
+
+  # acc-1's opt-in must not leak into the freshly selected account.
+  resp = client.get(f"/v1/telegram/{TG_ID}/broadcast", headers=_headers())
+  assert resp.json() == {
+    "subscribed": False,
+    "account_id": "acc-2",
+    "market": "CRYPTO",
+    "gateway": "BINANCE",
+  }
+
+  resp = client.post(f"/v1/telegram/{TG_ID}/broadcast/subscribe", headers=_headers())
+  assert resp.json()["account_id"] == "acc-2"
+  assert broadcast_ctx["broadcast_repo"].flags == {
+    (str(TG_ID), acc1.id),
+    (str(TG_ID), acc2.id),
+  }
+
+
+def test_unsubscribe_clears_only_the_active_account(broadcast_ctx):
+  client = broadcast_ctx["client"]
+  acc1, acc2 = broadcast_ctx["accounts"]["acc-1"], broadcast_ctx["accounts"]["acc-2"]
+  client.post(f"/v1/telegram/{TG_ID}/broadcast/subscribe", headers=_headers())
+  _switch_to(broadcast_ctx, acc2)
+  client.post(f"/v1/telegram/{TG_ID}/broadcast/subscribe", headers=_headers())
+
+  resp = client.post(f"/v1/telegram/{TG_ID}/broadcast/unsubscribe", headers=_headers())
+
+  assert resp.status_code == 200
+  assert resp.json()["subscribed"] is False
+  assert resp.json()["account_id"] == "acc-2"
+  # acc-1 is still subscribed: unsubscribing is not "everything I hold".
+  assert broadcast_ctx["broadcast_repo"].flags == {(str(TG_ID), acc1.id)}
+
+
+def test_broadcast_endpoints_need_a_linked_account(multi_ctx):
+  """Nothing linked → no active account → nothing to opt in for."""
+  client = multi_ctx["client"]
+  repo = FakeTgBroadcastRepo()
+  client.app.dependency_overrides[get_trade_broadcast_repository] = lambda: repo
+
+  for method, path in (
+    ("GET", f"/v1/telegram/{TG_ID}/broadcast"),
+    ("POST", f"/v1/telegram/{TG_ID}/broadcast/subscribe"),
+    ("POST", f"/v1/telegram/{TG_ID}/broadcast/unsubscribe"),
+  ):
+    resp = client.request(method, path, headers=_headers())
+    assert resp.status_code == 404, path
+  assert repo.flags == set()
+
+
+def test_broadcast_write_failure_surfaces_as_500(broadcast_ctx):
+  broadcast_ctx["broadcast_repo"].fail = True
+  client = broadcast_ctx["client"]
+
+  for action in ("subscribe", "unsubscribe"):
+    resp = client.post(f"/v1/telegram/{TG_ID}/broadcast/{action}", headers=_headers())
+    assert resp.status_code == 500, action
 
 
 # ── many users per account ──────────────────────────────────────────

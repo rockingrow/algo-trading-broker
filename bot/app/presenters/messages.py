@@ -123,8 +123,8 @@ class UserMessages:
     "/link — Add another account\n"
     "/switch — Change active account\n"
     "/unlink — Unlink active account\n"
-    "/subscribe — Live trade alerts\n"
-    "/unsubscribe — Stop trade alerts"
+    "/subscribe — Live trade alerts (active account)\n"
+    "/unsubscribe — Stop trade alerts (active account)"
   )
 
   @staticmethod
@@ -176,21 +176,35 @@ class UserMessages:
     )
 
   @staticmethod
-  def format_broadcast_subscription(subscribed: bool) -> str:
+  def format_broadcast_subscription(subscribed: bool, account: dict[str, Any]) -> str:
+    """Confirm a /subscribe or /unsubscribe, naming the account it applied to.
+
+    The opt-in is per account, so a bare "Subscribed." would leave a user with
+    several accounts guessing which one they just changed. *account* is what the
+    broker echoed back (``account_id``, ``market``, ``gateway``)."""
+    kind = "/".join(
+      str(part) for part in (account.get("market"), account.get("gateway")) if part
+    )
+    label = f"<code>{_esc(account.get('account_id'))}</code>" + (
+      f" ({_esc(kind)})" if kind else ""
+    )
     if subscribed:
       return (
-        f"{emojis.CHECK} <b>Subscribed.</b>\n\n"
-        "You'll now get a message here the moment one of your linked accounts "
-        "opens a trade. Each message updates itself as the trade moves — "
-        "partial close, close, flat — and carries "
-        f"{emojis.DETAIL} <b>Detail</b> and {emojis.CYCLE_CLOSED} <b>Close</b> buttons "
-        "while the trade is still running.\n\n"
-        "Use /unsubscribe to stop."
+        f"{emojis.CHECK} <b>Subscribed</b> — {label}\n\n"
+        "You'll now get a message here the moment this account opens a trade. "
+        "Each message updates itself as the trade moves — partial close, "
+        f"close, flat — and carries {emojis.DETAIL} <b>Detail</b> and "
+        f"{emojis.CYCLE_CLOSED} <b>Close</b> buttons while the trade is still "
+        "running.\n\n"
+        "This covers this account only; your other linked accounts are "
+        "unchanged (/switch to change one). Use /unsubscribe to stop."
       )
     return (
-      f"{emojis.CHECK} <b>Unsubscribed.</b>\n\n"
-      "You'll no longer get trade alerts. Trades already showing in this chat "
-      "keep updating until they close. Use /subscribe to turn them back on."
+      f"{emojis.CHECK} <b>Unsubscribed</b> — {label}\n\n"
+      "You'll no longer get trade alerts for this account. Trades already "
+      "showing in this chat keep updating until they close.\n\n"
+      "Your other linked accounts are unchanged (/switch to change one). "
+      "Use /subscribe to turn it back on."
     )
 
   HELP_TEXT = (

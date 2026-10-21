@@ -506,57 +506,71 @@ def get_telegram_router() -> APIRouter:
     )
 
   # ── Trade-card opt-in ────────────────────────────────────────────
-  # A per-user preference (spans every account the user holds), so these are
-  # keyed by the path ``telegram_user_id`` alone and need no linked-account
-  # resolution — an owner may subscribe before or after linking.
+  # A per-account preference: it follows the caller's *active* account (the one
+  # ``/switch`` selects) exactly as ``/flat`` or ``/maxorders`` do, so a user
+  # with accounts A and B can have cards on for A and off for B. That makes
+  # these account-scoped like the rest — 404 when nothing is linked.
+
+  def _subscription_response(
+    account: Account, subscribed: bool
+  ) -> BroadcastSubscriptionResponse:
+    return BroadcastSubscriptionResponse(
+      subscribed=subscribed,
+      account_id=account.account_id,
+      market=account.market,
+      gateway=account.gateway,
+    )
 
   @router.get(
     "/{telegram_user_id}/broadcast",
-    summary="Whether the caller receives live trade-card DMs",
+    summary="Whether live trade-card DMs are on for the caller's active account",
     response_model=BroadcastSubscriptionResponse,
-    responses=AUTH_RESPONSES,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
   )
   async def get_broadcast_subscription(
     telegram_user_id: int,
+    account: Account = Depends(get_linked_account),
     broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
   ) -> BroadcastSubscriptionResponse:
-    subscribed = await broadcast_repo.is_subscribed(telegram_user_id)
-    return BroadcastSubscriptionResponse(subscribed=subscribed)
+    subscribed = await broadcast_repo.is_subscribed(telegram_user_id, account.id)
+    return _subscription_response(account, subscribed)
 
   @router.post(
     "/{telegram_user_id}/broadcast/subscribe",
-    summary="Opt in to live trade-card DMs",
+    summary="Opt in to live trade-card DMs for the caller's active account",
     response_model=BroadcastSubscriptionResponse,
-    responses=AUTH_RESPONSES,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
   )
   async def subscribe_broadcast(
     telegram_user_id: int,
+    account: Account = Depends(get_linked_account),
     broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
   ) -> BroadcastSubscriptionResponse:
-    ok = await broadcast_repo.subscribe(telegram_user_id)
+    ok = await broadcast_repo.subscribe(telegram_user_id, account.id)
     if not ok:
       raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Failed to update broadcast subscription",
       )
-    return BroadcastSubscriptionResponse(subscribed=True)
+    return _subscription_response(account, True)
 
   @router.post(
     "/{telegram_user_id}/broadcast/unsubscribe",
-    summary="Opt out of live trade-card DMs",
+    summary="Opt out of live trade-card DMs for the caller's active account",
     response_model=BroadcastSubscriptionResponse,
-    responses=AUTH_RESPONSES,
+    responses={**AUTH_RESPONSES, **NOT_LINKED_RESPONSE},
   )
   async def unsubscribe_broadcast(
     telegram_user_id: int,
+    account: Account = Depends(get_linked_account),
     broadcast_repo: TradeBroadcastRepository = Depends(get_trade_broadcast_repository),
   ) -> BroadcastSubscriptionResponse:
-    ok = await broadcast_repo.unsubscribe(telegram_user_id)
+    ok = await broadcast_repo.unsubscribe(telegram_user_id, account.id)
     if not ok:
       raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Failed to update broadcast subscription",
       )
-    return BroadcastSubscriptionResponse(subscribed=False)
+    return _subscription_response(account, False)
 
   return router

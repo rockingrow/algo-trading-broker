@@ -63,9 +63,9 @@ links the account immediately, skipping the "paste your UUID" step. That is what
 an `/admin_invite_url` link produces — see [Invite links](#invite-links).
 
 One linked account is **active** at a time; `/status`, `/trades`, `/flat`,
-`/prevent`, `/allow`, `/maxorders` and `/unlink` all act on it. `/myaccounts` lists the linked
-accounts, `/link` adds one, and `/switch` lists them with a button per account
-to change the active one.
+`/prevent`, `/allow`, `/maxorders`, `/subscribe`, `/unsubscribe` and `/unlink`
+all act on it. `/myaccounts` lists the linked accounts, `/link` adds one, and
+`/switch` lists them with a button per account to change the active one.
 
 `/status` also shows an **Open positions** line — the number of trades
 currently running (``is_running``) on the active account — and, whenever
@@ -103,9 +103,16 @@ account's settings to the running worker and replays them on every reconnect.
 
 ### Live trade cards
 
-`/subscribe` opts you in to a message the moment one of your linked accounts
-**opens a trade**; `/unsubscribe` turns it off. This is a per-user preference
-spanning every account you hold.
+`/subscribe` opts you in to a message the moment your **active account opens a
+trade**; `/unsubscribe` turns it off for that account. The opt-in is **per
+account**, not per user: it follows `/switch` like `/flat` does, so with accounts
+A and B you can have cards on for A and off for B — `/switch` to the other
+account and repeat the command to change it. The reply names the account it
+applied to, and says the others are unchanged.
+
+A newly linked account starts **off**, and unlinking an account (`/unlink`, or an
+admin `/admin_rotate`) discards its opt-in with the link, so linking it again
+later does not resume cards you had stopped caring about.
 
 The message is a **card**, not an alert: it is sent by this same bot into your
 existing chat and then **edits itself** as the trade moves — `Opened` →

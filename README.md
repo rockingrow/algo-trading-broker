@@ -994,6 +994,14 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | `POST /v1/telegram/{telegram_user_id}/broadcast/subscribe` | `X-API-KEY` |
 | `POST /v1/telegram/{telegram_user_id}/broadcast/unsubscribe` | `X-API-KEY` |
 
+The three `…/broadcast` endpoints act on the caller's **active account** (the one
+`POST …/active-account` selects), like `/flat` or `/maxorders`: the live trade
+card opt-in is per account, so `subscribe` on account A leaves account B alone.
+They answer `404` when the user has no linked account. Each response carries
+`subscribed` plus the account it was read from or written to —
+`account_id`, `market`, `gateway` — because the caller may have switched
+accounts since it last resolved one.
+
 ---
 
 ### GET `/v1/health`
@@ -1469,7 +1477,8 @@ drops the caller's own.
 
 For each user, exactly one of their linked accounts is **active** at a time, and
 every single-account command (`/status`, `/trades`, `/flat`, `/prevent`,
-`/allow`, `/maxorders`, `/unlink`) acts on whichever one that is.
+`/allow`, `/maxorders`, `/subscribe`, `/unsubscribe`, `/unlink`) acts on whichever
+one that is.
 
 - `/link` — add another account (paste a second token). The first account
   linked becomes active automatically; adding more does not change the
@@ -1616,10 +1625,17 @@ role/permission column — every linked user has the same rights.
 | `account_id` | UUID | FK → `accounts.id`, `ON DELETE CASCADE` |
 | `platform` | Enum | `TELEGRAM` |
 | `platform_user_id` | String(64) | The bot user's platform id. Stored as text, not a number: Telegram/Discord ids are numeric but Slack/Matrix ids are opaque strings |
+| `trade_cards_enabled` | Boolean | `false` by default. The user's opt-in to the [live trade card](#how-a-card-lives) **for this account** — flipped by the bot's `/subscribe` / `/unsubscribe` on the user's active account only |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |
 
 **Unique constraint:** `(platform, platform_user_id, account_id)`.
+
+The opt-in lives on the link rather than in a table of its own because it is a
+statement about one `(user, account)` pair: with accounts A and B a user can have
+cards on for A and off for B. It also ties the preference's lifetime to the
+access it belongs to — unlinking (or rotating the account's token) deletes the
+row, so a link made later starts off again.
 
 ### `account_link_tokens` table
 
@@ -1648,7 +1664,8 @@ a token only grants the initial claim.
 
 One row per `(platform, bot user)`, tracking which of their linked accounts is
 currently **active** — the one every single-account bot command (`/status`,
-`/trades`, `/flat`, `/prevent`, `/allow`, `/unlink`) acts on. Kept separate from
+`/trades`, `/flat`, `/prevent`, `/allow`, `/subscribe`, `/unsubscribe`, `/unlink`)
+acts on. Kept separate from
 `account_bot_links` because "may drive" and "is currently driving" are different
 facts: a user has N links but exactly one active selection.
 
@@ -1668,23 +1685,6 @@ The row is created on first link and updated by
 If `active_account_id` ever points at an account the user no longer holds a link
 to, the broker falls back to their most recently active account and self-heals
 the row on the next read.
-
-### `trade_broadcast_subscriptions` table
-
-One row per `(platform, bot user)` who has opted in — via the bot's `/subscribe`
-— to **live trade cards**. Unsubscribing (`/unsubscribe`) deletes the row. The
-opt-in spans every account the user holds, which is why it is a per-user row
-here rather than a column on a link.
-
-| Column | Type | Description |
-| ------- | ------------ | --------------------------------------- |
-| `id` | UUID (PK) | Unique record identifier |
-| `platform` | Enum | `TELEGRAM` |
-| `platform_user_id` | String(64) | The bot user opted in to trade cards |
-| `createdAt` | DateTime | Record insertion time |
-| `updatedAt` | DateTime | Last update time |
-
-**Unique constraint:** `(platform, platform_user_id)`.
 
 ### `trade_notifications` table
 
@@ -1720,9 +1720,9 @@ re-rendered later — by the bot, on a Detail tap — with only the row to go on
 
 Every `TRADE` event, after the `trades` upsert, goes to `TradeCardService`:
 
-1. **First sighting** — the broker posts the card to every subscribed owner of
-   that account (the intersection of `account_bot_links` and
-   `trade_broadcast_subscriptions`), via the bot-service bot token
+1. **First sighting** — the broker posts the card to every owner who has the
+   account's `account_bot_links.trade_cards_enabled` switched on, via the
+   bot-service bot token
    (`BOT_TELEGRAM_TOKEN`) — the bot the user actually started, since a bot can
    only message users who started it. Below the body sit a **Detail** and an
    **Exit** button.
