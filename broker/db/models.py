@@ -291,14 +291,6 @@ class AccountBotLink(Base):
   Discord ids are 64-bit numbers — Slack/Matrix ids are opaque strings, so
   storing text avoids a second migration later. The API layer still speaks
   ``telegram_user_id: int``; the repository is the single place that casts.
-
-  ``trade_cards_enabled`` is the user's opt-in to the live trade card (a
-  Telegram DM posted when this account opens a trade and edited in place as it
-  moves) *for this account*. It lives on the link because the preference is
-  "this user wants alerts for this account": ``/subscribe`` and
-  ``/unsubscribe`` flip it on the user's active account only, and unlinking
-  deletes the row, so the preference can never outlive the access it belongs
-  to. A new link starts off.
   """
 
   __tablename__ = "account_bot_links"
@@ -321,9 +313,6 @@ class AccountBotLink(Base):
     Enum(BotPlatformTypeEnum), nullable=False
   )
   platform_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-  trade_cards_enabled: Mapped[bool] = mapped_column(
-    Boolean, nullable=False, default=False, server_default=text("false")
-  )
 
   def __repr__(self) -> str:
     return (
@@ -406,6 +395,40 @@ class BotSession(Base):
       f"<BotSession platform={self.platform} "
       f"platform_user_id={self.platform_user_id} "
       f"active_account_id={self.active_account_id}>"
+    )
+
+
+class TradeBroadcastSubscription(Base):
+  """
+  One row per (platform, bot user) who has opted in to receive the live trade
+  card — a Telegram DM posted when one of their linked accounts opens a trade
+  and edited in place as that trade progresses.
+
+  Kept as its own table — rather than a column on ``bot_sessions`` or
+  ``account_bot_links`` — because the opt-in is a per-user preference that
+  spans every account the user holds, independent of which one is active or of
+  any single link row. A user is "subscribed" when a row exists here for their
+  ``(platform, platform_user_id)``; unsubscribing deletes it.
+  """
+
+  __tablename__ = "trade_broadcast_subscriptions"
+  __table_args__ = (
+    UniqueConstraint(
+      "platform",
+      "platform_user_id",
+      name="uq_trade_broadcast_subscriptions_platform_user",
+    ),
+  )
+
+  platform: Mapped[BotPlatformTypeEnum] = mapped_column(
+    Enum(BotPlatformTypeEnum), nullable=False
+  )
+  platform_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+  def __repr__(self) -> str:
+    return (
+      f"<TradeBroadcastSubscription platform={self.platform} "
+      f"platform_user_id={self.platform_user_id}>"
     )
 
 

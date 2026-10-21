@@ -28,7 +28,7 @@ def test_command_list_sizes():
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)
   user_names = set(_names(USER_COMMANDS))
   assert user_names.issubset(set(_names(ADMIN_COMMANDS)))
-  # User commands include the live trade-card opt-in.
+  # User commands include the completed-trade broadcast opt-in.
   assert {"subscribe", "unsubscribe"} <= user_names
   # Admin commands are prefixed and grouped after the divider.
   admin_names = set(_names(ADMIN_COMMANDS))

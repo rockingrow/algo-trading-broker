@@ -155,26 +155,23 @@ class AccountRepository(Protocol):
 
 @runtime_checkable
 class TradeBroadcastRepository(Protocol):
-  """Per-account opt-in for live trade-card DMs, and recipient lookup."""
+  """Per-user opt-in for live trade-card DMs, and recipient lookup."""
 
   async def subscribe(
     self,
     telegram_user_id: int,
-    account_uuid: uuid.UUID,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool: ...
 
   async def unsubscribe(
     self,
     telegram_user_id: int,
-    account_uuid: uuid.UUID,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool: ...
 
   async def is_subscribed(
     self,
     telegram_user_id: int,
-    account_uuid: uuid.UUID,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool: ...
 

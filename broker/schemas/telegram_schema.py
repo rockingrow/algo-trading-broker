@@ -131,17 +131,9 @@ class CommandResultResponse(BaseModel):
 
 
 class BroadcastSubscriptionResponse(BaseModel):
-  """Whether the caller is opted in to live trade-card DMs for their *active*
-  account, and which account that is.
-
-  The opt-in is per account, so the answer is meaningless without naming the
-  account it was read from or written to — and the caller may have switched
-  accounts since it last resolved one, so the response is the authority."""
+  """Whether the caller is opted in to live trade-card DMs."""
 
   subscribed: bool
-  account_id: str
-  market: MarketTypeEnum
-  gateway: Optional[str] = None
 
 
 class OpenPositionsResponse(BaseModel):

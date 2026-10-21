@@ -307,9 +307,8 @@ class BrokerClientUser(BrokerClient):
   async def get_broadcast_subscription(
     self, telegram_user_id: int
   ) -> Optional[dict[str, Any]]:
-    """Whether the user is opted in to live trade-card DMs for their *active*
-    account (``{"subscribed": bool, "account_id", "market", "gateway"}``), or
-    None on failure."""
+    """Whether the user is opted in to completed-trade broadcast DMs
+    (``{"subscribed": bool}``), or None on failure."""
     return self._json_or_none(
       await self._request(
         "GET", self._path(self.ENDPOINTS.BROADCAST, telegram_id=telegram_user_id)
@@ -319,8 +318,7 @@ class BrokerClientUser(BrokerClient):
   async def subscribe_broadcast(
     self, telegram_user_id: int
   ) -> Optional[dict[str, Any]]:
-    """Opt the user in to live trade-card DMs for their *active* account. The
-    reply names the account the broker applied it to."""
+    """Opt the user in to completed-trade broadcast DMs."""
     return self._json_or_none(
       await self._request(
         "POST",
@@ -331,8 +329,7 @@ class BrokerClientUser(BrokerClient):
   async def unsubscribe_broadcast(
     self, telegram_user_id: int
   ) -> Optional[dict[str, Any]]:
-    """Opt the user out of live trade-card DMs for their *active* account. The
-    reply names the account the broker applied it to."""
+    """Opt the user out of completed-trade broadcast DMs."""
     return self._json_or_none(
       await self._request(
         "POST",

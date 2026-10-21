@@ -3,8 +3,7 @@
 Covers four layers with in-memory fakes (no DB / NATS / Telegram):
 - ``TradeCardService`` — posting, editing, skipping and forgetting cards,
 - the card renderer and its keyboard,
-- the ``/v1/telegram/*`` per-trade endpoints (the per-account opt-in ones are
-  in ``test_telegram_endpoints.py``),
+- the ``/v1/telegram/*`` per-trade and opt-in endpoints,
 - the ``POST /admin/accounts/{uuid}/link-telegram`` endpoint.
 """
 
@@ -31,6 +30,7 @@ from broker.helpers.trade_card import (
 from broker.providers import (
   get_account_repository,
   get_publisher,
+  get_trade_broadcast_repository,
   get_trade_repository,
 )
 from broker.router import get_core_router
@@ -49,12 +49,23 @@ API_KEY = "test-api-key"
 
 
 class FakeBroadcastRepo:
-  """The card service only asks who to send to; the opt-in endpoints are
-  covered against their own fake in ``test_telegram_endpoints.py``."""
-
-  def __init__(self, targets: list[str] | None = None):
+  def __init__(
+    self, subscribed: set[int] | None = None, targets: list[str] | None = None
+  ):
+    self._subscribed = {str(u) for u in (subscribed or set())}
     self._targets = targets or []
     self.target_calls: list[tuple] = []
+
+  async def subscribe(self, telegram_user_id, platform=None):
+    self._subscribed.add(str(telegram_user_id))
+    return True
+
+  async def unsubscribe(self, telegram_user_id, platform=None):
+    self._subscribed.discard(str(telegram_user_id))
+    return True
+
+  async def is_subscribed(self, telegram_user_id, platform=None):
+    return str(telegram_user_id) in self._subscribed
 
   async def list_broadcast_targets(self, account_id, market, gateway, platform=None):
     self.target_calls.append((account_id, market, gateway))
@@ -722,6 +733,36 @@ def test_exit_409s_on_an_already_closed_trade():
   )
   assert r.status_code == 409
   assert publisher.admin_signals == []
+
+
+# ── Trade-card opt-in endpoints ──────────────────────────────────────
+
+
+@pytest.fixture
+def broadcast_ctx():
+  app = FastAPI()
+  app.include_router(get_core_router())
+  repo = FakeBroadcastRepo()
+  app.dependency_overrides[get_trade_broadcast_repository] = lambda: repo
+  app.dependency_overrides[ensure_api_key] = lambda: None
+  return {"client": TestClient(app), "repo": repo}
+
+
+def test_subscribe_then_status_then_unsubscribe(broadcast_ctx):
+  client = broadcast_ctx["client"]
+  h = {"X-API-KEY": API_KEY}
+
+  r = client.get("/v1/telegram/555/broadcast", headers=h)
+  assert r.status_code == 200 and r.json() == {"subscribed": False}
+
+  r = client.post("/v1/telegram/555/broadcast/subscribe", headers=h)
+  assert r.status_code == 200 and r.json() == {"subscribed": True}
+
+  r = client.get("/v1/telegram/555/broadcast", headers=h)
+  assert r.json() == {"subscribed": True}
+
+  r = client.post("/v1/telegram/555/broadcast/unsubscribe", headers=h)
+  assert r.status_code == 200 and r.json() == {"subscribed": False}
 
 
 # ── Admin link-telegram endpoint ─────────────────────────────────────

@@ -13,7 +13,6 @@ import contextlib
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy.dialects import postgresql
 
 from broker.db import repository as repo_mod
 from broker.db.models import (
@@ -27,6 +26,7 @@ from broker.db.models import (
   BroadcastMessageWorker,
   BrokerSetting,
   Trade,
+  TradeBroadcastSubscription,
 )
 from broker.db.repository import (
   SqlAlchemyAccountRepository,
@@ -57,11 +57,6 @@ class _Result:
   def __init__(self, rows):
     self._rows = rows
 
-  @property
-  def rowcount(self) -> int:
-    """What an UPDATE/DELETE reports: seed one row to mean "one row matched"."""
-    return len(self._rows)
-
   def scalars(self):
     return self
 
@@ -74,18 +69,15 @@ class _Result:
 
 class FakeSession:
   """Minimal AsyncSession stand-in. ``execute`` returns rows from a queue of
-  pre-seeded results (one per execute call, FIFO). Every statement it is
-  handed is kept in ``statements`` so a test can inspect what was asked."""
+  pre-seeded results (one per execute call, FIFO)."""
 
   def __init__(self, results: list[list]):
     self._results = list(results)
-    self.statements = []
     self.added = []
     self.flushed = 0
     self.refreshed = []
 
-  async def execute(self, stmt):
-    self.statements.append(stmt)
+  async def execute(self, _stmt):
     rows = self._results.pop(0) if self._results else []
     return _Result(rows)
 
@@ -1178,68 +1170,34 @@ async def test_admin_link_telegram_idempotent(monkeypatch):
 # ── TradeBroadcastRepository ────────────────────────────────────────
 
 
-def _compiled(stmt):
-  """The statement as Postgres would receive it, plus its bound values."""
-  compiled = stmt.compile(dialect=postgresql.dialect())
-  return str(compiled), compiled.params
-
-
-async def test_broadcast_subscribe_flags_the_link_of_that_account(monkeypatch):
-  account_uuid = uuid.uuid4()
-  session = FakeSession(results=[["matched"]])
+async def test_broadcast_subscribe_inserts_when_absent(monkeypatch):
+  session = FakeSession(results=[[]])  # not yet subscribed
   _patch_session(monkeypatch, session)
-
-  ok = await SqlAlchemyTradeBroadcastRepository().subscribe(42, account_uuid)
-
-  assert ok is True
-  sql, params = _compiled(session.statements[0])
-  assert sql.startswith("UPDATE account_bot_links SET trade_cards_enabled=")
-  # Scoped to one (user, account) link — never to every link the user holds.
-  assert "account_bot_links.account_id =" in sql
-  assert "account_bot_links.platform_user_id =" in sql
-  assert params["trade_cards_enabled"] is True
-  assert params["platform_user_id_1"] == "42"
-  assert params["account_id_1"] == account_uuid
+  assert await SqlAlchemyTradeBroadcastRepository().subscribe(42) is True
+  added = [o for o in session.added if isinstance(o, TradeBroadcastSubscription)]
+  assert len(added) == 1
+  assert added[0].platform_user_id == "42"
 
 
-async def test_broadcast_unsubscribe_clears_the_flag_of_that_account(monkeypatch):
-  account_uuid = uuid.uuid4()
-  session = FakeSession(results=[["matched"]])
+async def test_broadcast_subscribe_idempotent(monkeypatch):
+  existing = TradeBroadcastSubscription(
+    platform=BotPlatformTypeEnum.TELEGRAM, platform_user_id="42"
+  )
+  session = FakeSession(results=[[existing]])
   _patch_session(monkeypatch, session)
-
-  ok = await SqlAlchemyTradeBroadcastRepository().unsubscribe(42, account_uuid)
-
-  assert ok is True
-  _, params = _compiled(session.statements[0])
-  assert params["trade_cards_enabled"] is False
-  assert params["account_id_1"] == account_uuid
+  assert await SqlAlchemyTradeBroadcastRepository().subscribe(42) is True
+  assert not any(isinstance(o, TradeBroadcastSubscription) for o in session.added)
 
 
-async def test_broadcast_toggle_without_a_link_reports_failure(monkeypatch):
-  """The link was deleted (unlink / rotation) after the active account was
-  resolved: no row matches, and the caller must not be told it worked."""
-  session = FakeSession(results=[[]])  # rowcount 0
+async def test_broadcast_is_subscribed(monkeypatch):
+  existing = TradeBroadcastSubscription(
+    platform=BotPlatformTypeEnum.TELEGRAM, platform_user_id="42"
+  )
+  session = FakeSession(results=[[existing], []])
   _patch_session(monkeypatch, session)
   repo = SqlAlchemyTradeBroadcastRepository()
-  assert await repo.subscribe(42, uuid.uuid4()) is False
-
-  session = FakeSession(results=[[]])
-  _patch_session(monkeypatch, session)
-  assert await repo.unsubscribe(42, uuid.uuid4()) is False
-
-
-async def test_broadcast_is_subscribed_reads_the_flag_of_that_account(monkeypatch):
-  account_uuid = uuid.uuid4()
-  # on, off, and no link at all (an empty result reads as not subscribed).
-  session = FakeSession(results=[[True], [False], []])
-  _patch_session(monkeypatch, session)
-  repo = SqlAlchemyTradeBroadcastRepository()
-
-  assert await repo.is_subscribed(42, account_uuid) is True
-  assert await repo.is_subscribed(42, account_uuid) is False
-  assert await repo.is_subscribed(43, account_uuid) is False
-  _, params = _compiled(session.statements[0])
-  assert params["account_id_1"] == account_uuid
+  assert await repo.is_subscribed(42) is True
+  assert await repo.is_subscribed(43) is False
 
 
 async def test_broadcast_targets_dedupes(monkeypatch):
@@ -1249,22 +1207,6 @@ async def test_broadcast_targets_dedupes(monkeypatch):
     "acc-1", MarketTypeEnum.FOREX, "MT5"
   )
   assert targets == ["111", "222"]
-
-
-async def test_broadcast_targets_only_ask_for_links_with_cards_enabled(monkeypatch):
-  """The recipient query must filter on the per-link flag, not on a per-user
-  table: a user linked to the account but opted in only for another one must
-  not be returned."""
-  session = FakeSession(results=[[]])
-  _patch_session(monkeypatch, session)
-
-  await SqlAlchemyTradeBroadcastRepository().list_broadcast_targets(
-    "acc-1", MarketTypeEnum.FOREX, "MT5"
-  )
-
-  sql, _ = _compiled(session.statements[0])
-  assert "account_bot_links.trade_cards_enabled IS true" in sql
-  assert "trade_broadcast_subscriptions" not in sql
 
 
 # ── AccountRepository.get_link_summaries ────────────────────────────

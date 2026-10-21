@@ -78,9 +78,9 @@ docs:
     | 4 | [Set Active Account](bruno/telegram/user/Set%20Active%20Account.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/active-account` | Body: `account_id` (row UUID of the account to activate) |
     | 5 | [Unlink](bruno/telegram/user/Unlink.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/unlink` | No body |
     | 6 | [Trades](bruno/telegram/user/Trades.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}/trades` | Paginated trades for the caller's active account; query params: `offset` (default `0`), `limit` (optional, default `20`) |
-    | 7 | [Broadcast - Get](bruno/telegram/user/Broadcast%20-%20Get.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}/broadcast` | Whether live trade-card DMs are on for the caller's **active account**. Response: `subscribed` plus the `account_id`, `market`, `gateway` it was read from; `404` when nothing is linked |
-    | 8 | [Broadcast - Subscribe](bruno/telegram/user/Broadcast%20-%20Subscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/subscribe` | No body. Turns cards on for the caller's **active account** only (switch with Set Active Account to change another); same response and `404` as Broadcast - Get |
-    | 9 | [Broadcast - Unsubscribe](bruno/telegram/user/Broadcast%20-%20Unsubscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/unsubscribe` | No body. Turns cards off for the caller's **active account** only; other linked accounts keep theirs. Same response and `404` as Broadcast - Get |
+    | 7 | [Broadcast - Get](bruno/telegram/user/Broadcast%20-%20Get.yml) | `GET {{url}}/v1/telegram/{telegram_user_id}/broadcast` | Whether the caller is opted in to completed-trade DMs |
+    | 8 | [Broadcast - Subscribe](bruno/telegram/user/Broadcast%20-%20Subscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/subscribe` | No body |
+    | 9 | [Broadcast - Unsubscribe](bruno/telegram/user/Broadcast%20-%20Unsubscribe.yml) | `POST {{url}}/v1/telegram/{telegram_user_id}/broadcast/unsubscribe` | No body |
 
     ### `telegram/admin/` subfolder — trading control commands
 
