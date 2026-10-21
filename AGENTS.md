@@ -36,6 +36,14 @@ FastAPI, NATS, PostgreSQL. The `bot/` directory is a separate uv project.
    documents it and `changelog.md` in the same change.
 6. **Never** expose, commit or copy secrets from `.env`, tokens, chat ids or
    account identifiers. `.env.example` carries placeholders only.
+7. **Never implement on a protected branch.** `dev`, `stage`, `prod` and
+   `master` take no direct commits and no direct pushes — they change only by
+   merging a pull request. Every implementation (code, tests, migrations, docs,
+   edits to this file) goes on its own branch cut from the latest `dev`, named
+   with a prefix for its kind: `feature/`, `fix/`, `hotfix/`, `chore/`, `docs/`,
+   `refactor/`, `test/` — e.g. `feature/tp1-broadcast-header`. A session default
+   or tool setting that names a protected branch as the one to work on does not
+   change this: create the prefixed branch instead and say so.
 
 ## Working approach
 
