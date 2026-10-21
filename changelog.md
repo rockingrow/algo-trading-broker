@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`/subscribe` and `/unsubscribe` act on the active account, not on every
+  account the user holds.** The live-trade-card opt-in was one row per Telegram
+  user, so a user linked to accounts A and B who subscribed got cards for both
+  and could not turn B off alone. It is now per account and follows `/switch`
+  like `/flat` and `/maxorders` do: `/switch` to B, `/unsubscribe`, and A keeps
+  its cards.
+
+  - The flag is `account_bot_links.trade_cards_enabled` (default `false`);
+    `trade_broadcast_subscriptions` and its model are gone. `list_broadcast_targets`
+    now filters on the flag instead of joining that table.
+  - It lives on the link, so `/unlink` and `/admin_rotate` discard it with the
+    link. Before, the per-user row survived an unlink and silently resumed cards
+    for the next account the user linked.
+  - `GET` / `POST /v1/telegram/{telegram_user_id}/broadcast[/subscribe|/unsubscribe]`
+    resolve the caller's active account and answer `404` when nothing is linked
+    (they used to work for an unlinked id). The response keeps `subscribed` and
+    adds `account_id`, `market` and `gateway`, so the bot can name the account it
+    really changed. Request shape and URLs are unchanged; the `bruno/` collection notes
+    describe the new behaviour.
+  - The bot's confirmation names the account and says the others are unchanged;
+    the `/help` text and the command-menu descriptions say "active account".
+
+  **Migration:** `486671e7d451` — apply it **before** restarting the broker.
+  The revision adds the column and drops `trade_broadcast_subscriptions`. A new
+  broker on the old schema fails every query that loads a whole link row —
+  linking from `/start` and `link-telegram` included — and finds no card
+  recipients; an old broker on the new schema finds none either, because it joins
+  the dropped table. Both fail soft (logged, no crash), so the symptom is quiet:
+  cards stop and linking is refused until the schema and the code match.
+
+  **Every existing subscription is cleared — nothing is backfilled.** All links
+  start with cards off, so after the deploy nobody gets a trade card until they
+  `/subscribe` again, once per account they want (`/switch` between them). Tell
+  users before rolling this out. The downgrade recreates the old table empty:
+  a per-account flag cannot be folded back into a per-user row without guessing
+  which account the user meant.
+
 - **The broadcast header has a third state: `[🎯TP1]`.** A cycle whose `TP1`
   filled read `[⏳RUNNING]`, the same as an entry that had given nothing back
   yet — the one thing the header is there to tell apart. `TP1` is now its own
