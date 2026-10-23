@@ -72,7 +72,10 @@ class InputsSchema(BaseModel):
   over_wt_value: Optional[int] = None
   safe_wt_value: Optional[int] = None
   use_session: Optional[bool] = None
-  skip_windows: Optional[str] = None
+  # Accepts either the single string TradingView alert templates interpolate
+  # ("08:00-09:00") or a ready-made list, and always normalises to a list so
+  # the audit payload has one shape downstream.
+  skip_windows: Optional[list[str]] = None
   bb_len: Optional[int] = None
   bb_mult: Optional[float] = None
   show_imb: Optional[bool] = None
@@ -90,6 +93,22 @@ class InputsSchema(BaseModel):
   ema_filter_tf: Optional[str] = None
   use_cooldown: Optional[bool] = None
   cooldown_bars: Optional[int] = None
+
+  @field_validator("skip_windows", mode="before")
+  @classmethod
+  def _coerce_skip_windows(cls, value):
+    """Wrap a single window string into the one-item list the field stores.
+
+    Pine alert templates write this input straight out, so the same strategy
+    reaches the broker as `"08:00-09:00"` one build and as a JSON array the
+    next. Both are valid; rejecting either loses an audit payload over a field
+    nothing routes on. A blank string is treated as "no windows" rather than a
+    one-item list holding an empty window.
+    """
+    if isinstance(value, str):
+      window = value.strip()
+      return [window] if window else []
+    return value
 
 
 class WebhookPayload(BaseModel):

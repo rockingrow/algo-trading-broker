@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`inputs.skip_windows` accepts a string or a list of strings.** The field
+  was typed `str`, so a strategy sending the input as a JSON array failed
+  `WebhookPayload` validation and the whole signal was rejected
+  (`Input should be a valid string [...] input_type=list`). It is now
+  `list[str]`, with a `before` validator wrapping a single string into a
+  one-item list; a blank string becomes `[]`, and an omitted field stays
+  `None`. Nothing routes on the field — it is audit payload — so both shapes
+  are kept rather than one of them costing a signal.
+
 - **`/subscribe` and `/unsubscribe` act on the active account, not on every
   account the user holds.** The live-trade-card opt-in was one row per Telegram
   user, so a user linked to accounts A and B who subscribed got cards for both
