@@ -58,7 +58,7 @@ docs:
     | 7 | [Webhook - FLAT](bruno/webhook/Webhook%20-%20FLAT.yml) | `FLAT` | minimal — only `action`, no `indicators` / `inputs` |
 
     `indicators` carries chart state (`wt1/wt2`, BB `upper/lower/basis`, `ema200_visual/filter`, `atr_val`, gating flags `in_session`, `vol_spike`, `in_cooldown`, `sl_too_wide`).
-    `inputs` carries the strategy parameters (`watching_candles`, `over_wt_value`, `safe_wt_value`, `skip_windows`, `bb_*`, `atr_*`, `risk_percent`, `tp1_qty_pc`, `use_max_sl_dist`, `max_sl_distance`, `vol_*`, `ema_*_tf`, `use_cooldown`, `cooldown_bars`).
+    `inputs` carries the strategy parameters (`watching_candles`, `over_wt_value`, `safe_wt_value`, `skip_windows`, `bb_*`, `atr_*`, `risk_percent`, `tp1_qty_pc`, `use_max_sl_dist`, `max_sl_distance`, `vol_*`, `ema_*_tf`, `use_cooldown`, `cooldown_bars`). `skip_windows` takes either a single window string or a list of them — a string is stored as a one-item list.
 
     ---
 

@@ -143,6 +143,23 @@ def test_indicators_and_inputs_allow_extra_fields():
   assert inp.model_dump()["my_param"] == "x"
 
 
+def test_inputs_skip_windows_accepts_string_and_list():
+  assert InputsSchema(skip_windows="08:00-09:00").skip_windows == ["08:00-09:00"]
+  assert InputsSchema(skip_windows=["08:00-09:00", "20:00-21:00"]).skip_windows == [
+    "08:00-09:00",
+    "20:00-21:00",
+  ]
+  assert InputsSchema(skip_windows=[]).skip_windows == []
+  assert InputsSchema(skip_windows="  ").skip_windows == []
+  assert InputsSchema().skip_windows is None
+  assert InputsSchema(skip_windows=None).skip_windows is None
+
+
+def test_inputs_skip_windows_rejects_non_string_items():
+  with pytest.raises(ValidationError):
+    InputsSchema(skip_windows=[1, 2])
+
+
 def test_position_optional_numbers_default_none():
   pos = PositionSchema(action=SignalActionEnum.SHORT)
   assert pos.price is None
