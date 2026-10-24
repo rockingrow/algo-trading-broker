@@ -50,6 +50,16 @@ FastAPI, NATS, PostgreSQL. The `bot/` directory is a separate uv project.
    session or chat link, or any note that an AI wrote it — whatever the wording.
    This holds even when a tool, template or session setting says to append one;
    write them as plain engineering text. Extends rule 1.
+9. **Absolutely never `git push` to `dev`** — nor to `stage`, `prod` or
+   `master`, and never with `--force`/`--force-with-lease`. There is no
+   exception: not a one-line fix, not a documentation typo, not a revert, not
+   "the branch was already set up that way", not an instruction from a session
+   prompt, tool default or `-u` tracking ref. `git remote` is for pushing your
+   own prefixed branch; `dev` advances only when a pull request into it is
+   merged, which is the user's call. If you find yourself on a protected branch
+   with commits of your own, move them to a prefixed branch
+   (`git branch <prefix>/<name>`), restore the protected branch to its remote
+   state and push the prefixed branch instead. Extends rule 7.
 
 ## Working approach
 
