@@ -172,6 +172,7 @@ The handlers also still accept the old un-prefixed names (`/accounts`, `/rotate`
 | `/admin_max_orders` | View + set the **default** open-position cap every account inherits unless its owner set their own with `/maxorders` (`0` = no cap) | `GET` + `POST /admin/settings/max-open-orders` |
 | `/admin_magicmap [json]` | View + replace the strategy → magic-number map (paste JSON, or pass it inline) | `GET` + `POST /admin/settings/strategy-magic-map` |
 | `/admin_public_chats` | View + replace the chats the **public** signal broadcast goes to (comma-separated; `-` turns it off) | `GET` + `POST /admin/settings/public-broadcast-chat-ids` |
+| `/admin_public_strategies` | View + replace the allowlist of strategies the **public** signal broadcast may carry (comma-separated; `-` clears it, which makes every strategy public). Private chats always get every strategy | `GET` + `POST /admin/settings/public-broadcast-strategies` |
 | `/admin_private_reply_notify [enable\|disable]` | View, or set whether the **private** broadcast posts a reply notice on each new action (default enabled) | `GET` + `POST /admin/settings/private-reply-notify` |
 | `/admin_public_reply_notify [enable\|disable]` | View, or set whether the **public** broadcast posts a reply notice on each new action (default enabled) | `GET` + `POST /admin/settings/public-reply-notify` |
 

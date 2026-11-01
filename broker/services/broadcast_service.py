@@ -46,6 +46,14 @@ the bot). ``PUBLIC`` gets the bare price/level/timeline body; ``PRIVATE``
 additionally carries the strategy name, signal id, the worker/status table and
 (when enabled) the raw indicator/input dump — each chat stores the exact text
 it holds, so the two can diverge further without a schema change.
+
+``PUBLIC`` is also filtered by strategy: the ``public_broadcast_strategies``
+setting is an allowlist of the strategies that may reach the public chats
+(empty = all of them, the behaviour from before the setting existed). A cycle
+whose strategy is not on it is recorded and broadcast to ``PRIVATE`` exactly as
+before and simply never acquires a public chat row, so turning a strategy
+public later starts its *next* cycle in the public channel rather than
+back-filling the one in flight.
 """
 
 from __future__ import annotations
@@ -59,6 +67,7 @@ from broker.constants import (
   NOTIFICATION_TIMEZONE_KEY,
   PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_BROADCAST_STRATEGIES_KEY,
   PUBLIC_REPLY_NOTIFY_KEY,
   SILENT_SIGNAL,
 )
@@ -89,6 +98,49 @@ from broker.services.notification_service import (
 from broker.settings import settings
 
 log = get_logger(__name__)
+
+
+def parse_public_strategies(raw: str | list[str] | None) -> list[str]:
+  """Ordered, de-duplicated strategy names from the public-broadcast allowlist.
+
+  The stored shape is the same comma-separated text every other list setting
+  uses. Names are kept exactly as they were typed — they are shown back to the
+  admin who typed them — while duplicates are collapsed case-insensitively, so
+  ``wt_bb_atr,WT_BB_ATR`` stores one entry. ``"-"`` is dropped the way it is
+  for chat ids, so the bot's "clear it" answer round-trips to an empty list.
+
+  Accepts the setting in either shape it turns up in, like :func:`_parse`: the
+  stored comma-separated string, or the pre-split list the admin API's request
+  body carries. A name containing a comma is not representable in the stored
+  shape at all, which is why the admin endpoint rejects one rather than letting
+  it arrive here and split into entries that match nothing.
+  """
+  if not raw:
+    return []
+  entries = raw.split(",") if isinstance(raw, str) else list(raw)
+  names: dict[str, str] = {}
+  for part in entries:
+    name = part.strip()
+    if not name or name == "-":
+      continue
+    names.setdefault(name.casefold(), name)
+  return list(names.values())
+
+
+def is_public_strategy(strategy: str | None, raw: str | None) -> bool:
+  """Whether a cycle's strategy may go out on the PUBLIC audience.
+
+  An empty allowlist means "no filtering configured", so everything is public
+  — the behaviour from before the setting existed. Once it names anything, it
+  is authoritative: a cycle with no strategy at all cannot match a name, so it
+  stays private rather than leaking on a technicality.
+  """
+  allowed = parse_public_strategies(raw)
+  if not allowed:
+    return True
+  if not strategy:
+    return False
+  return strategy.strip().casefold() in {name.casefold() for name in allowed}
 
 
 def _parse(raw: str | list[str] | None) -> list[tuple[str, ChatTarget]]:
@@ -416,6 +468,7 @@ class BroadcastDispatcher:
         NOTIFICATION_TIMEZONE_KEY,
         NOTIFICATION_INCLUDE_SIGNAL_RAW,
         PUBLIC_BROADCAST_CHAT_IDS_KEY,
+        PUBLIC_BROADCAST_STRATEGIES_KEY,
         PRIVATE_REPLY_NOTIFY_KEY,
         PUBLIC_REPLY_NOTIFY_KEY,
       ]
@@ -428,7 +481,11 @@ class BroadcastDispatcher:
       await self._repository.finish_logs(log_ids, delivered=True)
       return
 
-    targets = self._targets(settings_values.get(PUBLIC_BROADCAST_CHAT_IDS_KEY))
+    targets = self._targets(
+      settings_values.get(PUBLIC_BROADCAST_CHAT_IDS_KEY),
+      strategy=view.message.strategy,
+      public_strategies_raw=settings_values.get(PUBLIC_BROADCAST_STRATEGIES_KEY),
+    )
     if not targets:
       log.debug("No broadcast chats configured; nothing to deliver.")
       await self._repository.finish_logs(log_ids, delivered=True)
@@ -444,7 +501,11 @@ class BroadcastDispatcher:
     await self._repository.mark_broadcast(cycle_id)
 
   def _targets(
-    self, public_raw: str | None
+    self,
+    public_raw: str | None,
+    *,
+    strategy: str | None = None,
+    public_strategies_raw: str | None = None,
   ) -> list[tuple[BroadcastAudienceEnum, ChatTarget]]:
     """(audience, chat) pairs to broadcast into, private first.
 
@@ -454,6 +515,12 @@ class BroadcastDispatcher:
     topic-suffixed format ``parse_chat_targets`` understands — so a group with
     Topics enabled can address one specific topic (``-100…_924584``) in either
     audience.
+
+    The public side is additionally gated by the ``public_broadcast_strategies``
+    allowlist: when it names strategies and this cycle's is not one of them,
+    the public chats are dropped from the result and only the private audience
+    is delivered to. Private is never filtered — an operator channel is meant
+    to see every strategy.
 
     A chat listed under both audiences is kept once, under the audience that
     claimed it first: one chat holds a single message per cycle. ``chat_id``
@@ -468,7 +535,9 @@ class BroadcastDispatcher:
       else settings.telegram.PRIVATE_BROADCAST_CHAT_IDS
     )
     private = _parse(private_raw)
-    public = _parse(public_raw)
+    public = (
+      _parse(public_raw) if is_public_strategy(strategy, public_strategies_raw) else []
+    )
 
     targets: dict[str, tuple[BroadcastAudienceEnum, ChatTarget]] = {}
     for audience, chats in (

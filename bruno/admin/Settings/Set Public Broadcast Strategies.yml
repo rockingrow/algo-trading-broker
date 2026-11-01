@@ -1,0 +1,21 @@
+info:
+  name: Set Public Broadcast Strategies
+  type: http
+  seq: 14
+
+http:
+  method: POST
+  url: "{{url}}/admin/settings/public-broadcast-strategies"
+  body:
+    type: json
+    data: |-
+      {
+        "strategies": ["wt_bb_atr", "MT5_GOLD_M5_V1"]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

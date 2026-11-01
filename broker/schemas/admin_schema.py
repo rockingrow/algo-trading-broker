@@ -106,6 +106,23 @@ class PublicBroadcastChatIdsRequest(BaseModel):
   )
 
 
+class PublicBroadcastStrategiesRequest(BaseModel):
+  """Request body for POST /settings/public-broadcast-strategies.
+
+  The strategies allowed on the **public** signal broadcast. An empty list is
+  allowed and meaningful — it clears the allowlist, which makes every strategy
+  public again — so this has no ``min_length`` either.
+  """
+
+  strategies: list[str] = Field(
+    default_factory=list,
+    description=(
+      "Strategy names allowed on the public broadcast, e.g. "
+      "['wt_bb_atr', 'MT5_GOLD_M5_V1']. Empty allows every strategy."
+    ),
+  )
+
+
 class ReplyNotifyRequest(BaseModel):
   """Request body for POST /settings/private-reply-notify and
   /settings/public-reply-notify.

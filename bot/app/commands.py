@@ -81,6 +81,10 @@ ADMIN_EXTRA_COMMANDS = [
     command="admin_public_chats", description="[ADMIN] Public broadcast chats"
   ),
   BotCommand(
+    command="admin_public_strategies",
+    description="[ADMIN] Public broadcast strategies",
+  ),
+  BotCommand(
     command="admin_private_reply_notify",
     description="[ADMIN] Private broadcast reply notify",
   ),

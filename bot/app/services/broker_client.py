@@ -397,6 +397,7 @@ class BrokerClientAdmin(BrokerClient):
     CRYPTO_MAX_LEVERAGE = "settings/crypto-max-leverage"
     MAX_OPEN_ORDERS = "settings/max-open-orders"
     PUBLIC_BROADCAST_CHAT_IDS = "settings/public-broadcast-chat-ids"
+    PUBLIC_BROADCAST_STRATEGIES = "settings/public-broadcast-strategies"
     PRIVATE_REPLY_NOTIFY = "settings/private-reply-notify"
     PUBLIC_REPLY_NOTIFY = "settings/public-reply-notify"
 
@@ -611,6 +612,27 @@ class BrokerClientAdmin(BrokerClient):
         "POST",
         self._path(self.ENDPOINTS.PUBLIC_BROADCAST_CHAT_IDS),
         json={"chat_ids": chat_ids},
+      )
+    )
+
+  async def get_public_broadcast_strategies(self) -> Optional[dict[str, Any]]:
+    """Current ``public_broadcast_strategies`` value (comma-separated strategy
+    names, empty string when every strategy is allowed publicly)."""
+    return self._json_or_none(
+      await self._request("GET", self._path(self.ENDPOINTS.PUBLIC_BROADCAST_STRATEGIES))
+    )
+
+  async def set_public_broadcast_strategies(
+    self, strategies: list[str]
+  ) -> Optional[dict[str, Any]]:
+    """Replace the public-broadcast strategy allowlist; an empty list clears it,
+    which allows every strategy again. The broker normalises (trim/dedup) so
+    there is one validation path."""
+    return self._json_or_none(
+      await self._request(
+        "POST",
+        self._path(self.ENDPOINTS.PUBLIC_BROADCAST_STRATEGIES),
+        json={"strategies": strategies},
       )
     )
 

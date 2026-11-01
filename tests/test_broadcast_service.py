@@ -27,6 +27,7 @@ from broker.constants import (
   NOTIFICATION_TIMEZONE_KEY,
   PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_BROADCAST_STRATEGIES_KEY,
   PUBLIC_REPLY_NOTIFY_KEY,
   SILENT_SIGNAL,
 )
@@ -627,6 +628,115 @@ async def test_delivery_stores_message_id_body_and_sequence():
 async def test_public_chats_are_tagged_as_public():
   repo, _, cycle = await _run(_payload(), private=(), public="-300")
   assert repo.chats[cycle.id]["-300"].audience == BroadcastAudienceEnum.PUBLIC
+
+
+# ── Dispatcher: public strategy allowlist ───────────────────────────
+# The allowlist narrows the PUBLIC audience only. An empty value is "no filter
+# configured", so it must keep the pre-feature behaviour: everything public.
+
+
+async def test_an_allowed_strategy_still_reaches_the_public_chats():
+  repo, channel, cycle = await _run(
+    _payload(strategy="wt_bb_atr"),
+    private=("-100",),
+    public="-300",
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: "gold_m5,wt_bb_atr"},
+  )
+
+  assert [chat_id for chat_id, _ in channel.sent] == ["-100", "-300"]
+  assert repo.chats[cycle.id]["-300"].audience == BroadcastAudienceEnum.PUBLIC
+
+
+async def test_a_strategy_off_the_allowlist_stays_private():
+  repo, channel, cycle = await _run(
+    _payload(strategy="wt_bb_atr"),
+    private=("-100",),
+    public="-300",
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: "gold_m5"},
+  )
+
+  assert [chat_id for chat_id, _ in channel.sent] == ["-100"]
+  # No public chat row at all, so turning the strategy public later starts
+  # with its next cycle instead of back-filling this one.
+  assert "-300" not in repo.chats[cycle.id]
+
+
+async def test_the_allowlist_matches_case_insensitively():
+  _, channel, _ = await _run(
+    _payload(strategy="WT_BB_ATR"),
+    private=(),
+    public="-300",
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: " wt_bb_atr "},
+  )
+
+  assert [chat_id for chat_id, _ in channel.sent] == ["-300"]
+
+
+async def test_an_empty_allowlist_allows_every_strategy():
+  _, channel, _ = await _run(
+    _payload(strategy="anything"),
+    private=(),
+    public="-300",
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: ""},
+  )
+
+  assert [chat_id for chat_id, _ in channel.sent] == ["-300"]
+
+
+async def test_a_filtered_out_public_only_cycle_is_still_marked_delivered():
+  """Nothing is owed to anyone, so the write-log entry must not retry forever."""
+  repo, channel, _ = await _run(
+    _payload(strategy="wt_bb_atr"),
+    private=(),
+    public="-300",
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: "gold_m5"},
+  )
+
+  assert channel.sent == []
+  assert all(e.status == BroadcastLogStatusEnum.DELIVERED for e in repo.logs)
+
+
+async def test_a_strategy_turned_public_mid_cycle_joins_on_the_next_event():
+  """The filter is applied per delivery: the public chat gets the full history
+  rendered from the cycle's events, not just the event that let it in."""
+  writer, repo = _writer()
+  await writer.broadcast(_payload(strategy="wt_bb_atr"))
+  cycle = _only_cycle(repo)
+
+  blocked, channel = _dispatcher(
+    repo,
+    private=("-100",),
+    public="-300",
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: "gold_m5"},
+  )
+  await blocked.dispatch(cycle.id)
+  assert [chat_id for chat_id, _ in channel.sent] == ["-100"]
+
+  await writer.broadcast(_payload(strategy="wt_bb_atr", action=SignalActionEnum.TP1))
+  allowed, channel = _dispatcher(
+    repo,
+    private=("-100",),
+    public="-300",
+    telegram=channel,
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: "gold_m5,wt_bb_atr"},
+  )
+  await allowed.dispatch(cycle.id)
+
+  # The private chat is edited; the public one is a first send.
+  assert [chat_id for chat_id, _ in channel.sent] == ["-100", "-300"]
+  assert [chat_id for chat_id, _, _ in channel.edited] == ["-100"]
+
+
+async def test_a_cycle_with_no_strategy_is_not_published_under_an_allowlist():
+  repo, channel, cycle = await _run(
+    _payload(strategy=""),
+    private=("-100",),
+    public="-300",
+    settings_values={PUBLIC_BROADCAST_STRATEGIES_KEY: "gold_m5"},
+  )
+
+  assert [chat_id for chat_id, _ in channel.sent] == ["-100"]
+  assert "-300" not in repo.chats[cycle.id]
 
 
 async def test_a_chat_listed_in_both_audiences_is_broadcast_once():

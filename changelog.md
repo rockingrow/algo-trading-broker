@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The public broadcast can be limited to chosen strategies.** The public
+  audience is often a shop window rather than a mirror of the private channel,
+  and until now every strategy that reached one reached the other. The new
+  `public_broadcast_strategies` broker setting is a comma-separated allowlist
+  of the strategies the **public** chats may carry.
+
+  - **Empty (the default) means every strategy is public**, so an operator who
+    never touches the setting sees no change. An empty list is therefore not
+    how the public broadcast is turned off — clearing
+    `public_broadcast_chat_ids` still is.
+  - The **private** audience is never filtered: a blocked cycle is recorded,
+    rendered and delivered to every private chat exactly as before, it simply
+    never acquires a `broadcast_message_chats` row for a public chat.
+  - Matching is case-insensitive on the trimmed name (`wt_bb_atr` matches
+    `WT_BB_ATR`) because a strategy name is producer-supplied text; names are
+    stored as typed, duplicates collapsed. A cycle with no strategy at all
+    stays private under a non-empty allowlist.
+  - The filter is applied per delivery, so adding a strategy mid-trade starts
+    its public copy at the cycle's next event — rendered from the stored
+    events, so it arrives with the full history. Removing one leaves the
+    already-published message in place and stops editing it.
+  - `GET` / `POST /admin/settings/public-broadcast-strategies`
+    (`{"strategies": [...]}`); a name containing a comma is rejected with
+    `422`, because the stored shape is comma-separated and such a name would
+    read back as two entries that match nothing. Plus `Get`/`Set Public Broadcast Strategies` in
+    `bruno/admin/Settings`. No migration — it is a `broker_settings` row.
+  - Telegram bot: `/admin_public_strategies` (alias `/public_strategies`)
+    shows the current allowlist, lists the strategy names the broker has
+    recorded so far as a typing hint, and takes a new comma-separated list;
+    `-` clears it, `/cancel` aborts.
+
 - **`/subscribeall` and `/unsubscribeall` switch live trade cards on or off for
   every linked account at once.** With the opt-in per account, a user holding
   several accounts needed a `/switch` plus `/subscribe` round for each one; the

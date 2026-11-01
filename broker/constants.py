@@ -13,6 +13,23 @@ CRYPTO_MAX_LEVERAGE_KEY = "crypto_max_leverage"
 # Empty = the public broadcast is off.
 PUBLIC_BROADCAST_CHAT_IDS_KEY = "public_broadcast_chat_ids"
 
+# broker_settings key holding the strategies allowed on the PUBLIC broadcast as
+# a comma-separated list (e.g. ``wt_bb_atr,MT5_GOLD_M5_V1``). It is an
+# allowlist over the public audience only: a cycle whose ``strategy`` is absent
+# from it is still recorded, still rendered and still delivered to every
+# PRIVATE chat — the public chats simply never become targets for it.
+#
+# **Unset or empty means every strategy is public**, which is what the setting
+# did before it existed: an operator who has not opted into filtering keeps the
+# behaviour they had. Narrowing the public audience is therefore always an
+# explicit act. Matching is case-insensitive on the trimmed name, because a
+# strategy name is producer-supplied text (``wt_bb_atr``, ``MT5_GOLD_M5_V1``)
+# and not an enum this repository controls.
+#
+# Editable from the admin API (POST /admin/settings/public-broadcast-strategies)
+# and the bot's /admin_public_strategies.
+PUBLIC_BROADCAST_STRATEGIES_KEY = "public_broadcast_strategies"
+
 # broker_settings keys toggling whether the dispatcher posts a reply notice
 # under a cycle's message when a new event (TP1, SL, FLAT, ...) arrives — see
 # BroadcastDispatcher._notify_updates in broker/services/broadcast_service.py.

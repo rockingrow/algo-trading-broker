@@ -22,8 +22,8 @@ def _names(commands):
 
 def test_command_list_sizes():
   assert len(USER_COMMANDS) == 16
-  # 15 admin commands + 1 divider/header row.
-  assert len(ADMIN_EXTRA_COMMANDS) == 16
+  # 16 admin commands + 1 divider/header row.
+  assert len(ADMIN_EXTRA_COMMANDS) == 17
   # Admin sees user commands plus the extras.
   assert len(ADMIN_COMMANDS) == len(USER_COMMANDS) + len(ADMIN_EXTRA_COMMANDS)
   user_names = set(_names(USER_COMMANDS))

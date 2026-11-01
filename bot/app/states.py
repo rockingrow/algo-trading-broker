@@ -67,3 +67,11 @@ class AdminPublicBroadcastChats(StatesGroup):
   type a new comma-separated list (or ``-`` to turn the public flow off)."""
 
   waiting_for_chat_ids = State()
+
+
+class AdminPublicBroadcastStrategies(StatesGroup):
+  """Admin flow: after seeing which strategies the public signal broadcast is
+  allowed to carry, type a new comma-separated list (or ``-`` to clear the
+  allowlist, which allows every strategy again)."""
+
+  waiting_for_strategies = State()

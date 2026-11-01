@@ -23,6 +23,7 @@ from broker.constants import (
   NOTIFICATION_TIMEZONE_KEY,
   PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_BROADCAST_STRATEGIES_KEY,
   PUBLIC_REPLY_NOTIFY_KEY,
   SIGNAL_BLOCKED,
   STRATEGY_MAGIC_MAP_KEY,
@@ -540,6 +541,74 @@ def test_set_public_broadcast_chat_ids_persist_failure_is_500(ctx):
     "/admin/settings/public-broadcast-chat-ids",
     headers={"X-API-KEY": API_KEY},
     json={"chat_ids": ["-100"]},
+  )
+  assert resp.status_code == 500
+
+
+# ── Admin settings — public broadcast strategies ────────────────────
+
+
+def test_get_public_broadcast_strategies_defaults_to_empty(ctx):
+  resp = ctx["client"].get(
+    "/admin/settings/public-broadcast-strategies", headers={"X-API-KEY": API_KEY}
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {
+    "setting": PUBLIC_BROADCAST_STRATEGIES_KEY,
+    "value": "",
+  }
+
+
+def test_set_public_broadcast_strategies(ctx):
+  resp = ctx["client"].post(
+    "/admin/settings/public-broadcast-strategies",
+    headers={"X-API-KEY": API_KEY},
+    json={"strategies": [" wt_bb_atr ", "gold_m5", "WT_BB_ATR", ""]},
+  )
+  assert resp.status_code == 200
+  # Normalised: trimmed, de-duplicated case-insensitively, order preserved,
+  # and the name is stored exactly as the admin typed it.
+  assert resp.json()["value"] == "wt_bb_atr,gold_m5"
+  assert ctx["setting_repo"].values[PUBLIC_BROADCAST_STRATEGIES_KEY] == (
+    "wt_bb_atr,gold_m5"
+  )
+  assert len(ctx["notifier"].messages) == 1
+
+
+def test_set_public_broadcast_strategies_rejects_a_name_containing_a_comma(ctx):
+  """The stored shape is comma-separated, so such a name would read back as two
+  entries matching nothing. A 422 beats a 200 that silently never publishes."""
+  ctx["setting_repo"].values[PUBLIC_BROADCAST_STRATEGIES_KEY] = "wt_bb_atr"
+  resp = ctx["client"].post(
+    "/admin/settings/public-broadcast-strategies",
+    headers={"X-API-KEY": API_KEY},
+    json={"strategies": ["gold,m5"]},
+  )
+  assert resp.status_code == 422
+  # The previous allowlist is untouched.
+  assert ctx["setting_repo"].values[PUBLIC_BROADCAST_STRATEGIES_KEY] == "wt_bb_atr"
+
+
+def test_set_public_broadcast_strategies_accepts_an_empty_list(ctx):
+  """An empty list clears the allowlist — every strategy becomes public
+  again — so it must not be rejected."""
+  ctx["setting_repo"].values[PUBLIC_BROADCAST_STRATEGIES_KEY] = "wt_bb_atr"
+  resp = ctx["client"].post(
+    "/admin/settings/public-broadcast-strategies",
+    headers={"X-API-KEY": API_KEY},
+    json={"strategies": []},
+  )
+  assert resp.status_code == 200
+  assert resp.json()["value"] == ""
+  assert ctx["setting_repo"].values[PUBLIC_BROADCAST_STRATEGIES_KEY] == ""
+
+
+def test_set_public_broadcast_strategies_persist_failure_is_500(ctx):
+  ctx["setting_repo"].fail_set = True
+  resp = ctx["client"].post(
+    "/admin/settings/public-broadcast-strategies",
+    headers={"X-API-KEY": API_KEY},
+    json={"strategies": ["wt_bb_atr"]},
   )
   assert resp.status_code == 500
 

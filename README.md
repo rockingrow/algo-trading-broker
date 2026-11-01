@@ -795,6 +795,53 @@ Notes:
   way still counts as delivered (`notified_event_count` advances), so
   re-enabling later does not replay the trade's backlog into the chat.
 
+### Public broadcast: which strategies go out
+
+The public audience is often a shop window, not a mirror of the private
+channel: a strategy still being proven, or one sold separately, has no business
+in it. The `public_broadcast_strategies` broker setting is the allowlist that
+decides — a comma-separated list of strategy names:
+
+```
+public_broadcast_strategies = "wt_bb_atr,MT5_GOLD_M5_V1"
+```
+
+Semantics, which are deliberately asymmetric:
+
+- **Empty (the default) means every strategy is public.** This is the
+  behaviour from before the setting existed, so an operator who never touches
+  it sees no change. Narrowing the public audience is always an explicit act.
+- An empty list is therefore *not* how the public broadcast is turned off —
+  clearing `public_broadcast_chat_ids` is (see above).
+- The **private** audience is never filtered. An operator channel is meant to
+  see every strategy, so the allowlist only ever removes public chats from a
+  cycle's delivery targets.
+- Matching is case-insensitive on the trimmed name (`wt_bb_atr` matches
+  `WT_BB_ATR`), because a strategy name is producer-supplied text and not an
+  enum the broker controls. Names are stored exactly as typed, duplicates
+  collapsed.
+- A cycle with no strategy at all cannot match a name, so under a non-empty
+  allowlist it stays private rather than going out on a technicality.
+- A strategy name containing a comma is rejected with `422`: the setting is
+  stored comma-separated, so such a name would read back as two entries that
+  match nothing — a `200` that silently never publishes is worse than an error.
+
+The filter is applied **per delivery**, not once per cycle:
+
+- A blocked cycle is still recorded, still rendered and still delivered to the
+  private chats in full — it simply never acquires a `broadcast_message_chats`
+  row for a public chat.
+- Adding a strategy to the allowlist mid-trade therefore starts its public
+  copy at the *next* event of a live cycle, and that copy is rendered from the
+  cycle's stored events, so it arrives with the full history rather than only
+  the event that let it in.
+- Removing one mid-trade leaves the public message that already exists in
+  place and stops editing it. The broker does not delete published messages.
+
+Editable via `GET`/`POST /admin/settings/public-broadcast-strategies` or the
+bot's `/admin_public_strategies` command, which also lists the strategy names
+the broker has recorded so far as a typing hint.
+
 ### The three header states
 
 The `[STATUS]` bracket at the top of a cycle's message — and of the owner's
@@ -1815,6 +1862,7 @@ position on the same symbol.
 | `notification_timezone` | `"7"` | `POST` / `GET /admin/settings/notification-timezone` | UTC offset (hours) applied to every time the broker or bot displays — the `Time:` line of Telegram notifications and the bot's `/trades` table |
 | `public_broadcast_chat_ids` | `""` | `POST` / `GET /admin/settings/public-broadcast-chat-ids` | Comma-separated chat ids (with the same topic suffix syntax as `TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS`) that receive the **public** signal-cycle broadcast — the bare price/level/timeline copy, without strategy internals or the worker execution table. Editable at runtime from the admin API and the bot's `/admin_public_chats` command; empty turns the public broadcast off. |
 | `private_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/private-reply-notify` | Whether the **private** broadcast posts a reply notice under the cycle's message on each new action (see "Broadcast update notices" above). `"0"` silences the reply only — the message itself keeps being edited in place. Bot: `/admin_private_reply_notify [enable\|disable]`. |
+| `public_broadcast_strategies` | `""` (every strategy) | `POST` / `GET /admin/settings/public-broadcast-strategies` | Comma-separated allowlist of the strategies the **public** broadcast may carry; the private audience is never filtered. Empty means every strategy is public, so this is not the way to turn the public broadcast off. Case-insensitive match. Bot: `/admin_public_strategies`. See "Public broadcast: which strategies go out". |
 | `public_broadcast_reply_notify` | `"1"` (unset = enabled) | `POST` / `GET /admin/settings/public-reply-notify` | Same as above, for the **public** broadcast. Bot: `/admin_public_reply_notify [enable\|disable]`. |
 | `max_retry_timeout` | `"60"` | — (edit directly) | Seconds of history included in the `retry_signals` replay sent to a freshly-connected worker |
 | `max_open_orders` | `"5"` (unset = `5`) | `POST` / `GET /admin/settings/max-open-orders` | Broker-wide cap on concurrently open positions, inherited by every account whose `accounts.settings` carries no `max_open_orders` of its own. `"0"` disables the cap. Resolved per account and sent in the `settings` block of each `WORKER_CONNECTED_ACK`, and pushed live as `SYSTEM.WORKER_SETTINGS_UPDATE`. Bot: `/admin_max_orders`. |

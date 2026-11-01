@@ -57,6 +57,7 @@ from app.states import (
   AdminMaxOpenOrders,
   AdminLinkAccount,
   AdminPublicBroadcastChats,
+  AdminPublicBroadcastStrategies,
   CreateAccount,
   SetStrategyMagicMap,
 )
@@ -1151,6 +1152,103 @@ async def receive_admin_public_chats(
 async def prompt_admin_public_chats_text(message: Message) -> None:
   await message.answer(
     f"{emojis.WARNING} Please send the chat ids as text, comma-separated."
+  )
+
+
+# ── /admin_public_strategies ────────────────────────────────────────
+# How many recorded strategy names the prompt lists as a typing hint. Telegram
+# caps a message at 4096 characters and the broker's list grows forever, so the
+# hint is truncated rather than allowed to cost the whole prompt.
+KNOWN_STRATEGY_HINT_LIMIT = 40
+
+
+# Show which strategies the PUBLIC broadcast is allowed to carry and prompt for
+# a new comma-separated list. This narrows the public audience only — the
+# private chats keep receiving every strategy — and an empty allowlist means
+# every strategy is public, so "-" here *widens* the audience rather than
+# turning anything off (/admin_public_chats is what turns it off).
+
+
+@router.message(Command("admin_public_strategies", "public_strategies"))
+async def cmd_admin_public_strategies(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  await state.clear()
+  current = await broker_admin.get_public_broadcast_strategies()
+  if current is None:
+    await message.answer(f"{emojis.WARNING} Failed to fetch current strategies.")
+    return
+  await state.set_state(AdminPublicBroadcastStrategies.waiting_for_strategies)
+  value = str(current.get("value") or "")
+  shown = html.escape(value) if value else "<i>(empty — every strategy is public)</i>"
+  # The known-strategy list is a convenience, not a constraint: the broker
+  # derives it from recorded trades, so a brand-new strategy is absent from it
+  # and must still be typeable. Capped because the hint grows with every
+  # strategy ever traded, and a prompt over Telegram's 4096-char limit would
+  # fail to send *after* the FSM state was set — the admin's next message would
+  # then silently land on the allowlist.
+  known = await broker_admin.admin_list_strategies()
+  hint = ""
+  if known:
+    shown_known = known[:KNOWN_STRATEGY_HINT_LIMIT]
+    more = len(known) - len(shown_known)
+    hint = "Known strategies: <code>" + html.escape(", ".join(shown_known)) + "</code>"
+    if more:
+      hint += f" <i>(+{more} more)</i>"
+    hint += "\n\n"
+  await message.answer(
+    f"{emojis.GEAR} <b>Public broadcast strategies</b>\n\n"
+    f"Current: <code>{shown}</code>\n\n"
+    f"{hint}"
+    "Send the new list, comma-separated (e.g. "
+    "<code>wt_bb_atr, MT5_GOLD_M5_V1</code>).\n"
+    "Send <code>-</code> to clear it (every strategy public again), "
+    "or /cancel to abort.\n\n"
+    "<i>Private chats always receive every strategy.</i>"
+  )
+
+
+@router.message(
+  AdminPublicBroadcastStrategies.waiting_for_strategies, Command("cancel")
+)
+async def cancel_admin_public_strategies(message: Message, state: FSMContext) -> None:
+  await state.clear()
+  await message.answer("Cancelled.")
+
+
+@router.message(
+  AdminPublicBroadcastStrategies.waiting_for_strategies,
+  F.text & ~F.text.startswith("/"),
+)
+async def receive_admin_public_strategies(
+  message: Message, state: FSMContext, broker_admin: BrokerClientAdmin
+) -> None:
+  raw = (message.text or "").strip()
+  # "-" is the explicit "no allowlist" answer; the broker drops it as a
+  # placeholder either way, so an empty list is what gets sent.
+  strategies = [] if raw == "-" else [s.strip() for s in raw.split(",") if s.strip()]
+
+  result = await broker_admin.set_public_broadcast_strategies(strategies)
+  await state.clear()
+  if result is None:
+    await message.answer(
+      f"{emojis.CROSS} Failed to update public strategies. "
+      "Run /admin_public_strategies to retry."
+    )
+    return
+  value = str(result.get("value") or "")
+  shown = html.escape(value) if value else "<i>(empty — every strategy is public)</i>"
+  await message.answer(
+    f"{emojis.CHECK} <b>Public broadcast strategies updated</b>\n"
+    f"New value: <code>{shown}</code>\n\n"
+    "<i>Applies from each strategy's next broadcast update.</i>"
+  )
+
+
+@router.message(AdminPublicBroadcastStrategies.waiting_for_strategies, ~F.text)
+async def prompt_admin_public_strategies_text(message: Message) -> None:
+  await message.answer(
+    f"{emojis.WARNING} Please send the strategy names as text, comma-separated."
   )
 
 

@@ -490,6 +490,7 @@ class AdminMessages:
     "/admin_crypto_leverage — Set crypto max leverage\n"
     "/admin_max_orders — Set the default max open positions\n"
     "/admin_public_chats — Public broadcast chats\n"
+    "/admin_public_strategies — Strategies allowed on the public broadcast\n"
     "/admin_private_reply_notify — Toggle private broadcast reply notify\n"
     "/admin_public_reply_notify — Toggle public broadcast reply notify\n"
     "/admin_linkaccount — Link a Telegram user to an account\n"

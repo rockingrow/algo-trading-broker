@@ -1,3 +1,4 @@
+import html
 import json
 import uuid as uuid_lib
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from broker.constants import (
   NOTIFICATION_TIMEZONE_KEY,
   PRIVATE_REPLY_NOTIFY_KEY,
   PUBLIC_BROADCAST_CHAT_IDS_KEY,
+  PUBLIC_BROADCAST_STRATEGIES_KEY,
   PUBLIC_REPLY_NOTIFY_KEY,
   SIGNAL_BLOCKED,
   SILENT_SIGNAL,
@@ -52,6 +54,7 @@ from broker.schemas.admin_schema import (
   MaxOpenOrdersRequest,
   NotificationTimezoneRequest,
   PublicBroadcastChatIdsRequest,
+  PublicBroadcastStrategiesRequest,
   ReplyNotifyRequest,
   RotateTokenResponse,
   SettingToggleResponse,
@@ -69,6 +72,7 @@ from broker.services.account_settings_service import (
   push_worker_settings_update,
   resolve_account_settings,
 )
+from broker.services.broadcast_service import parse_public_strategies
 from broker.logger import get_logger
 from broker.openapi import AUTH_RESPONSES
 from broker.security.ensure_api_key import ensure_api_key
@@ -500,6 +504,77 @@ def get_admin_router() -> APIRouter:
     )
 
     return SettingValueResponse(setting=PUBLIC_BROADCAST_CHAT_IDS_KEY, value=value)
+
+  @router.get(
+    "/settings/public-broadcast-strategies",
+    tags=["settings"],
+    summary="Get the strategies allowed on the public broadcast",
+    response_model=SettingValueResponse,
+    responses=AUTH_RESPONSES,
+  )
+  async def get_public_broadcast_strategies(
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+  ) -> SettingValueResponse:
+    """Current PUBLIC_BROADCAST_STRATEGIES_KEY value (comma-separated, empty
+    when every strategy is allowed on the public broadcast)."""
+    value = await setting_repo.get(PUBLIC_BROADCAST_STRATEGIES_KEY) or ""
+    return SettingValueResponse(setting=PUBLIC_BROADCAST_STRATEGIES_KEY, value=value)
+
+  @router.post(
+    "/settings/public-broadcast-strategies",
+    tags=["settings"],
+    summary="Set the strategies allowed on the public broadcast",
+    responses={
+      **AUTH_RESPONSES,
+      500: {"description": "Failed to persist the setting."},
+    },
+  )
+  async def set_public_broadcast_strategies(
+    body: PublicBroadcastStrategiesRequest,
+    setting_repo: SettingRepository = Depends(get_setting_repository),
+    notifier: Notifier = Depends(get_admin_notifier),
+  ) -> SettingValueResponse:
+    """Replace the allowlist of strategies the public broadcast may carry.
+
+    This narrows the public audience only — every private chat keeps receiving
+    every strategy. An empty list is accepted on purpose: it clears the
+    allowlist, which makes every strategy public again (the behaviour from
+    before the setting existed), and is therefore *not* the way to turn the
+    public broadcast off — ``/settings/public-broadcast-chat-ids`` is.
+
+    A cycle already live in a public chat keeps its message; the filter is
+    applied per delivery, so removing a strategy stops further edits of its
+    public copy and adding one starts with that strategy's next cycle.
+    """
+    # The setting is stored comma-separated, so a comma inside a name cannot
+    # survive the round-trip: it would be read back as two entries that match
+    # no strategy at all. Rejecting is the honest answer — storing it would
+    # report 200 and then silently never publish that strategy.
+    if any("," in strategy for strategy in body.strategies):
+      raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail="A strategy name may not contain a comma",
+      )
+    value = ",".join(parse_public_strategies(body.strategies))
+
+    ok = await setting_repo.set(PUBLIC_BROADCAST_STRATEGIES_KEY, value)
+    if not ok:
+      raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Failed to update broker setting",
+      )
+
+    log.info("%s updated -> %s", PUBLIC_BROADCAST_STRATEGIES_KEY, value)
+    await notifier.send_message(
+      f"{em.GEAR} <b>Broker setting changed</b>\n"
+      f"Setting: <code>{PUBLIC_BROADCAST_STRATEGIES_KEY}</code>\n"
+      # Escaped: a strategy name is producer-supplied text, and a stray "<" or
+      # "&" would make Telegram reject the whole notice in HTML parse mode, so
+      # the admin channel would never learn the allowlist changed.
+      f"Strategies: <b>{html.escape(value) or '(empty — every strategy is public)'}</b>\n"
+    )
+
+    return SettingValueResponse(setting=PUBLIC_BROADCAST_STRATEGIES_KEY, value=value)
 
   @router.get(
     "/settings/private-reply-notify",
