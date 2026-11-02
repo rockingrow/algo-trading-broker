@@ -113,6 +113,7 @@ package; never scan from the repository root.
 | Worker → broker trade events, accounts, enums | `broker/schemas/{trade_event_schema,account_schema,core}.py` |
 | Payload → `TradingSignal` normalisation | `broker/helpers/signal_helper.py` |
 | JetStream pipeline, block gate, publish, retries | `broker/services/{signal_processing_service,signal_retry_job}.py` |
+| The drill subject `SIGNALS_DEMO.<strategy>`: Telegram only, never fanned out to a worker | `broker/services/demo_signal_service.py`, `tests/test_demo_signal_service.py` |
 | NATS connection, subjects, consumers | `broker/nats.py`, `broker/services/nats_service.py` |
 | Telegram broadcast cycles and their write log | `broker/services/broadcast_service.py`, `broker/domain/broadcast_status.py` |
 | Message rendering (broadcasts, trade cards) | `broker/helpers/{message_formatter,trade_card,emoji_constants}.py`, `broker/services/trade_card_service.py` |
@@ -155,6 +156,11 @@ Do not scan `.venv/`, `uv.lock`, `__pycache__/`, `.pytest_cache/` or `logs/`.
 - **A broadcast body is rebuilt from its stored events**, never from the
   `signals` table — anything the message must render has to be captured in the
   event when it is written.
+- **A drill commands nothing, structurally.** `SIGNALS_DEMO.<strategy>` is a
+  separate first token from `SIGNALS` because the stream captures `SIGNALS.>`;
+  `DemoSignalConsumer` accepts neither a publisher nor a signal repository, so
+  a demo can reach a worker neither directly nor through the handshake's
+  `retry_signals` replay. Keep all three true, or the drill becomes a trade.
 - **Schema changes go through the single Alembic chain** under
   `alembic/versions/` (`make db-revision m="..."`). No ad-hoc DDL, and a model
   change without a migration is an unfinished change.

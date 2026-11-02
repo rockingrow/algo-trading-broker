@@ -53,6 +53,11 @@ GEAR: str = emoji.emojize(":gear:")  # ⚙️
 ADMIN_FLAT: str = emoji.emojize(":shield:")  # 🛡️
 BLOCKED: str = emoji.emojize(":prohibited:")  # 🚫
 
+# ── Demo / drill ──────────────────────────────────────────────────────────────
+# The end-to-end drill QTE fires at SIGNALS_DEMO.<strategy>: a real payload
+# rendered as a real card, which never reaches a worker.
+DEMO_SIGNAL: str = emoji.emojize(":test_tube:")  # 🧪
+
 # ── Broadcast cycle status ────────────────────────────────────────────────────
 # One Telegram message per signal cycle: the header carries a status icon that
 # changes in place as the cycle progresses.

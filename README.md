@@ -358,6 +358,7 @@ The broker uses **token-based authentication** with the NATS server. Workers mus
 | Publish (broker → one worker) | `ADMIN.<market>.<gateway>.<account_id>` | Account-scoped administrative message on a private per-account subject; only that account's worker is subscribed, so no other worker learns the `account_id` |
 | Publish (broker → workers) | `SYSTEM` | The `WORKER_CONNECTED_ACK` answering a worker's announcement (magic map, signal replay, crypto leverage), plus the `CRYPTO_LEVERAGE_INIT` pushed to already-connected workers on an admin change |
 | Publish (broker → broker) | `SIGNALS.<strategy>` (JetStream stream `SIGNALS`) | Durable webhook envelope buffer — the webhook endpoint enqueues here, the broker's own `SignalWorker` consumes and fans out to `{strategy}` |
+| Subscribe (producer → broker) | `SIGNALS_DEMO.<strategy>` (core NATS, no stream) | The end-to-end drill: the same webhook envelope, rendered to Telegram by `DemoSignalConsumer` and **never fanned out to a worker**. A separate first token, because the `SIGNALS` stream captures `SIGNALS.>` — see [`examples/nats/subjects.md`](examples/nats/subjects.md) |
 | Subscribe (workers → broker) | `TRADE` | Position events reported by workers after execution |
 | Subscribe (workers → broker) | `SYSTEM` | `WORKER_CONNECTED` announcements published by a worker right after it connects (payload carries `account_id` in `<market>-<gateway>-<account_id>` format, plus `market`, `gateway`, and `strategies`) |
 
