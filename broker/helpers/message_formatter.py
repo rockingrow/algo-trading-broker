@@ -382,3 +382,21 @@ def format_blocked_message(payload: WebhookPayload) -> str:
     f"Reason: Signal processing is temporarily disabled "
     f"(<code>{SIGNAL_BLOCKED}</code> != 1)"
   )
+
+
+def format_demo_signal_message(payload: WebhookPayload) -> str:
+  """Operator-channel line for a drill that arrived on the demo subject.
+
+  Goes to the broker-log chats, not to the signal subscribers: the broadcast
+  card a drill produces is rendered by the ordinary renderer and is meant to
+  look like a real signal, so this is the one place that says it was not one.
+  """
+  position = payload.position
+  return (
+    f"{em.DEMO_SIGNAL} <b>Demo signal received</b>\n"
+    f"Strategy: <code>{payload.strategy}</code>\n"
+    f"Symbol: <b>{payload.symbol}</b> ({format_timeframe(payload.timeframe)})\n"
+    f"Action: <b>{_enum_value(position.action)}</b>\n"
+    f"Cycle: <code>{payload.signal_uxid}</code>\n"
+    f"Not forwarded to any worker — the broadcast card beside it is a drill."
+  )

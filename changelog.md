@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SIGNALS_DEMO.<strategy>` — a drill subject that notifies Telegram and
+  commands nothing.** A signal producer (QTE's `make demo-signal`) publishes
+  the *same* webhook envelope here that it would publish to
+  `SIGNALS.<strategy>`, and `DemoSignalConsumer` records it onto its broadcast
+  cycle — so the card is rendered by the ordinary renderer and reads like a
+  real signal — and posts one `Demo signal received` line to the operator
+  channel. That is all it does. It answers "does a signal from this strategy
+  still reach Telegram, rendered correctly, with the payload this producer
+  builds?" without a worker opening anything.
+
+  Three properties keep a drill away from workers, and none of them is a
+  branch someone has to get right:
+
+  - **The subject's first token differs.** It is not `SIGNALS.DEMO.*`: the
+    JetStream stream `SIGNALS` captures `SIGNALS.>`, so a demo published one
+    token deeper would be stored in the very buffer `SignalWorker` drains and
+    fanned out like any other signal. `SIGNALS_DEMO` cannot match that filter.
+  - **The consumer accepts no publisher.** It holds nothing that could reach a
+    worker.
+  - **A drill is never persisted into `signals`.** It must not be:
+    `WORKER_CONNECTED_ACK` replays every signal persisted in the last
+    `max_retry_timeout` seconds into `retry_signals`, which would hand a drill
+    to the next worker that connects.
+
+  Core NATS, backed by no stream: nothing about a drill is durable or
+  redelivered, and there is no block gate, no retry and no attempt counter. As
+  on `SIGNALS.<strategy>`, access to the cluster is the authentication — the
+  envelope carries `token` and the consumer does not verify it, because
+  `POST /secret/webhook` is the path that checks tokens. Documented in
+  `examples/nats/subjects.md` with `examples/nats/signals_demo.envelope.json`;
+  the startup notification now names the subject it is listening on.
+
 - **`/subscribeall` and `/unsubscribeall` switch live trade cards on or off for
   every linked account at once.** With the opt-in per account, a user holding
   several accounts needed a `/switch` plus `/subscribe` round for each one; the

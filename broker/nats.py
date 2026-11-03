@@ -34,6 +34,21 @@ JETSTREAM_SIGNAL_STREAM = "SIGNALS"
 JETSTREAM_SIGNAL_SUBJECT_PREFIX = "SIGNALS"
 JETSTREAM_SIGNAL_SUBJECT_FILTER = "SIGNALS.>"
 
+# Core-NATS namespace QTE fires its end-to-end drill at — see
+# ``broker/services/demo_signal_service.py``. A demo envelope is a full
+# ``WebhookPayload`` and is rendered to Telegram like any other signal, but it
+# is never published onward to a worker.
+#
+# A separate first token rather than ``SIGNALS.DEMO.*`` on purpose: the
+# JetStream stream above captures ``SIGNALS.>``, so a demo published one token
+# deeper would be stored in the very buffer ``SignalWorker`` drains and would
+# reach workers after all. ``SIGNALS_DEMO`` cannot match that filter, which
+# makes "a drill commands nothing" a property of the subject rather than of the
+# code that handles it. It is also backed by no stream, so nothing about a
+# drill is durable or redelivered.
+DEMO_SIGNAL_SUBJECT_PREFIX = "SIGNALS_DEMO"
+DEMO_SIGNAL_SUBJECT_FILTER = "SIGNALS_DEMO.>"
+
 # Window (seconds) in which JetStream rejects a second message carrying a
 # ``Nats-Msg-Id`` it has already stored. The webhook path retries an enqueue whose
 # PubAck did not arrive in time, and that ack may simply have been slow rather

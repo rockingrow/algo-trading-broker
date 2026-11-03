@@ -22,7 +22,7 @@ from broker.db.repository import (
 )
 from broker.helpers import emoji_constants as em
 from broker.logger import get_logger
-from broker.nats import nats_client
+from broker.nats import DEMO_SIGNAL_SUBJECT_FILTER, nats_client
 from broker.openapi import fastapi_kwargs
 from broker.providers import (
   make_broadcast_dispatcher,
@@ -30,6 +30,7 @@ from broker.providers import (
   make_signals_notifier,
 )
 from broker.router import get_core_router
+from broker.services.demo_signal_service import DemoSignalConsumer
 from broker.services.nats_service import (
   NatsPublisher,
   SystemEventConsumer,
@@ -122,6 +123,21 @@ async def lifespan(app: FastAPI):
     webhook_secret=settings.webhook.SECRET,
     deferred_enqueuer=deferred_enqueuer,
   )
+  # QTE's end-to-end drill. Given no publisher on purpose: it renders the
+  # Telegram card a real signal would get and can reach no worker — see
+  # broker/services/demo_signal_service.py. Its operator line goes through a
+  # queue for the same reason every other Telegram call on a NATS path does:
+  # nats-py awaits a subscription's callback before pulling that subscription's
+  # next message, and `make demo-signal` fires one drill per mounted strategy
+  # back to back — unqueued, a throttled Telegram would serialize the whole run
+  # behind one HTTP timeout each.
+  demo_notifier = QueuedNotifier(notifier)
+  await demo_notifier.start()
+  demo_consumer = DemoSignalConsumer(
+    broadcaster=signal_broadcaster,
+    notifier=demo_notifier,
+    connection=nats_client,
+  )
   signal_worker = SignalWorker(service=signal_service, connection=nats_client)
   signal_retry_job = SignalRetryJob(
     service=signal_service,
@@ -130,6 +146,7 @@ async def lifespan(app: FastAPI):
   )
   await consumer.start()
   await system_consumer.start()
+  await demo_consumer.start()
   await signal_worker.start()
   await signal_retry_job.start()
   await broadcast_dispatcher.start()
@@ -147,6 +164,7 @@ async def lifespan(app: FastAPI):
     f"{em.BROKER_STARTED} <b>Broker Node Started</b>\n"
     f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
     f"{em.PLUG} NATS Listening: <code>{nats_client.listen_subjects_line()}</code>\n"
+    f"{em.DEMO_SIGNAL} NATS Drill: <code>{DEMO_SIGNAL_SUBJECT_FILTER}</code> (Telegram only)\n"
     f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
   )
 
@@ -160,6 +178,12 @@ async def lifespan(app: FastAPI):
 
   await signal_retry_job.stop()
   await signal_worker.stop()
+  # Before the broadcast dispatcher, like every other producer: a drill still
+  # in flight should reach the write log the dispatcher's last sweep drains.
+  # Its notifier drains after it, so nothing is still being queued behind the
+  # flush.
+  await demo_consumer.stop()
+  await demo_notifier.stop()
   # Broadcast dispatcher stops after the producers: the sweeper's last pass
   # drains anything the JetStream handler queued on its way out.
   await broadcast_dispatcher.stop()

@@ -1,0 +1,33 @@
+{
+  "payload": {
+    "strategy": "EXAMPLE_GOLD_M15_V1",
+    "symbol": "XAUUSD",
+    "timeframe": "15",
+    "timestamp": "2026-06-02T10:15:00Z",
+    "signal_uxid": "A1B2C3D4E5F60718",
+    "position": {
+      "action": "LONG",
+      "price": 2417.28,
+      "quantity": 0.41,
+      "sl": 2405.19,
+      "tp1": 2429.37,
+      "tp2": 2441.45,
+      "risk_percent": 1.0,
+      "tp1_percent": 50.0,
+      "use_equity_sizing": false,
+      "move_sl_to_be": true,
+      "is_running": true,
+      "is_scale_position": false,
+      "scale_strategy": null,
+      "scaling": null
+    },
+    "indicators": {
+      "close": 2417.28,
+      "atr_val": 6.04
+    },
+    "inputs": {
+      "risk_percent": 1.0
+    },
+    "token": "shared-webhook-token"
+  }
+}
