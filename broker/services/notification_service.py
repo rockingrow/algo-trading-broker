@@ -66,6 +66,24 @@ def _box(text: str) -> str:
   return f"<pre>{text.strip()}</pre>"
 
 
+def _telegram_timeout() -> httpx.Timeout:
+  """Short connect budget, longer read budget, for one Bot API call.
+
+  A single number for both is what made a *slow* ``api.telegram.org`` look
+  like a *dead* one: the message was accepted and the reply simply took longer
+  than the connect budget allowed for. Connecting either happens quickly or is
+  not going to happen, so that stays at ``HTTP_TIMEOUT``; waiting for the
+  answer to a message Telegram already has is worth ``HTTP_READ_TIMEOUT``.
+  """
+  connect = settings.telegram.HTTP_TIMEOUT
+  return httpx.Timeout(
+    settings.telegram.HTTP_READ_TIMEOUT,
+    connect=connect,
+    write=connect,
+    pool=connect,
+  )
+
+
 # ── Chat targets ───────────────────────────────────────────────────────────
 
 # A chat id carrying a forum topic, e.g. "-1002173777783_924584". Only a
@@ -191,7 +209,7 @@ class Notification(abc.ABC):
 
     text = self.format_text(message_text)
     try:
-      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
+      async with httpx.AsyncClient(timeout=_telegram_timeout()) as client:
         results = await asyncio.gather(
           *(self._deliver(client, target, text) for target in targets)
         )
@@ -280,6 +298,45 @@ class EditOutcome(Enum):
   FAILED = "FAILED"
 
 
+class SendOutcome(Enum):
+  """Result of trying to post a *new* broadcast message.
+
+  A tri-state for the same reason :class:`EditOutcome` is one, and for a
+  failure mode that cost us 40 duplicate messages in one afternoon: a
+  ``ReadTimeout`` is not a failed send. The request reached Telegram, the
+  message was posted, and only the *response* never came back — so the caller
+  has no ``message_id`` but the chat does have the message. Re-sending such a
+  cycle posts a second copy, then a third, once per dispatcher pass.
+
+  UNKNOWN therefore means "assume it is in the chat": the caller must not send
+  the same body again. FAILED is the case where Telegram answered and refused,
+  so nothing was posted and a retry is safe.
+  """
+
+  OK = "OK"
+  #: Telegram answered and refused, or the send never left — nothing posted.
+  FAILED = "FAILED"
+  #: The request timed out or the connection broke mid-flight. The message may
+  #: well be in the chat; its id is simply unknown. Never re-send on this.
+  UNKNOWN = "UNKNOWN"
+
+
+class SendResult(NamedTuple):
+  """A :class:`SendOutcome` with the ``message_id`` when there is one."""
+
+  outcome: SendOutcome
+  message_id: str | None
+
+
+#: Exceptions that leave the outcome of a send genuinely unknown: the request
+#: was on the wire when it broke, so Telegram may have accepted it.
+_UNKNOWN_SEND_ERRORS = (
+  httpx.TimeoutException,
+  httpx.RemoteProtocolError,
+  httpx.ReadError,
+)
+
+
 #: Bot API error fragments (lower-cased) that mean the message is unrecoverable.
 _MESSAGE_GONE_MARKERS = (
   "message to edit not found",
@@ -346,44 +403,70 @@ class BroadcastNotifier:
       payload["reply_markup"] = reply_markup
     return payload
 
-  async def send_and_get_message_id(
+  async def send_message(
     self, target: ChatTarget, text: str, reply_markup: dict | None = None
-  ) -> str | None:
-    """Post *text* to *target* and return Telegram's ``message_id``.
+  ) -> SendResult:
+    """Post *text* to *target* and report what became of it.
 
-    ``None`` means nothing was sent (disabled/misconfigured) or the send
-    failed. A send that succeeded but whose response could not be parsed also
-    yields ``None``: without an id the cycle cannot be edited later, so the
-    caller must treat it as "no message to update".
+    The id comes back with :attr:`SendOutcome.OK`. Everything else carries no
+    id, and the outcome says whether the caller may send the same body again:
+    FAILED means nothing was posted, UNKNOWN means it probably was. See
+    :class:`SendOutcome` — conflating the two is what duplicates a cycle in
+    the chat.
+
+    A 200 whose body holds no ``message_id`` is UNKNOWN for the same reason:
+    Telegram accepted the message, we just cannot address it afterwards.
     """
     if not self._ready(target):
-      return None
+      return SendResult(SendOutcome.FAILED, None)
     try:
-      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
+      async with httpx.AsyncClient(timeout=_telegram_timeout()) as client:
         response = await client.post(
           self._api_url("sendMessage"),
           json=self._payload(target, text, reply_markup),
         )
-      if response.status_code != 200:
-        logger.error(
-          "Telegram sendMessage failed chat_id=%s: %s",
-          target.label,
-          response.text,
-        )
-        return None
-      body = _safe_json(response)
-      message_id = body.get("message_id") if isinstance(body, dict) else None
-      if message_id is None:
-        logger.warning(
-          "Telegram sendMessage chat_id=%s returned no message_id", target.label
-        )
-        return None
-      return str(message_id)
+    except _UNKNOWN_SEND_ERRORS as exc:
+      # Deliberately not ``logger.exception``: the traceback here is httpx
+      # plumbing, and this path fires once per chat per stuck pass.
+      logger.error(
+        "Telegram sendMessage chat_id=%s did not answer (%s: %s) — "
+        "the message may be in the chat, not re-sending",
+        target.label,
+        type(exc).__name__,
+        exc,
+      )
+      return SendResult(SendOutcome.UNKNOWN, None)
     except Exception as exc:
       logger.exception(
         "Exception on Telegram sendMessage chat_id=%s: %s", target.label, exc
       )
-      return None
+      return SendResult(SendOutcome.FAILED, None)
+
+    if response.status_code != 200:
+      logger.error(
+        "Telegram sendMessage failed chat_id=%s: %s",
+        target.label,
+        response.text,
+      )
+      return SendResult(SendOutcome.FAILED, None)
+    body = _safe_json(response)
+    message_id = body.get("message_id") if isinstance(body, dict) else None
+    if message_id is None:
+      logger.warning(
+        "Telegram sendMessage chat_id=%s returned no message_id", target.label
+      )
+      return SendResult(SendOutcome.UNKNOWN, None)
+    return SendResult(SendOutcome.OK, str(message_id))
+
+  async def send_and_get_message_id(
+    self, target: ChatTarget, text: str, reply_markup: dict | None = None
+  ) -> str | None:
+    """:meth:`send_message`, keeping only the id — for callers that post once.
+
+    A trade card has no retry pass behind it, so it has nothing to do with the
+    distinction :class:`SendOutcome` draws.
+    """
+    return (await self.send_message(target, text, reply_markup)).message_id
 
   async def reply_message(
     self, target: ChatTarget, reply_to_message_id: str, text: str
@@ -407,7 +490,7 @@ class BroadcastNotifier:
     payload["reply_to_message_id"] = reply_to_message_id
     payload["allow_sending_without_reply"] = True
     try:
-      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
+      async with httpx.AsyncClient(timeout=_telegram_timeout()) as client:
         response = await client.post(self._api_url("sendMessage"), json=payload)
       if response.status_code == 200:
         return True
@@ -449,7 +532,7 @@ class BroadcastNotifier:
     payload = self._payload(target, text, reply_markup)
     payload["message_id"] = message_id
     try:
-      async with httpx.AsyncClient(timeout=settings.telegram.HTTP_TIMEOUT) as client:
+      async with httpx.AsyncClient(timeout=_telegram_timeout()) as client:
         response = await client.post(self._api_url("editMessageText"), json=payload)
       if response.status_code == 200:
         return EditOutcome.OK

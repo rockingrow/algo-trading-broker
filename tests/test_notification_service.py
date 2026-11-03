@@ -7,6 +7,7 @@ from broker.services.notification_service import (
   BroadcastNotifier,
   ChatTarget,
   QueuedNotifier,
+  SendOutcome,
   TelegramNotification,
   _box,
   parse_chat_targets,
@@ -349,6 +350,45 @@ async def test_broadcast_send_wraps_body_in_a_box(monkeypatch):
   assert payload["text"] == "<pre>LONG @ 63100.5</pre>"
 
 
+async def test_a_timed_out_send_is_unknown_not_failed(monkeypatch):
+  """A read timeout means Telegram has the message; only the reply is lost.
+
+  Reporting FAILED here is what let the dispatcher post the same cycle once
+  per pass, forty times over.
+  """
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(httpx, "AsyncClient", _client_raiser(httpx.ReadTimeout("slow")))
+
+  result = await BroadcastNotifier().send_message(ChatTarget("-100111"), "SHORT XAUUSD")
+
+  assert result.outcome is SendOutcome.UNKNOWN
+  assert result.message_id is None
+
+
+async def test_a_refused_send_is_failed(monkeypatch):
+  """Telegram answered and said no, so nothing was posted — a retry is safe."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(httpx, "AsyncClient", _client_recorder([], status_code=400))
+
+  result = await BroadcastNotifier().send_message(ChatTarget("-100111"), "SHORT XAUUSD")
+
+  assert result.outcome is SendOutcome.FAILED
+  assert result.message_id is None
+
+
+async def test_a_posted_message_reports_its_id(monkeypatch):
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(httpx, "AsyncClient", _client_with_result({"message_id": 4242}))
+
+  result = await BroadcastNotifier().send_message(ChatTarget("-100111"), "SHORT XAUUSD")
+
+  assert result.outcome is SendOutcome.OK
+  assert result.message_id == "4242"
+
+
 async def test_broadcast_edit_wraps_body_in_a_box(monkeypatch):
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
   monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
@@ -492,6 +532,51 @@ async def test_queued_notifier_survives_a_failing_send():
 
 
 # ── helpers ─────────────────────────────────────────────────────────
+
+
+def _client_raiser(error: Exception):
+  """Fake httpx.AsyncClient whose POST raises *error* instead of answering."""
+
+  class _Client:
+    def __init__(self, *a, **k):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *a):
+      return False
+
+    async def post(self, url, json):
+      raise error
+
+  return _Client
+
+
+def _client_with_result(result: dict):
+  """Fake httpx.AsyncClient that answers 200 with ``{"result": result}``."""
+
+  class _Resp:
+    status_code = 200
+    text = "ok"
+
+    def json(self):
+      return {"ok": True, "result": result}
+
+  class _Client:
+    def __init__(self, *a, **k):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *a):
+      return False
+
+    async def post(self, url, json):
+      return _Resp()
+
+  return _Client
 
 
 def _client_recorder(sink: list, status_code: int = 200, status_for=None):

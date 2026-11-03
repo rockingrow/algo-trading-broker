@@ -146,6 +146,13 @@ class TelegramSettings(BaseSettings):
   # stuck send occupies the notification queue.
   HTTP_TIMEOUT: float = 5.0
 
+  # Read timeout (seconds) on api.telegram.org, separate from the connect
+  # budget above. A send that times out *after* Telegram accepted it leaves
+  # the broker without a ``message_id`` for a message that is already in the
+  # chat (see ``SendOutcome.UNKNOWN``), so waiting longer for the answer is
+  # cheaper than treating a slow reply as a lost message.
+  HTTP_READ_TIMEOUT: float = 20.0
+
   # Token of the *bot-service* BotFather bot (the one end-users actually DM to
   # link and drive their account — BOT_TELEGRAM_TOKEN in the bot's config).
   # Read from the shared .env so the broker can DM an account's owner directly

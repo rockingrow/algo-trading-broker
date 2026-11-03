@@ -689,7 +689,8 @@ TELEGRAM_PRIVATE_BROADCAST_CHAT_IDS=   # private signal-cycle broadcast: strateg
 # Forward log records at ERROR level or above to Telegram.
 TELEGRAM_LOG_ERRORS_ENABLED=false
 TELEGRAM_LOG_DEDUP_WINDOW=60   # seconds — suppress identical messages
-TELEGRAM_HTTP_TIMEOUT=5.0      # seconds per Bot API call
+TELEGRAM_HTTP_TIMEOUT=5.0      # seconds to connect to the Bot API
+TELEGRAM_HTTP_READ_TIMEOUT=20.0  # seconds to wait for its answer
 TELEGRAM_LOG_BOT_TOKEN=        # dedicated log bot (falls back to TELEGRAM_BOT_TOKEN)
 TELEGRAM_LOG_CHAT_ID=          # dedicated log chat (falls back to TELEGRAM_BROKER_LOG_CHAT_IDS)
 
