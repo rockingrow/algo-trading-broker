@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A broadcast that Telegram never answered is no longer posted again.**
+  `sendMessage` ran on one five-second budget for connecting *and* for the
+  reply. A slow `api.telegram.org` therefore raised `ReadTimeout` on a message
+  it had already accepted, and the dispatcher, told only that the send
+  "failed", had no `message_id` to edit and posted the whole cycle afresh on
+  every 30-second pass — forty duplicate messages on 2026-11-03.
+
+  A send now reports a `SendOutcome`, the way an edit already reported an
+  `EditOutcome`: `OK` with an id, `FAILED` when Telegram answered and refused
+  (nothing was posted, so a retry is safe), and `UNKNOWN` when the request
+  broke mid-flight or came back without an id. `UNKNOWN` marks the body
+  delivered instead of sending it again — the message is assumed to be in the
+  chat — while a genuinely newer event still gets its own message. The read
+  budget is also separated from the connect budget
+  (`TELEGRAM_HTTP_READ_TIMEOUT`, 20s), so a slow reply is no longer mistaken
+  for a lost message.
+
+### Changed
+
+- **The public broadcast carries its `Signal:` line again.** The uxid is how a
+  reader refers to a cycle and how the message matches the engine's own
+  notification; only the private body had it, in its "Signal info" box. The
+  public body now shows it under the entry levels, and it is never printed
+  twice.
+- **LONG and SHORT read as a green and a red dot** (`🟢` / `🔴`) in place of
+  the two chart glyphs, which were hard to tell apart at a glance.
+  `quant-trading-engine` carries the same change.
+
 ### Added
 
 - **`SIGNALS_DEMO.<strategy>` — a drill subject that notifies Telegram and

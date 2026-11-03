@@ -84,6 +84,8 @@ from broker.services.notification_service import (
   BroadcastNotifier,
   ChatTarget,
   EditOutcome,
+  SendOutcome,
+  SendResult,
   parse_chat_targets,
 )
 from broker.settings import settings
@@ -540,6 +542,21 @@ class BroadcastDispatcher:
       )
     return all(results)
 
+  async def _send(self, chat: ChatTarget, text: str) -> SendResult:
+    """Post a new message, tolerating a notifier that only hands back an id.
+
+    :class:`BroadcastNotifier` reports a :class:`SendOutcome`; a double or an
+    older notifier may only offer ``send_and_get_message_id``, in which case
+    an id is OK and its absence is FAILED — the behaviour before the outcome
+    existed.
+    """
+    sender = getattr(self._notifier, "send_message", None)
+    if sender is not None:
+      return SendResult(*await sender(chat, text))
+    message_id = await self._notifier.send_and_get_message_id(chat, text)
+    outcome = SendOutcome.OK if message_id else SendOutcome.FAILED
+    return SendResult(outcome, message_id)
+
   async def _deliver(
     self,
     *,
@@ -560,6 +577,11 @@ class BroadcastDispatcher:
     transient failure keeps the stored id and retries on the next pass instead,
     which is what stops a rate limit from littering the chat with duplicate
     copies of the cycle.
+
+    A *new* send that Telegram never answered is the same hazard from the
+    other end: there is no id to store, yet the message is probably in the
+    chat. That body is marked delivered rather than sent again — see
+    :class:`SendOutcome`.
 
     An edit that lands also posts a reply notice for every event this chat has
     not been told about yet: the edit alone changes the message silently, so a
@@ -620,7 +642,29 @@ class BroadcastDispatcher:
         message_id,
       )
 
-    new_message_id = await self._notifier.send_and_get_message_id(chat, text)
+    outcome, new_message_id = await self._send(chat, text)
+    if outcome is SendOutcome.UNKNOWN:
+      # Telegram never answered, so there is no message id — but the message
+      # is very likely in the chat already. Sending this body again would post
+      # a visible duplicate on every pass, which is exactly what happened on
+      # 2026-11-03: one stuck cycle became forty copies. ``delivered_seq`` is
+      # advanced instead, so the guard at the top of this method treats this
+      # body as shown; a genuinely newer event still gets its own message.
+      await self._repository.upsert_chat(
+        record_id,
+        audience=audience,
+        chat_id=stored_chat_id,
+        message_id=None,
+        message=text,
+        delivered_seq=seq,
+        notified_event_count=len(notices),
+        last_error="send outcome unknown",
+      )
+      log.warning(
+        "Broadcast send unanswered chat_id=%s — assuming it landed, not re-sending",
+        chat.label,
+      )
+      return False
     if new_message_id is None:
       await self._repository.upsert_chat(
         record_id,

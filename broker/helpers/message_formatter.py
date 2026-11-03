@@ -261,6 +261,14 @@ def format_broadcast_message(
     if entry_block:
       position_lines.append(entry_block)
   position_lines.append(_BROADCAST_DIVIDER)
+  # The uxid is the only handle a reader has on a cycle: it is what they quote
+  # when they ask about a position, and what matches the message to the
+  # engine's own private notification. The private body carries it in the
+  # "Signal info" box below, which the public channel never gets, so the
+  # public body carries it here instead — never both.
+  if not include_meta and record.signal_uxid:
+    position_lines.append(f"Signal: {record.signal_uxid}")
+    position_lines.append(_BROADCAST_DIVIDER)
   position_box = "\n".join(position_lines)
 
   # Box 2: Actions

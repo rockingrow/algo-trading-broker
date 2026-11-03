@@ -80,11 +80,22 @@ def test_header_shows_strategy_and_cycle_id():
   assert "Signal: <code>9f2c4b7e18a3d605</code>" in msg
 
 
-def test_header_omits_strategy_and_cycle_id_without_include_meta():
+def test_header_omits_strategy_without_include_meta():
   """The public audience gets the bare body — no strategy internals."""
   msg = format_broadcast_message(_record())
   assert "Strategy:" not in msg
-  assert "Signal:" not in msg
+
+
+def test_public_body_still_carries_the_signal_uxid():
+  """The uxid is how a reader refers to a cycle, so it is not an internal."""
+  msg = format_broadcast_message(_record())
+  assert "Signal: 9f2c4b7e18a3d605" in msg
+
+
+def test_the_signal_uxid_is_not_repeated_for_the_private_audience():
+  """Private shows it in the "Signal info" box; it must not appear twice."""
+  msg = format_broadcast_message(_record(), include_meta=True)
+  assert msg.count("Signal: ") == 1
 
 
 def test_running_cycle_shows_the_running_icon():
