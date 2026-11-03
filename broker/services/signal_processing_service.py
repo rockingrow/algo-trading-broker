@@ -64,7 +64,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.errors import BadRequestError
 from pydantic import ValidationError
 
@@ -628,7 +627,14 @@ class SignalWorker:
           settings.jetstream.FETCH_BATCH,
           timeout=settings.jetstream.FETCH_TIMEOUT_SECONDS,
         )
-      except NatsTimeoutError:
+      except TimeoutError:
+        # An empty fetch window is the normal idle case, not an error. Catch the
+        # built-in base class: nats-py re-raises a bare ``asyncio.TimeoutError``
+        # (which *is* ``builtins.TimeoutError`` since 3.11) when the window
+        # expires before any message or status reply arrives, and only wraps it
+        # as ``FetchTimeoutError`` once the server has answered. The base also
+        # covers ``nats.errors.TimeoutError`` and ``FetchTimeoutError``, both of
+        # which derive from it.
         continue
       except asyncio.CancelledError:
         raise

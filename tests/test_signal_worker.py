@@ -1,4 +1,10 @@
+import asyncio
 import json
+import logging
+
+import pytest
+from nats.errors import TimeoutError as NatsTimeoutError
+from nats.js.errors import FetchTimeoutError
 
 from broker.services.signal_processing_service import SignalWorker
 
@@ -98,3 +104,85 @@ async def test_handler_failure_is_naked_for_redelivery():
   assert msg.acked is False
   assert msg.naked is True
   assert msg.termed is False
+
+
+class FakeSub:
+  """A pull subscription whose ``fetch`` replays a scripted list of outcomes.
+
+  An ``Exception`` instance in the script is raised; anything else is returned
+  as the batch. Once the script runs out the worker's stop event is set, so
+  ``_run`` leaves the loop instead of spinning forever.
+  """
+
+  def __init__(self, worker: SignalWorker, outcomes: list):
+    self._worker = worker
+    self._outcomes = list(outcomes)
+    self.fetch_calls = 0
+
+  async def fetch(self, batch: int, timeout: float | None = None):
+    self.fetch_calls += 1
+    if not self._outcomes:
+      self._worker._stop.set()
+      return []
+    outcome = self._outcomes.pop(0)
+    if isinstance(outcome, Exception):
+      raise outcome
+    return outcome
+
+
+def _worker_with(outcomes: list) -> tuple[SignalWorker, FakeService, FakeSub]:
+  service = FakeService()
+  worker = SignalWorker(service=service, connection=object())  # type: ignore[arg-type]
+  sub = FakeSub(worker, outcomes)
+  worker._sub = sub
+  return worker, service, sub
+
+
+@pytest.mark.parametrize(
+  "timeout_error",
+  [
+    asyncio.TimeoutError(),
+    NatsTimeoutError(),
+    FetchTimeoutError(),
+  ],
+  ids=["asyncio", "nats", "fetch"],
+)
+async def test_fetch_timeout_is_a_silent_idle_cycle(timeout_error, caplog):
+  """Every timeout flavour nats-py can raise means "no messages", not an error.
+
+  ``nats.js`` re-raises a bare ``asyncio.TimeoutError`` when the fetch window
+  expires before the server answers at all, and that one is the *base* class of
+  ``nats.errors.TimeoutError`` — not a subclass — so catching only the nats
+  alias logged a traceback plus a one-second backoff on every idle poll.
+  """
+  msg = FakeMsg(_envelope())
+  worker, service, sub = _worker_with([timeout_error, [msg]])
+
+  with caplog.at_level(logging.ERROR):
+    await worker._run()
+
+  # The timeout cycle was skipped and the next batch still arrived.
+  assert len(service.calls) == 1
+  assert msg.acked is True
+  assert sub.fetch_calls == 3
+  assert "JetStream fetch failed" not in caplog.text
+
+
+async def test_unexpected_fetch_error_is_still_logged_and_backed_off(
+  caplog, monkeypatch
+):
+  """The quiet timeout path must not swallow a genuinely broken connection."""
+  sleeps: list[float] = []
+
+  async def fake_sleep(seconds: float) -> None:
+    sleeps.append(seconds)
+
+  monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+  worker, service, sub = _worker_with([ConnectionResetError("socket gone")])
+
+  with caplog.at_level(logging.ERROR):
+    await worker._run()
+
+  assert "JetStream fetch failed" in caplog.text
+  assert sleeps == [1.0]
+  assert service.calls == []
