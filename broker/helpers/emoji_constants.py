@@ -8,8 +8,8 @@ and easy to swap out without hunting through multiple files.
 import emoji
 
 # ── Trading signal actions ────────────────────────────────────────────────────
-LONG: str = emoji.emojize(":chart_increasing:")  # 📈
-SHORT: str = emoji.emojize(":chart_decreasing:")  # 📉
+LONG: str = emoji.emojize(":green_circle:")  # 🟢
+SHORT: str = emoji.emojize(":red_circle:")  # 🔴
 TP1: str = emoji.emojize(":bullseye:")  # 🎯
 TP2: str = emoji.emojize(":rocket:")  # 🚀
 R_SL: str = emoji.emojize(":shield:")  # 🛡️
