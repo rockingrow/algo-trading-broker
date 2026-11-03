@@ -146,7 +146,7 @@ def test_tailscale_service_is_opt_in_and_reads_the_mounted_serve_config(compose)
   mounts = dict(volume.split(":")[:2] for volume in service["volumes"])
 
   assert service["profiles"] == ["tailscale"]
-  assert mounts["./config/tailscale"] == str(Path(serve_path).parent)
+  assert mounts["./config/tailscale"] == Path(serve_path).parent.as_posix()
   # Without TS_AUTH_ONCE a restart would log in again with a spent key.
   assert service["environment"]["TS_AUTH_ONCE"] == "true"
 

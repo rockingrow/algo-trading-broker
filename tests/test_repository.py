@@ -144,7 +144,7 @@ async def test_log_signal_persists_the_cycle_id(monkeypatch):
   await SqlAlchemySignalRepository().log_signal(
     _payload(signal_uxid="9f2c4b7e18a3d605")
   )
-  assert session.added[0].signal_uxid == "9f2c4b7e18a3d605"
+  assert session.added[0].signal_uxid == "9F2C4B7E18A3D605"
 
 
 async def test_log_signal_risk_percent_prefers_position(monkeypatch):

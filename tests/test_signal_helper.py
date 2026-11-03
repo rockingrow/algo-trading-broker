@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from broker.helpers import emoji_constants as em
 from broker.helpers.signal_helper import action_to_emoji, parse_signal
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.webhook_schema import PositionSchema, ScalingSchema, WebhookPayload
@@ -19,8 +20,8 @@ def _payload(**overrides) -> WebhookPayload:
 
 
 def test_action_to_emoji_known_and_default():
-  assert action_to_emoji(SignalActionEnum.LONG) == "🟢"
-  assert action_to_emoji(SignalActionEnum.SL) == "❌"
+  assert action_to_emoji(SignalActionEnum.LONG) == em.LONG
+  assert action_to_emoji(SignalActionEnum.SL) == em.SL
 
 
 def test_parse_signal_normalises_symbol():
@@ -106,13 +107,13 @@ def test_parse_signal_ships_both_ids():
   ``signal_uxid`` identifies the trade cycle it belongs to."""
   signal = parse_signal(_payload(signal_uxid="9f2c4b7e18a3d605"), "sig-7")
   assert signal.signal_id == "sig-7"
-  assert signal.signal_uxid == "9f2c4b7e18a3d605"
+  assert signal.signal_uxid == "9F2C4B7E18A3D605"
 
 
 def test_signal_id_stays_unique_per_action_while_the_cycle_id_is_shared():
   """Dedup by signal_id keeps working: two actions of one trade are two
   signals, and only the cycle id is common to them."""
-  uxid = "9f2c4b7e18a3d605"
+  uxid = "9F2C4B7E18A3D605"
   entry = parse_signal(_payload(signal_uxid=uxid), "sig-entry")
   close = parse_signal(
     _payload(

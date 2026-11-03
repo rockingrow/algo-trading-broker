@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The test suite matches what the code does again.** 51 of 701 tests were
+  red on `dev`, none of them a product bug: the suite had been left behind by
+  three deliberate changes. `signal_uxid` is upper-cased at ingress, so every
+  fixture that keyed a cycle by lowercase hex missed it — including the 20
+  broadcast-dispatcher tests, which looked their own cycle up by the wrong
+  key. The broadcast body is a monospace `<pre>` layout now, so the 27
+  assertions still looking for `<b>`/`<code>` markup, for a timestamp on the
+  entry block and for an `Executions (n)` table could not match. A partial
+  take-profit has had its own `TP1` status since that header state was added,
+  so "TP1 keeps the cycle running" asserted the status it replaced.
+  `action_to_emoji(SL)` was still spelled as the cross the hollow red circle
+  replaced, and two tests reached for settings fields that no longer exist
+  (`TelegramSettings.CHAT_ID`) or compared a compose mount against a Windows
+  path separator.
+- **`signal_uxid` rejects a non-hex id again.** Upper-casing the id widened
+  its pattern to `[0-9A-Z]`, which accepted letters past `F` — a uxid is a
+  slice of a UUID4's hex, so `9F2C4B7E18A3D60Z` is malformed and could key a
+  cycle of its own. Back to `[0-9A-F]`, and the error message says "hex"
+  rather than "alphanumeric".
 - **A broadcast that Telegram never answered is no longer posted again.**
   `sendMessage` ran on one five-second budget for connecting *and* for the
   reply. A slow `api.telegram.org` therefore raised `ReadTimeout` on a message

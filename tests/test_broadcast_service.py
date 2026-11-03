@@ -358,7 +358,7 @@ class FakeSignalRepository:
     return self.rows.get(signal_id)
 
 
-def _payload(action=SignalActionEnum.LONG, uxid="9f2c4b7e18a3d605", **overrides):
+def _payload(action=SignalActionEnum.LONG, uxid="9F2C4B7E18A3D605", **overrides):
   base = dict(
     strategy="strat",
     symbol="XAUUSD",
@@ -395,7 +395,7 @@ def _trade_event(**overrides) -> PositionEvent:
   return PositionEvent(**base)
 
 
-def _signal_row(strategy="strat", uxid="9f2c4b7e18a3d605", symbol="XAUUSD"):
+def _signal_row(strategy="strat", uxid="9F2C4B7E18A3D605", symbol="XAUUSD"):
   return SimpleNamespace(strategy=strategy, signal_uxid=uxid, symbol=symbol)
 
 
@@ -438,7 +438,7 @@ async def _run(payload, repo=None, **dispatcher_kwargs):
   return repo, channel, cycle
 
 
-def _cycle_of(repo, strategy="strat", uxid="9f2c4b7e18a3d605", symbol="XAUUSD"):
+def _cycle_of(repo, strategy="strat", uxid="9F2C4B7E18A3D605", symbol="XAUUSD"):
   return repo.cycles[(symbol, strategy, uxid)]
 
 
@@ -620,7 +620,7 @@ async def test_delivery_stores_message_id_body_and_sequence():
   chat = repo.chats[cycle.id]["-100"]
   assert chat.message_id == "101"
   assert chat.audience == BroadcastAudienceEnum.PRIVATE
-  assert "<b>XAUUSD</b>" in chat.message
+  assert "LONG XAUUSD" in chat.message
   assert chat.delivered_seq == cycle.last_seq == 1
 
 
@@ -888,8 +888,8 @@ async def test_edited_body_accumulates_the_whole_cycle():
   await dispatcher.dispatch(cycle.id)
 
   _, _, text = channel.edited[-1]
-  assert "<b>LONG</b>" in text
-  assert "<b>TP1</b>" in text
+  assert "LONG XAUUSD" in text
+  assert f"{em.TP1} TP1" in text
 
 
 async def test_closing_action_flips_the_cycle_to_closed():
@@ -903,14 +903,16 @@ async def test_closing_action_flips_the_cycle_to_closed():
   await dispatcher.dispatch(cycle.id)
 
   assert cycle.status == BroadcastStatusEnum.CLOSED
-  assert "<b>CLOSED</b>" in channel.edited[-1][2]
+  assert channel.edited[-1][2].startswith(f"[{em.CYCLE_CLOSED}CLOSED]")
 
 
-async def test_tp1_keeps_the_cycle_running():
+async def test_tp1_gives_the_cycle_its_own_status():
+  """A partial take-profit is neither RUNNING nor CLOSED: part of the position
+  is out and the rest is still live, which is what the TP1 status says."""
   writer, repo = _writer()
   await writer.broadcast(_payload())
   await writer.broadcast(_payload(action=SignalActionEnum.TP1))
-  assert _cycle_of(repo).status == BroadcastStatusEnum.RUNNING
+  assert _cycle_of(repo).status == BroadcastStatusEnum.TP1
 
 
 # ── Dispatcher: the private execution table ─────────────────────────
@@ -925,12 +927,12 @@ async def test_private_body_carries_the_worker_table():
   await dispatcher.dispatch(_cycle_of(repo).id)
 
   bodies = {chat_id: text for chat_id, text in channel.sent}
-  assert "Executions (1)" in bodies["-100"]
+  assert "Workers (1)" in bodies["-100"]
   assert "MT5 ****5678" in bodies["-100"]
   assert "OPENED" in bodies["-100"]
   assert "Strategy:" in bodies["-100"]
   # The public copy stays the bare cycle body.
-  assert "Executions" not in bodies["-300"]
+  assert "Workers" not in bodies["-300"]
   assert "Strategy:" not in bodies["-300"]
 
 
@@ -1145,9 +1147,15 @@ async def test_public_chats_come_from_the_broker_setting():
 
 
 async def test_notification_timezone_setting_is_applied():
-  _, channel, _ = await _run(
-    _payload(), settings_values={NOTIFICATION_TIMEZONE_KEY: "0"}
+  writer, repo = _writer()
+  dispatcher, channel = _dispatcher(
+    repo, settings_values={NOTIFICATION_TIMEZONE_KEY: "0"}
   )
+
+  await writer.broadcast(_payload())
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(_cycle_of(repo).id)
+
   assert "2026-01-01 00:00:00 (UTC+0)" in channel.sent[0][1]
 
 
