@@ -55,8 +55,8 @@ CYCLE_RUNNING = _e(":hourglass_not_done:")
 CYCLE_CLOSED = _e(":chequered_flag:")
 
 # Entry/action icons for the card's position line and its "Actions:" box.
-LONG = _e(":chart_increasing:")
-SHORT = _e(":chart_decreasing:")
+LONG = _e(":green_square:")
+SHORT = _e(":red_square:")
 TP1 = _e(":bullseye:")
 TP2 = _e(":rocket:")
 R_SL = _e(":shield:")
