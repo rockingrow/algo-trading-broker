@@ -1124,7 +1124,7 @@ async def test_replayed_signal_carries_both_ids():
   )
   replayed = publisher.acks[0]["retry_signals"][0]
   assert replayed.signal_id == "sig-7"
-  assert replayed.signal_uxid == "9f2c4b7e18a3d605"
+  assert replayed.signal_uxid == "9F2C4B7E18A3D605"
 
 
 # ── strategy_magic_map inside the ACK ──────────────────────────────────────

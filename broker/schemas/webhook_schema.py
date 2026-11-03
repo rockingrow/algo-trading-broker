@@ -141,7 +141,7 @@ class WebhookPayload(BaseModel):
   symbol: str
   timeframe: str
   timestamp: datetime
-  # Short id (exactly 16 lowercase-hex chars, i.e. what :func:`new_uxid`
+  # Short id (exactly 16 uppercase-hex chars, i.e. what :func:`new_uxid`
   # produces) shared by every alert of one trade cycle: the entry and each of
   # its TP/SL/FLAT follow-ups. Together with ``strategy`` it keys the single
   # Telegram broadcast message the cycle is rendered into, so a strategy that
@@ -166,8 +166,8 @@ class WebhookPayload(BaseModel):
     message.
 
     Anything else is rejected unless it matches the exact uxid shape (16
-    uppercase alphanumeric characters). Uppercase is accepted and normalised, so a
-    strategy that writes UUIDs in either case works either way. Rejecting at
+    hex characters). Lowercase is accepted and upper-cased, so a strategy that
+    writes UUID hex in either case keys the same cycle either way. Rejecting at
     the boundary is deliberate: a malformed id — a shortened one, a UUID with
     dashes, a random string — could collide against a real cycle id and quietly
     merge two unrelated trades. Failing fast with a 422 forces the strategy to
@@ -181,7 +181,6 @@ class WebhookPayload(BaseModel):
     normalised = text.upper()
     if not is_valid_uxid(normalised):
       raise ValueError(
-        f"signal_uxid must be exactly {UXID_LENGTH} uppercase alphanumeric characters, "
-        f"got {value!r}"
+        f"signal_uxid must be exactly {UXID_LENGTH} hex characters, got {value!r}"
       )
     return normalised

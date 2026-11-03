@@ -107,13 +107,13 @@ def test_parse_signal_ships_both_ids():
   ``signal_uxid`` identifies the trade cycle it belongs to."""
   signal = parse_signal(_payload(signal_uxid="9f2c4b7e18a3d605"), "sig-7")
   assert signal.signal_id == "sig-7"
-  assert signal.signal_uxid == "9f2c4b7e18a3d605"
+  assert signal.signal_uxid == "9F2C4B7E18A3D605"
 
 
 def test_signal_id_stays_unique_per_action_while_the_cycle_id_is_shared():
   """Dedup by signal_id keeps working: two actions of one trade are two
   signals, and only the cycle id is common to them."""
-  uxid = "9f2c4b7e18a3d605"
+  uxid = "9F2C4B7E18A3D605"
   entry = parse_signal(_payload(signal_uxid=uxid), "sig-entry")
   close = parse_signal(
     _payload(
