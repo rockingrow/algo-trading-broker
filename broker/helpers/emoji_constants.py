@@ -8,8 +8,11 @@ and easy to swap out without hunting through multiple files.
 import emoji
 
 # ── Trading signal actions ────────────────────────────────────────────────────
-LONG: str = emoji.emojize(":green_circle:")  # 🟢
-SHORT: str = emoji.emojize(":red_circle:")  # 🔴
+# An entry is drawn as a square, and only an entry is. A circle is also a
+# position flag, a broker/NATS status and a stop, so a green dot in a chat
+# never told a reader they were looking at a trade.
+LONG: str = emoji.emojize(":green_square:")  # 🟩
+SHORT: str = emoji.emojize(":red_square:")  # 🟥
 TP1: str = emoji.emojize(":bullseye:")  # 🎯
 TP2: str = emoji.emojize(":rocket:")  # 🚀
 R_SL: str = emoji.emojize(":shield:")  # 🛡️

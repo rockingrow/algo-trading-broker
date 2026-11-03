@@ -33,9 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notification; only the private body had it, in its "Signal info" box. The
   public body now shows it under the entry levels, and it is never printed
   twice.
-- **LONG and SHORT read as a green and a red dot** (`🟢` / `🔴`) in place of
-  the two chart glyphs, which were hard to tell apart at a glance.
-  `quant-trading-engine` carries the same change.
+- **An entry reads as a green or a red square** (`🟩` / `🟥`). The two
+  chart glyphs they replaced were a pixel apart at the size Telegram draws an
+  emoji, and the dots that replaced those said nothing about being an entry: a
+  circle in this table is also a position flag (`FLAG_ON`/`FLAG_OFF`), a
+  broker or NATS status and a stop, and the engine draws one for service
+  up/down notices and backtest severity badges too. A square is only ever an
+  entry. `bot/app/emojis.py`, which re-renders the broker's trade card, moves
+  with the table, and the direction assertions now read the constants instead
+  of pasting a glyph in.
+
+  `quant-trading-engine` carries the same change in
+  [#50](https://github.com/rockingrow/quant-trading-engine/pull/50), so one
+  trade reads the same in both services' messages. The Markdown backtest
+  report and the HTML dashboard keep their themed `L` / `S` column.
 
 ### Added
 

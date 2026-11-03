@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from broker.helpers import emoji_constants as em
 from broker.helpers.signal_helper import action_to_emoji, parse_signal
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.webhook_schema import PositionSchema, ScalingSchema, WebhookPayload
@@ -19,8 +20,8 @@ def _payload(**overrides) -> WebhookPayload:
 
 
 def test_action_to_emoji_known_and_default():
-  assert action_to_emoji(SignalActionEnum.LONG) == "🟢"
-  assert action_to_emoji(SignalActionEnum.SL) == "❌"
+  assert action_to_emoji(SignalActionEnum.LONG) == em.LONG
+  assert action_to_emoji(SignalActionEnum.SL) == em.SL
 
 
 def test_parse_signal_normalises_symbol():
