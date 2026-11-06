@@ -134,7 +134,7 @@ clients reconnect; the broker's own NATS connection is never touched.
    the host publishing `WEBHOOK_PORT` itself. It is the one entry in the file
    that is **not** tailnet-only — Funnel bypasses the tailnet policy
    entirely, so everything FastAPI serves is reachable from the internet
-   behind `BROKER_API_PREFIX`, and the webhook token/HMAC plus the
+   behind `BROKER_API_PREFIX`, and the webhook token plus the
    `X-API-KEY` guard are what stand in front of it. The `*.ts.net` name is
    discoverable from public Certificate Transparency logs, so treat the
    prefix as the secret it is and rotate it with `WEBHOOK_SECRET`. Funnel

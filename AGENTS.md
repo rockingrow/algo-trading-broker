@@ -107,18 +107,18 @@ package; never scan from the repository root.
 
 | Task or concept | Primary location |
 | --- | --- |
-| Webhook receiver, HMAC + token check, enqueue/deferral | `broker/api/webhook.py` |
+| Webhook receiver, token check, enqueue/deferral | `broker/api/webhook.py`, `broker/services/signal_processing_service.py` |
 | Public v1 API, admin API, Telegram callbacks | `broker/api/{api,admin,telegram}.py`, `broker/router.py` |
 | Inbound payload schema (`WebhookPayload`, `PositionSchema`) | `broker/schemas/webhook_schema.py` |
 | Outbound NATS schemas (`TradingSignal`, ADMIN/SYSTEM) | `broker/schemas/publisher_schema.py` |
 | Worker → broker trade events, accounts, enums | `broker/schemas/{trade_event_schema,account_schema,core}.py` |
 | Payload → `TradingSignal` normalisation | `broker/helpers/signal_helper.py` |
-| JetStream pipeline, block gate, publish, retries | `broker/services/{signal_processing_service,signal_retry_job}.py` |
+| JetStream pipeline, block gate, publish, retries, redelivery de-dup | `broker/services/{signal_processing_service,signal_retry_job}.py`; the shared pull loop is `broker/services/jetstream_worker.py` |
 | The drill subject `SIGNALS_DEMO.<strategy>`: Telegram only, never fanned out to a worker | `broker/services/demo_signal_service.py`, `tests/test_demo_signal_service.py` |
 | NATS connection, subjects, consumers | `broker/nats.py`, `broker/services/nats_service.py` |
 | Telegram broadcast cycles and their write log | `broker/services/broadcast_service.py`, `broker/domain/broadcast_status.py` |
 | Message rendering (broadcasts, trade cards) | `broker/helpers/{message_formatter,trade_card,emoji_constants}.py`, `broker/services/trade_card_service.py` |
-| Models, repositories, LISTEN/NOTIFY | `broker/db/{models,repository,engine,listener}.py` |
+| Models, repositories, LISTEN/NOTIFY | `broker/db/{models,engine,listener}.py`, `broker/db/repository/` (one module per aggregate) |
 | Migrations (single Alembic chain) | `alembic/versions/` |
 | Settings and environment variables | `broker/settings.py`, `.env.example` |
 | `make status`: read-only probes of Postgres, NATS, JetStream, the API, and the engine/workers connected to NATS | `broker/status.py`, `tests/test_status.py` |
@@ -141,7 +141,7 @@ Do not scan `.venv/`, `uv.lock`, `__pycache__/`, `.pytest_cache/` or `logs/`.
 
 ## Architecture invariants
 
-- **The webhook does the least possible.** It verifies the token/HMAC and
+- **The webhook does the least possible.** It verifies the token and
   enqueues onto JetStream, then answers `202`. Persistence, block gate,
   fan-out, notifications and retries belong to `SignalWorker` and
   `SignalRetryJob` — nothing new goes back into the request path, because

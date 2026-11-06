@@ -26,13 +26,14 @@ class FakeSignalRepository:
     self.logged: list[WebhookPayload] = []
     self.published_ids: list[str] = []
     self.failed_ids: list[str] = []
+    self.marked_failed_ids: list[str] = []
     # Rows keyed by str(uuid). Each row is a SimpleNamespace with attributes
     # matching the ORM Signal model fields the service touches.
     self._rows: dict[str, SimpleNamespace] = {}
     if existing is not None:
       self._rows[existing["id"]] = SimpleNamespace(**existing)
 
-  async def log_signal(self, payload):
+  async def log_signal(self, payload, *, delivery_key=None):
     self.logged.append(payload)
     if self.return_id == "__persist_fail__":
       return None
@@ -42,9 +43,25 @@ class FakeSignalRepository:
       status=SignalStatusEnum.QUEUED,
       attempts=settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
+      delivery_key=delivery_key,
       raw=payload.model_dump(mode="json"),
     )
     return row_id
+
+  async def get_by_delivery_key(self, delivery_key):
+    for row in self._rows.values():
+      if getattr(row, "delivery_key", None) == delivery_key:
+        return row
+    return None
+
+  async def mark_failed(self, signal_id):
+    self.marked_failed_ids.append(signal_id)
+    row = self._rows.get(signal_id)
+    if row is None:
+      return False
+    row.status = SignalStatusEnum.FAILED
+    row.attempts = 0
+    return True
 
   async def mark_published(self, signal_id: str) -> bool:
     self.published_ids.append(signal_id)
@@ -79,8 +96,14 @@ class FakeSignalRepository:
 class FakeSettingRepository:
   def __init__(self, blocked: bool = False):
     self.values = {"signal_blocked": "1" if blocked else "0"}
+    self.read_fails = False
 
   async def get(self, key):
+    return self.values.get(key)
+
+  async def get_strict(self, key):
+    if self.read_fails:
+      raise RuntimeError("database unavailable")
     return self.values.get(key)
 
   async def get_many(self, keys):
@@ -607,3 +630,149 @@ async def test_broadcaster_is_optional():
   # never happens, which is what "no broadcaster" is supposed to mean.
   assert result["status"] == "accepted"
   assert signal_repo.published_ids == [result["signal_id"]]
+
+
+# ── Redelivery, fail-closed gate, permanent parse failures ───────────
+
+
+async def test_redelivery_of_a_published_signal_is_not_fanned_out_again():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+  first = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+  assert first["status"] == "accepted"
+
+  # JetStream hands the same message back (its ack was lost).
+  again = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+
+  assert again == {"status": "duplicate", "signal_id": first["signal_id"]}
+  assert len(signal_repo.logged) == 1
+  assert len(publisher.published) == 1
+
+
+async def test_redelivery_of_an_interrupted_first_fanout_reuses_the_signal_id():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+  signal_id = signal_repo.return_id
+  # The first delivery persisted the row, then the broker died before the
+  # fan-out was confirmed: QUEUED, no attempt recorded.
+  await signal_repo.log_signal(_payload(), delivery_key="msgid:abc")
+
+  result = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+
+  assert result["status"] == "accepted"
+  assert result["signal_id"] == signal_id
+  # No second row, and the workers see the id they de-duplicate on.
+  assert len(signal_repo.logged) == 1
+  assert [signal.signal_id for signal in publisher.published] == [signal_id]
+
+
+async def test_redelivery_with_a_recorded_failure_is_left_to_the_retry_job():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+  signal_id = await signal_repo.log_signal(_payload(), delivery_key="msgid:abc")
+  await signal_repo.record_attempt_failure(signal_id)
+
+  result = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+
+  assert result["status"] == "duplicate"
+  assert publisher.published == []
+
+
+async def test_signals_without_a_delivery_key_are_persisted_each_time():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+  await service.handle_enqueued(payload=_payload())
+  await service.handle_enqueued(payload=_payload())
+  assert len(signal_repo.logged) == 2
+
+
+async def test_block_gate_fails_closed_when_the_setting_cannot_be_read():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+  service._settings.read_fails = True
+
+  with pytest.raises(RuntimeError):
+    await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+
+  # Nothing persisted, nothing sent: the worker NAKs and JetStream redelivers.
+  assert signal_repo.logged == []
+  assert publisher.published == []
+
+
+async def test_parse_failure_marks_the_signal_failed_without_retrying(monkeypatch):
+  import broker.services.signal_processing_service as module
+
+  def broken_parse(payload, signal_id):
+    raise ValueError("unknown timeframe")
+
+  monkeypatch.setattr(module, "parse_signal", broken_parse)
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+
+  result = await service.handle_enqueued(payload=_payload())
+
+  assert result["status"] == "invalid"
+  assert signal_repo.marked_failed_ids == [result["signal_id"]]
+  assert signal_repo.failed_ids == []
+  assert signal_repo._rows[result["signal_id"]].status == SignalStatusEnum.FAILED
+  assert broadcaster.calls == []
+
+
+async def test_max_attempts_and_enqueue_timeout_can_be_injected():
+  publisher = FakePublisher()
+  signal_repo = FakeSignalRepository()
+  service = SignalProcessingService(
+    signal_repository=signal_repo,
+    setting_repository=FakeSettingRepository(),
+    publisher=publisher,
+    notifier=FakeNotifier(),
+    webhook_secret="secret",
+    enqueue_timeout=0.25,
+    max_attempts=7,
+  )
+  await service.enqueue(_payload())
+  assert publisher.enqueued[0]["timeout"] == 0.25
+
+  result = await service.handle_enqueued(payload=_payload(), delivery_key=None)
+  assert result["status"] == "accepted"
+
+
+# ── DeferredEnqueuer shutdown drain ─────────────────────────────────
+
+
+async def test_stop_flushes_envelopes_still_queued():
+  publisher = FakePublisher()
+  # Never started: the envelope sits in the queue, as it would behind a
+  # NATS outage, until shutdown.
+  deferred = DeferredEnqueuer(publisher, interval_seconds=10)
+  deferred.submit(strategy="strat", envelope={"payload": {}}, msg_id="mid-1")
+
+  await deferred.stop()
+
+  assert [item["msg_id"] for item in publisher.enqueued] == ["mid-1"]
+  assert deferred.pending == 0
+
+
+async def test_stop_drains_the_envelope_waiting_out_its_retry_interval(caplog):
+  publisher = FakePublisher()
+  publisher.enqueue_failures = 1
+  deferred = DeferredEnqueuer(publisher, interval_seconds=10, max_attempts=5)
+  await deferred.start()
+  deferred.submit(strategy="strat", envelope={"payload": {}}, msg_id="mid-1")
+  # The first attempt fails; the loop now sleeps with the envelope off the
+  # queue. Cancelling it there used to lose the envelope silently.
+  await _wait_until(lambda: publisher.enqueue_failures == 0)
+  assert deferred.pending == 1
+
+  await deferred.stop()
+
+  assert [item["msg_id"] for item in publisher.enqueued] == ["mid-1"]
+
+
+async def test_stop_reports_envelopes_it_could_not_flush(caplog):
+  import logging
+
+  publisher = FakePublisher()
+  publisher.enqueue_failures = 10
+  deferred = DeferredEnqueuer(publisher, interval_seconds=10)
+  deferred.submit(strategy="strat", envelope={"payload": {}}, msg_id="mid-1")
+
+  with caplog.at_level(logging.ERROR):
+    await deferred.stop()
+
+  assert publisher.enqueued == []
+  assert "1 envelope(s) never queued" in caplog.text

@@ -28,6 +28,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The parked events are caught up on reply notices silently, the way an
   audience with replies switched off is: the edit is one quiet correction,
   not a burst of notices about a trade that is already over.
+- **A redelivered signal no longer becomes a second position.** JetStream
+  redelivers a `SIGNALS` message whose ack never arrived (a crash after the
+  fan-out, a lost ack), and every redelivery inserted a fresh row with a fresh
+  `signal_id` that workers could not recognise. Rows now carry the message's
+  identity in a unique `signals.delivery_key` (migration `22876e598a6d`); a
+  redelivery reuses its row — re-sent under the same `signal_id` if its first
+  fan-out was never confirmed, dropped otherwise.
+- **Two dispatches of one broadcast cycle could run at once.** The per-cycle
+  lock was discarded when it read as unlocked, which is also true in the gap
+  between a release and the next waiter waking up; a third dispatch then got a
+  fresh lock and delivered the same cycle concurrently. The lock is now kept
+  while any dispatch holds or awaits it.
+- **The `signal_blocked` gate fails closed.** A failed settings read answered
+  "not set" and let signals through a block; it now NAKs the envelope for a
+  retry.
+- **`TRADE` reports survive a broker or database outage.** They were consumed
+  over core NATS and dropped if the write failed. A `TRADES` JetStream stream
+  now captures the subject; reports are acked only once persisted. Workers
+  are unchanged.
+- **NAK-ed envelopes are redelivered after 5 s** instead of immediately, so a
+  database outage no longer spins the handler in a tight loop.
+- **An unparseable signal is marked `FAILED` at once** instead of spending
+  every retry on an input that fails the same way each time.
+- **The deferred-enqueue backlog is flushed on shutdown**, and the envelope the
+  loop held while waiting out its retry interval is no longer lost on cancel.
+- **The webhook token and `X-API-KEY` are compared in constant time.**
+- **The docs no longer promise HMAC `X-Signature` validation**, which was never
+  implemented (and cannot be sent by TradingView). `WEBHOOK_SECRET` is the
+  shared payload `token`, and `.env.example` now ships a placeholder for it.
+- The two unused imports `ruff check` flagged in migration `ee01d4811f96`.
 
 - **The test suite matches what the code does again.** 51 of 701 tests were
   red on `dev`, none of them a product bug: the suite had been left behind by
@@ -67,6 +97,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`broker/db/repository.py` is a package**, one module per aggregate, with
+  the same import path. Sessions open through `repository._session`, the one
+  attribute tests patch.
+- **`SignalWorker` and `TradeEventConsumer` share `JetStreamPullWorker`**
+  (`broker/services/jetstream_worker.py`): the fetch loop, idle/backoff
+  handling and ack/NAK/term live in one place.
+- **The app lifespan runs on an `AsyncExitStack`**: services stop in reverse
+  start order, and a service that fails to start unwinds the ones before it.
+- `SignalProcessingService` takes `enqueue_timeout` / `max_attempts` as
+  optional constructor arguments; the unused `process` alias and
+  `attempt_number_for_notification` wrapper are gone.
+- The broker names its NATS connection `algo-trading-broker`; `make status`
+  identifies it by that name now that it holds no core `TRADE` subscription.
 - **The README is a landing page; the reference moved to `docs/`.** The
   ~114KB README is split into `docs/architecture.md`, `configuration.md`,
   `api.md`, `nats.md`, `database.md`, `telegram.md`, `tailscale.md` and

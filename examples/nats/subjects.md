@@ -152,6 +152,10 @@ travels inside one `WORKER_CONNECTED_ACK`:
 
 ## `TRADE` — position events
 
+Published as plain core NATS. The broker's JetStream stream `TRADES` captures
+the subject, so a report sent while the broker is down is stored and applied
+when it comes back rather than lost; nothing changes on the worker side.
+
 Payload is a `PositionEvent`, published by a worker whenever a row in its local
 `positions` table is inserted (`event: CREATED`) or updated (`event: UPDATED`).
 Besides the trade fields (`symbol`, `action`, `volume`, `opened_price`,

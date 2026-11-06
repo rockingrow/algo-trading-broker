@@ -303,7 +303,13 @@ class BroadcastDispatcher:
     self._max_attempts = max_attempts
     self._sweep_interval = sweep_interval_seconds
     self._stale_after = stale_after_seconds
+    # Per-cycle lock plus the number of dispatches holding or awaiting it.
+    # The count, not ``Lock.locked()``, decides when an entry may be dropped:
+    # between a release and the next waiter's wake-up the lock reads as
+    # unlocked, and dropping it there let a third dispatch create a fresh lock
+    # and run alongside the waiter on the same cycle.
     self._locks: dict[str, asyncio.Lock] = {}
+    self._lock_users: dict[str, int] = {}
     self._sweeper: Optional[asyncio.Task] = None
     self._stop = asyncio.Event()
 
@@ -383,18 +389,21 @@ class BroadcastDispatcher:
 
   async def dispatch(self, cycle_id: uuid.UUID) -> None:
     """Claim a cycle's pending changes and push the cycle to every chat."""
+    key = str(cycle_id)
     lock = self._lock_for(cycle_id)
+    self._lock_users[key] = self._lock_users.get(key, 0) + 1
     try:
       async with lock:
         await self._dispatch_locked(cycle_id)
     finally:
-      # Drop the lock once nothing holds or awaits it, so a long-running broker
-      # does not accumulate one lock per trade it ever broadcast. A waiter that
-      # already has the object keeps it alive (``locked()`` is True), and a
-      # waiter that has not acquired yet cannot be interleaved here — there is
-      # no await between taking the object and acquiring it.
-      if not lock.locked():
-        self._locks.pop(str(cycle_id), None)
+      # Drop the lock once no dispatch holds or awaits it, so a long-running
+      # broker does not accumulate one lock per trade it ever broadcast.
+      remaining = self._lock_users[key] - 1
+      if remaining:
+        self._lock_users[key] = remaining
+      else:
+        del self._lock_users[key]
+        self._locks.pop(key, None)
 
   async def _dispatch_locked(self, cycle_id: uuid.UUID) -> None:
     """Everything after the per-cycle lock is taken."""

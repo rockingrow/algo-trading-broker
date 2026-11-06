@@ -21,7 +21,7 @@ TradingView / QTE ──► /secret/webhook ──► JetStream SIGNALS ──�
 
 ## Features
 
-- **Fast webhook** — verifies the token / optional HMAC, enqueues onto JetStream
+- **Fast webhook** — verifies the shared token, enqueues onto JetStream
   and answers `202`; persistence and fan-out run in a durable background consumer.
 - **Reliable delivery** — `QUEUED` → `PUBLISHED` status tracking, a retry job,
   and a signal replay for workers that reconnect.

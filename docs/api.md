@@ -46,7 +46,7 @@ Missing or invalid keys return `401 Unauthorized`. If `BROKER_API_KEY` is unset,
 | Endpoint | Auth |
 | -------- | ---- |
 | `GET /v1/health` | None |
-| `POST /secret/webhook` | In-payload `token` (+ optional HMAC) |
+| `POST /secret/webhook` | In-payload `token` (must equal `WEBHOOK_SECRET`) |
 | `GET /v1/accounts` | `X-API-KEY` |
 | `POST /admin/accounts` | `X-API-KEY` |
 | `GET /v1/{account_id}/trades` | `X-API-KEY` |
@@ -108,7 +108,7 @@ Returns `{"status": "ok"}`. No authentication required.
 
 ## POST `/secret/webhook`
 
-Receives signals from **TradingView** and from **[Quant-Trading-Engine](https://github.com/rockingrow/quant-trading-engine)** — one endpoint, one payload schema, one `token`, no per-producer branch anywhere downstream. Validates the optional HMAC `X-Signature` header if `WEBHOOK_SECRET` is set. Verifies the in-payload `token` and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
+Receives signals from **TradingView** and from **[Quant-Trading-Engine](https://github.com/rockingrow/quant-trading-engine)** — one endpoint, one payload schema, one `token`, no per-producer branch anywhere downstream. Verifies the in-payload `token` against `WEBHOOK_SECRET` (constant-time; `500` when the secret is not configured, `401` when it does not match) and pushes the raw envelope onto the JetStream `SIGNALS` stream (`SIGNALS.<strategy>`). Responds `202 Accepted` (`status=queued`) as soon as JetStream ack-s the write. Everything else — DB persist, block gate, publish to the `{strategy}` subject, Telegram notification, retries — runs from the background `SignalWorker` and, on failure, the periodic `SignalRetryJob`.
 
 The wait for that ack is capped at `WEBHOOK_ENQUEUE_TIMEOUT`: past it the response is still `202`, with `status=deferred`, and the enqueue is retried in the background (see [JetStream signal pipeline](nats.md#jetstream-signal-pipeline)). `503` means the enqueue failed *and* could not be deferred — the signal was dropped.
 

@@ -33,9 +33,9 @@ WEBHOOK_KEEPALIVE_TIMEOUT=120
 # "request took too long and timed out" — and TradingView never re-sends it.
 WEBHOOK_ENQUEUE_TIMEOUT=1.0
 
-# Optional HMAC secret — set the same value in TradingView alert header
-# X-Signature: <sha256-hex-of-body>
-# Leave blank to disable validation.
+# Shared webhook token — every alert (TradingView or QTE) must carry the same
+# value in the payload's "token" field. Required: left blank, the webhook
+# rejects every alert with 500. Generate one, e.g. `uuidgen`.
 WEBHOOK_SECRET=
 
 # ── NATS ─────────────────────────────────────────────

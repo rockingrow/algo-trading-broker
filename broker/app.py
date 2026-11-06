@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 import json
 import logging
 import re
@@ -54,155 +54,162 @@ log = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+  """Start every background service, then stop them in reverse order.
+
+  Each service registers its ``stop`` on an ``AsyncExitStack`` the moment it
+  has started, so shutdown is the start sequence played backwards — and a
+  service that fails to start still unwinds everything started before it,
+  instead of leaving a NATS connection or a sweeper task running behind a
+  crashed startup. The start order therefore encodes the shutdown contract:
+
+  * consumers that *produce* work (TRADE, SYSTEM, the drill, ``SignalWorker``,
+    the retry job) start last, so they stop first;
+  * the broadcast dispatcher starts before them, so its sweeper's last pass
+    drains whatever they wrote on their way out;
+  * the queues behind them (signal and drill notifiers, deferred enqueue,
+    trade cards) start earlier still, so nothing is queued behind their flush;
+  * NATS and the database start first and close last, so a pending enqueue
+    or write can still land.
+  """
   notifier = TelegramNotification()
 
-  # Start the background worker that forwards ERROR logs to Telegram. Cheap and
-  # idempotent when the feature is disabled (no records ever reach the handler).
-  if settings.telegram.ENABLED and settings.telegram.LOG_ERRORS_ENABLED:
-    from broker.services.notification_service import telegram_log_handler
+  async with AsyncExitStack() as stack:
+    # Install the Telegram ERROR log handler first so failures during the rest
+    # of startup are already forwarded. ``start`` is idempotent when the
+    # feature is disabled (no records ever reach the handler).
+    if settings.telegram.ENABLED and settings.telegram.LOG_ERRORS_ENABLED:
+      from broker.services.notification_service import telegram_log_handler
 
-    telegram_log_handler.start(asyncio.get_running_loop())
+      telegram_log_handler.start(asyncio.get_running_loop())
+      stack.push_async_callback(telegram_log_handler.stop)
 
-  await init_db()
-  # NATS lifecycle alerts go through a queue as well: nats-py awaits the
-  # disconnected/reconnected callbacks inside its own reconnect loop, so a
-  # Telegram send that hangs for the full HTTP timeout would hold up the very
-  # reconnect the webhook is waiting on.
-  nats_notifier = QueuedNotifier(notifier)
-  await nats_notifier.start()
-  nats_client.set_notifier(nats_notifier)
-  await nats_client.connect()
+    await init_db()
+    stack.push_async_callback(close_db)
+    # NATS lifecycle alerts go through a queue as well: nats-py awaits the
+    # disconnected/reconnected callbacks inside its own reconnect loop, so a
+    # Telegram send that hangs for the full HTTP timeout would hold up the very
+    # reconnect the webhook is waiting on.
+    nats_notifier = QueuedNotifier(notifier)
+    await _start(stack, nats_notifier)
+    nats_client.set_notifier(nats_notifier)
+    await nats_client.connect()
+    stack.push_async_callback(nats_client.close)
 
-  publisher = NatsPublisher(connection=nats_client)
-  setting_repo = SqlAlchemySettingRepository()
-  signal_repo = SqlAlchemySignalRepository()
-  # Owner trade cards run off their own queue for the same reason as the signal
-  # notifications: nats-py awaits the TRADE callback before pulling the next
-  # event, so a DM to a throttled Telegram would stall the trade bookkeeping
-  # behind it. QueuedNotifier can't serve here — a card needs the message id its
-  # send returns — so the service owns the queue itself.
-  trade_card_service = TradeCardService(
-    broadcast_repository=SqlAlchemyTradeBroadcastRepository(),
-    notification_repository=SqlAlchemyTradeNotificationRepository(),
-    setting_repository=setting_repo,
-  )
-  await trade_card_service.start()
-  # Signal-cycle broadcaster writer + CDC dispatcher: signals and TRADE events
-  # only record cycle changes onto ``broadcast_messages``; a Postgres
-  # LISTEN/NOTIFY listener wakes the dispatcher which then edits the Telegram
-  # message. Keeping them separate takes Telegram off the signal path entirely.
-  signal_broadcaster = make_signal_broadcaster()
-  broadcast_dispatcher = make_broadcast_dispatcher(setting_repo)
-  consumer = TradeEventConsumer(
-    trade_repository=SqlAlchemyTradeRepository(),
-    connection=nats_client,
-    card_service=trade_card_service,
-    signal_broadcast_service=signal_broadcaster,
-  )
-  system_consumer = SystemEventConsumer(
-    setting_repository=setting_repo,
-    account_repository=SqlAlchemyAccountRepository(),
-    publisher=publisher,
-    signal_repository=signal_repo,
-    connection=nats_client,
-  )
-  # Signal notifications go out through a queue: the JetStream worker handles
-  # envelopes one at a time, so awaiting a Telegram send that a throttled
-  # network will hold for the full HTTP timeout would delay the *next* signal's
-  # fan-out to the trading workers.
-  signals_notifier = QueuedNotifier(make_signals_notifier(setting_repo))
-  await signals_notifier.start()
-  deferred_enqueuer = DeferredEnqueuer(publisher)
-  await deferred_enqueuer.start()
-  signal_service = SignalProcessingService(
-    signal_repository=signal_repo,
-    setting_repository=setting_repo,
-    publisher=publisher,
-    notifier=signals_notifier,
-    broadcaster=signal_broadcaster,
-    webhook_secret=settings.webhook.SECRET,
-    deferred_enqueuer=deferred_enqueuer,
-  )
-  # QTE's end-to-end drill. Given no publisher on purpose: it renders the
-  # Telegram card a real signal would get and can reach no worker — see
-  # broker/services/demo_signal_service.py. Its operator line goes through a
-  # queue for the same reason every other Telegram call on a NATS path does:
-  # nats-py awaits a subscription's callback before pulling that subscription's
-  # next message, and `make demo-signal` fires one drill per mounted strategy
-  # back to back — unqueued, a throttled Telegram would serialize the whole run
-  # behind one HTTP timeout each.
-  demo_notifier = QueuedNotifier(notifier)
-  await demo_notifier.start()
-  demo_consumer = DemoSignalConsumer(
-    broadcaster=signal_broadcaster,
-    notifier=demo_notifier,
-    connection=nats_client,
-  )
-  signal_worker = SignalWorker(service=signal_service, connection=nats_client)
-  signal_retry_job = SignalRetryJob(
-    service=signal_service,
-    signal_repository=signal_repo,
-    interval_seconds=settings.signal.RETRY_INTERVAL_SECONDS,
-  )
-  await consumer.start()
-  await system_consumer.start()
-  await demo_consumer.start()
-  await signal_worker.start()
-  await signal_retry_job.start()
-  await broadcast_dispatcher.start()
-  app.state.publisher = publisher
-  # The webhook route builds its own request-scoped service, but the deferred
-  # queue must outlive the request that filled it.
-  app.state.deferred_enqueuer = deferred_enqueuer
+    publisher = NatsPublisher(connection=nats_client)
+    setting_repo = SqlAlchemySettingRepository()
+    signal_repo = SqlAlchemySignalRepository()
+    # Owner trade cards run off their own queue for the same reason as the
+    # signal notifications: the TRADE consumer handles one report at a time, so
+    # a DM to a throttled Telegram would stall the trade bookkeeping behind it.
+    # QueuedNotifier can't serve here — a card needs the message id its send
+    # returns — so the service owns the queue itself.
+    trade_card_service = TradeCardService(
+      broadcast_repository=SqlAlchemyTradeBroadcastRepository(),
+      notification_repository=SqlAlchemyTradeNotificationRepository(),
+      setting_repository=setting_repo,
+    )
+    await _start(stack, trade_card_service)
+    # Signal-cycle broadcaster writer + CDC dispatcher: signals and TRADE events
+    # only record cycle changes onto ``broadcast_messages``; a Postgres
+    # LISTEN/NOTIFY listener wakes the dispatcher which then edits the Telegram
+    # message. Keeping them separate takes Telegram off the signal path entirely.
+    signal_broadcaster = make_signal_broadcaster()
+    broadcast_dispatcher = make_broadcast_dispatcher(setting_repo)
+    # Signal notifications go out through a queue: the JetStream worker handles
+    # envelopes one at a time, so awaiting a Telegram send that a throttled
+    # network will hold for the full HTTP timeout would delay the *next*
+    # signal's fan-out to the trading workers.
+    signals_notifier = QueuedNotifier(make_signals_notifier(setting_repo))
+    await _start(stack, signals_notifier)
+    # Stopped after the producers, so nothing is still being queued behind the
+    # flush, and before NATS closes, so a pending enqueue can still land.
+    deferred_enqueuer = DeferredEnqueuer(publisher)
+    await _start(stack, deferred_enqueuer)
+    # QTE's end-to-end drill. Given no publisher on purpose: it renders the
+    # Telegram card a real signal would get and can reach no worker — see
+    # broker/services/demo_signal_service.py. Its operator line goes through a
+    # queue for the same reason every other Telegram call on a NATS path does:
+    # nats-py awaits a subscription's callback before pulling that
+    # subscription's next message, and `make demo-signal` fires one drill per
+    # mounted strategy back to back — unqueued, a throttled Telegram would
+    # serialize the whole run behind one HTTP timeout each.
+    demo_notifier = QueuedNotifier(notifier)
+    await _start(stack, demo_notifier)
+    # Before the producers, so it stops after them: the sweeper's last pass
+    # drains anything they wrote to the broadcast log on their way out.
+    await _start(stack, broadcast_dispatcher)
 
-  api_prefix = (
-    f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
-  )
+    signal_service = SignalProcessingService(
+      signal_repository=signal_repo,
+      setting_repository=setting_repo,
+      publisher=publisher,
+      notifier=signals_notifier,
+      broadcaster=signal_broadcaster,
+      webhook_secret=settings.webhook.SECRET,
+      deferred_enqueuer=deferred_enqueuer,
+    )
+    producers = [
+      TradeEventConsumer(
+        trade_repository=SqlAlchemyTradeRepository(),
+        connection=nats_client,
+        card_service=trade_card_service,
+        signal_broadcast_service=signal_broadcaster,
+      ),
+      SystemEventConsumer(
+        setting_repository=setting_repo,
+        account_repository=SqlAlchemyAccountRepository(),
+        publisher=publisher,
+        signal_repository=signal_repo,
+        connection=nats_client,
+      ),
+      DemoSignalConsumer(
+        broadcaster=signal_broadcaster,
+        notifier=demo_notifier,
+        connection=nats_client,
+      ),
+      SignalWorker(service=signal_service, connection=nats_client),
+      SignalRetryJob(
+        service=signal_service,
+        signal_repository=signal_repo,
+        interval_seconds=settings.signal.RETRY_INTERVAL_SECONDS,
+      ),
+    ]
+    for producer in producers:
+      await _start(stack, producer)
 
-  # Notification: Startup
-  await notifier.send_message(
-    f"{em.BROKER_STARTED} <b>Broker Node Started</b>\n"
-    f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
-    f"{em.PLUG} NATS Listening: <code>{nats_client.listen_subjects_line()}</code>\n"
-    f"{em.DEMO_SIGNAL} NATS Drill: <code>{DEMO_SIGNAL_SUBJECT_FILTER}</code> (Telegram only)\n"
-    f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
-  )
+    app.state.publisher = publisher
+    # The webhook route builds its own request-scoped service, but the deferred
+    # queue must outlive the request that filled it.
+    app.state.deferred_enqueuer = deferred_enqueuer
 
-  yield
+    api_prefix = (
+      f"/{settings.broker_api.API_PREFIX}" if settings.broker_api.API_PREFIX else ""
+    )
 
-  # Notification: Shutdown
-  await notifier.send_message(
-    f"{em.BROKER_STOPPED} <b>Broker Node Stopped</b>\n"
-    f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
-  )
+    # Notification: Startup
+    await notifier.send_message(
+      f"{em.BROKER_STARTED} <b>Broker Node Started</b>\n"
+      f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
+      f"{em.PLUG} NATS Listening: <code>{nats_client.listen_subjects_line()}</code>\n"
+      f"{em.DEMO_SIGNAL} NATS Drill: <code>{DEMO_SIGNAL_SUBJECT_FILTER}</code> (Telegram only)\n"
+      f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
+    )
 
-  await signal_retry_job.stop()
-  await signal_worker.stop()
-  # Before the broadcast dispatcher, like every other producer: a drill still
-  # in flight should reach the write log the dispatcher's last sweep drains.
-  # Its notifier drains after it, so nothing is still being queued behind the
-  # flush.
-  await demo_consumer.stop()
-  await demo_notifier.stop()
-  # Broadcast dispatcher stops after the producers: the sweeper's last pass
-  # drains anything the JetStream handler queued on its way out.
-  await broadcast_dispatcher.stop()
-  # Drained after the producers stop, so nothing is still being queued behind
-  # the flush, and before NATS closes, so a pending enqueue can still land.
-  await deferred_enqueuer.stop()
-  await signals_notifier.stop()
-  await system_consumer.stop()
-  await consumer.stop()
-  # After the TRADE consumer, so nothing is still being queued behind the flush.
-  await trade_card_service.stop()
-  await nats_client.close()
-  await nats_notifier.stop()
-  await close_db()
+    try:
+      yield
+    finally:
+      # Notification: Shutdown — sent before anything stops, while NATS and the
+      # notifier queues are still up. The stack then unwinds every service.
+      await notifier.send_message(
+        f"{em.BROKER_STOPPED} <b>Broker Node Stopped</b>\n"
+        f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
+      )
 
-  if settings.telegram.ENABLED and settings.telegram.LOG_ERRORS_ENABLED:
-    from broker.services.notification_service import telegram_log_handler
 
-    await telegram_log_handler.stop()
+async def _start(stack: AsyncExitStack, service) -> None:
+  """Start *service* and register its ``stop`` for the reverse-order shutdown."""
+  await service.start()
+  stack.push_async_callback(service.stop)
 
 
 def install_webhook_connection_close(app: FastAPI) -> None:

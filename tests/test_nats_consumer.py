@@ -1,7 +1,7 @@
 import json
 
 from broker.schemas.trade_event_schema import PositionEvent
-from broker.services.nats_service import TradeEventConsumer
+from broker.services.nats_service import TradeEventConsumer, TradeOutcome
 
 
 class FakeTradeRepo:
@@ -74,8 +74,11 @@ async def test_invalid_schema_is_swallowed():
 async def test_repository_exception_does_not_propagate():
   repo = FakeTradeRepo(raise_exc=True)
   consumer = TradeEventConsumer(trade_repository=repo)
-  # Should log and return rather than raise.
-  await consumer.handle_subject_trade(FakeMsg(json.dumps(_valid_event_dict()).encode()))
+  # Should log and report a retry rather than raise.
+  outcome = await consumer.handle_subject_trade(
+    FakeMsg(json.dumps(_valid_event_dict()).encode())
+  )
+  assert outcome is TradeOutcome.RETRY
 
 
 class FakeCardService:
@@ -122,31 +125,38 @@ class FakeSubscription:
   async def unsubscribe(self):
     self.unsubscribed = True
 
+  async def fetch(self, batch, timeout=None):
+    raise TimeoutError
 
-class FakeConnNC:
+
+class FakeJetStream:
   def __init__(self):
-    self.subscribed_to = None
+    self.pull_subscribed: dict | None = None
     self._sub = FakeSubscription()
 
-  async def subscribe(self, subject, cb):
-    self.subscribed_to = subject
+  async def pull_subscribe(self, *, subject, durable, stream):
+    self.pull_subscribed = {"subject": subject, "durable": durable, "stream": stream}
     return self._sub
 
 
 class FakeConn:
   def __init__(self):
-    self.nc = FakeConnNC()
-
-  class LISTEN_SUBJECT:
-    value = "TRADE"
+    self.js = FakeJetStream()
 
 
-async def test_start_subscribes_to_listen_subject():
+async def test_start_pulls_from_the_trade_stream():
   repo = FakeTradeRepo()
   conn = FakeConn()
   consumer = TradeEventConsumer(trade_repository=repo, connection=conn)
   await consumer.start()
-  assert conn.nc.subscribed_to == "TRADE"
+  try:
+    assert conn.js.pull_subscribed == {
+      "subject": "TRADE",
+      "durable": "broker_trade_handler",
+      "stream": "TRADES",
+    }
+  finally:
+    await consumer.stop()
 
 
 async def test_stop_unsubscribes():
@@ -155,7 +165,7 @@ async def test_stop_unsubscribes():
   consumer = TradeEventConsumer(trade_repository=repo, connection=conn)
   await consumer.start()
   await consumer.stop()
-  assert conn.nc._sub.unsubscribed is True
+  assert conn.js._sub.unsubscribed is True
 
 
 async def test_stop_without_start_is_noop():
@@ -163,3 +173,54 @@ async def test_stop_without_start_is_noop():
   consumer = TradeEventConsumer(trade_repository=repo, connection=FakeConn())
   # No subscription yet; should not raise.
   await consumer.stop()
+
+
+# ── Settling: a report is acked only once it is persisted ───────────
+
+
+class SettlingMsg(FakeMsg):
+  def __init__(self, data: bytes):
+    super().__init__(data)
+    self.settled: list[tuple] = []
+
+  async def ack(self):
+    self.settled.append(("ack",))
+
+  async def nak(self, delay=None):
+    self.settled.append(("nak", delay))
+
+  async def term(self):
+    self.settled.append(("term",))
+
+
+async def test_persisted_report_is_acked():
+  consumer = TradeEventConsumer(trade_repository=FakeTradeRepo())
+  msg = SettlingMsg(json.dumps(_valid_event_dict()).encode())
+  await consumer._handle_one(msg)
+  assert msg.settled == [("ack",)]
+
+
+async def test_report_is_naked_with_delay_when_the_write_fails():
+  from broker.services.jetstream_worker import NAK_DELAY_SECONDS
+
+  consumer = TradeEventConsumer(trade_repository=FakeTradeRepo(raise_exc=True))
+  msg = SettlingMsg(json.dumps(_valid_event_dict()).encode())
+  await consumer._handle_one(msg)
+  # Left in the stream for redelivery instead of being dropped.
+  assert msg.settled == [("nak", NAK_DELAY_SECONDS)]
+
+
+async def test_unreadable_report_is_terminated():
+  consumer = TradeEventConsumer(trade_repository=FakeTradeRepo())
+  msg = SettlingMsg(b"{not-json")
+  await consumer._handle_one(msg)
+  assert msg.settled == [("term",)]
+
+
+async def test_card_failure_still_acks_the_persisted_report():
+  consumer = TradeEventConsumer(
+    trade_repository=FakeTradeRepo(), card_service=FakeCardService(raise_exc=True)
+  )
+  msg = SettlingMsg(json.dumps(_valid_event_dict()).encode())
+  await consumer._handle_one(msg)
+  assert msg.settled == [("ack",)]

@@ -23,7 +23,9 @@ There are three entry points, all built on the same fan-out helper:
 * ``handle_enqueued`` — called by ``SignalWorker``, the JetStream consumer
   defined below. Runs the block gate, persists the row (``status=QUEUED``,
   ``attempts=SIGNAL_MAX_ATTEMPTS``) and delegates to ``_fanout``. First
-  attempt on a signal.
+  attempt on a signal. The row is keyed by the JetStream message's identity
+  (``delivery_key``), so a *redelivery* of a message whose ack was lost finds
+  the row it already wrote instead of minting a second ``signal_id``.
 
 * ``retry_signal`` — called by the retry job. Loads the row (already
   persisted), rebuilds the payload from ``row.raw`` and delegates to
@@ -41,8 +43,9 @@ The service depends only on abstractions (``SignalRepository``,
 so all three flows can be exercised with in-memory fakes. It raises
 ``SignalError`` for HTTP translation on the enqueue path only.
 
-``SignalWorker`` pulls envelopes back off JetStream and hands them to
-``handle_enqueued`` — the webhook route only persists the signal and enqueues
+``SignalWorker`` (a ``JetStreamPullWorker``, see
+``broker/services/jetstream_worker.py``) pulls envelopes back off JetStream and
+hands them to ``handle_enqueued`` — the webhook route only persists the signal and enqueues
 it, so splitting the pipeline this way keeps the HTTP request short enough
 that TradingView's connection is not held open across the fan-out. JetStream's
 own redelivery handles crashes: an envelope is only ``ack``-ed after
@@ -60,11 +63,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from nats.js.errors import BadRequestError
 from pydantic import ValidationError
 
 from broker.constants import SIGNAL_BLOCKED
@@ -82,19 +85,13 @@ from broker.nats import (
   JETSTREAM_SIGNAL_STREAM,
   JETSTREAM_SIGNAL_SUBJECT_FILTER,
   NatsClient,
-  nats_client,
 )
 from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
+from broker.services.jetstream_worker import JetStreamPullWorker
 from broker.settings import settings
 
 log = get_logger(__name__)
-
-
-# Convenience getter kept out of the class to make it easier to import from
-# tests without instantiating the service.
-def attempt_number_for_notification(attempts_before: int) -> Optional[int]:
-  return _attempt_number_for_notification(attempts_before)
 
 
 class SignalError(Exception):
@@ -104,6 +101,15 @@ class SignalError(Exception):
     super().__init__(detail)
     self.status_code = status_code
     self.detail = detail
+
+
+class SignalParseError(Exception):
+  """The payload cannot become a ``TradingSignal`` — and never will.
+
+  Raised by the fan-out instead of the parser's own exception so the caller
+  can tell a deterministic failure (retrying is pointless) from a transient
+  publish failure (retrying is the point).
+  """
 
 
 # Envelopes waiting on a JetStream that would not ack in time. Bounded so a
@@ -163,11 +169,15 @@ class DeferredEnqueuer:
     )
     self._queue: asyncio.Queue[_DeferredEnvelope] = asyncio.Queue(maxsize=maxsize)
     self._task: Optional[asyncio.Task] = None
+    # The envelope the loop has taken off the queue and not yet settled. A
+    # cancel can land while it waits out the retry interval — off the queue
+    # and not yet back on it — so ``stop`` must know about it to not lose it.
+    self._in_flight: Optional[_DeferredEnvelope] = None
 
   @property
   def pending(self) -> int:
     """Envelopes still owed to JetStream."""
-    return self._queue.qsize()
+    return self._queue.qsize() + (1 if self._in_flight is not None else 0)
 
   async def start(self) -> None:
     """Launch the retry loop; safe to call once per app lifetime."""
@@ -180,8 +190,14 @@ class DeferredEnqueuer:
       self._max_attempts,
     )
 
-  async def stop(self) -> None:
-    """Cancel the retry loop, reporting anything left unqueued."""
+  async def stop(self, drain_timeout: float = 5.0) -> None:
+    """Cancel the retry loop, then try every envelope still owed once more.
+
+    The backlog lives only in memory, so whatever is left at shutdown is lost
+    with the process. One last publish per envelope, inside *drain_timeout*
+    overall, rescues the ones a NATS that has since recovered will take; the
+    rest are reported at ``error``.
+    """
     if self._task is not None:
       self._task.cancel()
       try:
@@ -189,12 +205,56 @@ class DeferredEnqueuer:
       except asyncio.CancelledError:
         pass
       self._task = None
-    if self.pending:
+
+    leftovers: list[_DeferredEnvelope] = []
+    if self._in_flight is not None:
+      leftovers.append(self._in_flight)
+      self._in_flight = None
+    while not self._queue.empty():
+      leftovers.append(self._queue.get_nowait())
+      self._queue.task_done()
+
+    lost = await self._drain(leftovers, drain_timeout) if leftovers else 0
+    if lost:
       log.error(
-        "Deferred webhook enqueue stopped with %d envelope(s) never queued",
-        self.pending,
+        "Deferred webhook enqueue stopped with %d envelope(s) never queued", lost
       )
     log.info("Deferred webhook enqueue worker stopped.")
+
+  async def _drain(self, items: list[_DeferredEnvelope], timeout: float) -> int:
+    """Publish *items* once each within *timeout*; return how many failed."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    lost = 0
+    for item in items:
+      remaining = deadline - loop.time()
+      if remaining <= 0:
+        lost += 1
+        continue
+      try:
+        await asyncio.wait_for(
+          self._publisher.publish_webhook_event(
+            signal_id="",
+            strategy=item.strategy,
+            envelope=item.envelope,
+            msg_id=item.msg_id,
+          ),
+          timeout=remaining,
+        )
+        log.info(
+          "Deferred enqueue flushed on shutdown strategy=%s msg_id=%s",
+          item.strategy,
+          item.msg_id,
+        )
+      except Exception as exc:
+        lost += 1
+        log.error(
+          "Deferred enqueue lost on shutdown strategy=%s msg_id=%s: %s",
+          item.strategy,
+          item.msg_id,
+          exc,
+        )
+    return lost
 
   def submit(self, *, strategy: str, envelope: dict, msg_id: str) -> bool:
     """Take ownership of *envelope*. Synchronous and non-blocking by design —
@@ -226,11 +286,15 @@ class DeferredEnqueuer:
   async def _run(self) -> None:
     while True:
       item = await self._queue.get()
+      self._in_flight = item
       try:
         await self._attempt(item)
+        self._in_flight = None
       except asyncio.CancelledError:
+        # Leave ``_in_flight`` set: ``stop`` drains it.
         raise
       except Exception as exc:
+        self._in_flight = None
         # A bad item must never kill the loop — the next signal still needs it.
         log.exception("Deferred enqueue attempt crashed: %s", exc)
       finally:
@@ -287,7 +351,9 @@ class DeferredEnqueuer:
     )
 
 
-def _attempt_number_for_notification(attempts_before: int) -> int | None:
+def _attempt_number_for_notification(
+  attempts_before: int, max_attempts: int | None = None
+) -> int | None:
   """Sequence number (1-based) of the current attempt for the Telegram line.
 
   Rendered as ``Attempt: N`` only for the 2nd and 3rd attempt on a signal —
@@ -296,7 +362,9 @@ def _attempt_number_for_notification(attempts_before: int) -> int | None:
   """
   if attempts_before > 2:
     return None
-  return settings.signal.MAX_ATTEMPTS - attempts_before + 1
+  if max_attempts is None:
+    max_attempts = settings.signal.MAX_ATTEMPTS
+  return max_attempts - attempts_before + 1
 
 
 class SignalProcessingService:
@@ -312,6 +380,8 @@ class SignalProcessingService:
     broadcaster: SignalBroadcaster | None = None,
     webhook_secret: str,
     deferred_enqueuer: Optional[DeferredEnqueuer] = None,
+    enqueue_timeout: float | None = None,
+    max_attempts: int | None = None,
   ) -> None:
     self._signals = signal_repository
     self._settings = setting_repository
@@ -324,6 +394,16 @@ class SignalProcessingService:
     self._broadcaster = broadcaster
     self._webhook_secret = webhook_secret
     self._deferred = deferred_enqueuer
+    # Injected for tests and alternative wiring; production takes both from
+    # the settings, like every other tunable of the pipeline.
+    self._enqueue_timeout = (
+      enqueue_timeout
+      if enqueue_timeout is not None
+      else settings.webhook.ENQUEUE_TIMEOUT
+    )
+    self._max_attempts = (
+      max_attempts if max_attempts is not None else settings.signal.MAX_ATTEMPTS
+    )
 
   # ── Enqueue path (called from the webhook route) ───────────────────
 
@@ -345,7 +425,7 @@ class SignalProcessingService:
     # whose first ack was merely slow is de-duplicated by JetStream instead of
     # reaching workers twice.
     msg_id = uuid.uuid4().hex
-    deadline = settings.webhook.ENQUEUE_TIMEOUT
+    deadline = self._enqueue_timeout
 
     try:
       # Belt and braces: the inner timeout is nats-py's own bound on the
@@ -386,7 +466,7 @@ class SignalProcessingService:
     """
     log.warning(
       "JetStream enqueue did not complete within %.2fs strategy=%s: %s",
-      settings.webhook.ENQUEUE_TIMEOUT,
+      self._enqueue_timeout,
       payload.strategy,
       exc,
     )
@@ -401,32 +481,67 @@ class SignalProcessingService:
       "timestamp": payload.timestamp.isoformat(),
     }
 
-  # Backwards-compat alias so tests / callers that still say ``.process`` keep
-  # working. The webhook route uses ``enqueue`` directly.
-  process = enqueue
-
   # ── Handler path (called from the JetStream consumer) ──────────────
 
-  async def handle_enqueued(self, payload: WebhookPayload) -> Dict[str, Any]:
+  async def handle_enqueued(
+    self, payload: WebhookPayload, delivery_key: str | None = None
+  ) -> Dict[str, Any]:
     """First-time processing of a JetStream envelope.
 
     Checks the block gate (blocked signals get a notification and are dropped
     without persisting — matches the pre-JetStream 403 behaviour aside from
     the fact TradingView already got its 202), persists the row and delegates
     to the fan-out. Raises on persist failure so JetStream redelivers.
+
+    *delivery_key* is the JetStream message's identity. When a row already
+    carries it, this delivery is a redelivery — the broker crashed after the
+    first one, or its ack was lost — and the row decides what happens:
+
+    * ``QUEUED`` with no recorded attempt: the first fan-out was interrupted
+      and may or may not have reached the workers. Fan out again **with the
+      same ``signal_id``**, which workers de-duplicate on, so the signal is
+      delivered at least once and executed at most once.
+    * anything else (``PUBLISHED``, ``FAILED``, or a recorded failure the
+      retry job now owns): already handled — ack and stop.
     """
     if await self._is_blocked(payload):
       return {"status": "blocked"}
 
-    signal_id = await self._signals.log_signal(payload)
+    if delivery_key is not None:
+      existing = await self._signals.get_by_delivery_key(delivery_key)
+      if existing is not None:
+        return await self._handle_redelivery(existing, payload)
+
+    signal_id = await self._signals.log_signal(payload, delivery_key=delivery_key)
     if not signal_id:
       raise RuntimeError("Failed to persist signal into database")
 
     return await self._fanout(
       signal_id=signal_id,
       payload=payload,
-      attempts_before=settings.signal.MAX_ATTEMPTS,
+      attempts_before=self._max_attempts,
     )
+
+  async def _handle_redelivery(self, row, payload: WebhookPayload) -> Dict[str, Any]:
+    """A JetStream message came back for a row that already exists."""
+    signal_id = str(row.id)
+    if row.status == SignalStatusEnum.QUEUED and row.last_attempt is None:
+      log.warning(
+        "Redelivered signal_id=%s was never confirmed published — fanning out "
+        "again under the same signal_id",
+        signal_id,
+      )
+      return await self._fanout(
+        signal_id=signal_id,
+        payload=payload,
+        attempts_before=row.attempts,
+      )
+    log.info(
+      "Redelivered signal_id=%s already handled (status=%s) — not re-sent",
+      signal_id,
+      row.status,
+    )
+    return {"status": "duplicate", "signal_id": signal_id}
 
   # ── Retry path (called from the retry job) ─────────────────────────
 
@@ -479,6 +594,12 @@ class SignalProcessingService:
         await self._publish_flat(payload, signal_id)
       else:
         await self._publish_signal(payload, signal_id)
+    except SignalParseError as exc:
+      # Deterministic: the same payload fails the same way on every attempt,
+      # so give up now rather than spend the remaining retries on it.
+      log.error("Signal %s cannot be parsed, marked FAILED: %s", signal_id, exc)
+      await self._signals.mark_failed(signal_id)
+      return {"status": "invalid", "signal_id": signal_id}
     except Exception as exc:
       log.exception(
         "Fan-out publish failed signal_id=%s attempts_before=%d: %s",
@@ -509,12 +630,20 @@ class SignalProcessingService:
   def _verify_token(self, payload: WebhookPayload) -> None:
     if not self._webhook_secret:
       raise SignalError(500, "Webhook secret not configured")
-    if payload.token != self._webhook_secret:
+    # Constant-time, so response timing cannot be used to guess the token
+    # byte by byte.
+    if not secrets.compare_digest(
+      payload.token.encode(), self._webhook_secret.encode()
+    ):
       log.warning("Invalid token received in webhook payload")
       raise SignalError(401, "Invalid token received in webhook payload")
 
   async def _is_blocked(self, payload: WebhookPayload) -> bool:
-    if await self._settings.get(SIGNAL_BLOCKED) != "1":
+    # ``get_strict`` raises on a failed read instead of answering "not set":
+    # the gate fails closed, the handler NAKs, and JetStream redelivers once
+    # the database answers again — rather than a block an operator switched
+    # on being skipped because one read timed out.
+    if await self._settings.get_strict(SIGNAL_BLOCKED) != "1":
       return False
     log.warning("Signal blocked: %s is enabled", SIGNAL_BLOCKED)
     try:
@@ -540,9 +669,9 @@ class SignalProcessingService:
       signal = parse_signal(payload, signal_id)
     except Exception as exc:
       log.exception("Signal parse error for %s: %s", payload.symbol, exc)
-      # A parse failure is not transient — bubble a sentinel exception so the
-      # caller records the attempt and stops trying.
-      raise
+      # A parse failure is not transient — raise the sentinel so the caller
+      # marks the row FAILED instead of retrying it.
+      raise SignalParseError(str(exc)) from exc
 
     await self._publisher.publish(signal=signal)
 
@@ -559,94 +688,59 @@ class SignalProcessingService:
     try:
       await self._broadcaster.broadcast(
         payload,
-        attempt_number=_attempt_number_for_notification(attempts_before),
+        attempt_number=_attempt_number_for_notification(
+          attempts_before, self._max_attempts
+        ),
       )
     except Exception as exc:
       log.warning("Signal broadcast failed: %s", exc)
 
 
-class SignalWorker:
-  """Pulls JetStream envelopes and hands them to ``SignalProcessingService``."""
+def delivery_key_for(msg) -> str | None:
+  """Identity of a JetStream message that survives its redelivery.
+
+  The webhook stamps every envelope with a ``Nats-Msg-Id`` (also JetStream's
+  de-duplication id), so that is the key whenever it is there. A producer that
+  publishes straight onto ``SIGNALS.<strategy>`` without one (QTE's ``nats``
+  transport may) still gets a stable key from the message's stream sequence,
+  paired with the time the stream stored it so a stream that is recreated —
+  and restarts its sequence at 1 — cannot collide with an older row.
+
+  ``None`` when the message carries neither (a hand-built message in a test),
+  which simply turns the redelivery check off for it.
+  """
+  headers = getattr(msg, "headers", None) or {}
+  msg_id = headers.get("Nats-Msg-Id")
+  if msg_id:
+    return f"msgid:{msg_id}"[:128]
+  try:
+    metadata = msg.metadata
+    key = (
+      f"seq:{metadata.stream}:{metadata.sequence.stream}"
+      f"@{metadata.timestamp.isoformat()}"
+    )
+  except Exception:
+    return None
+  return key[:128]
+
+
+class SignalWorker(JetStreamPullWorker):
+  """Pulls ``SIGNALS`` envelopes and hands them to ``SignalProcessingService``."""
+
+  worker_name = "signal-worker"
 
   def __init__(
     self,
     service: SignalProcessingService,
     connection: NatsClient | None = None,
   ) -> None:
-    self._service = service
-    self._conn = connection or nats_client
-    self._task: Optional[asyncio.Task] = None
-    self._stop = asyncio.Event()
-    self._sub = None
-
-  async def start(self) -> None:
-    """Create the durable pull consumer and launch the background fetch loop."""
-    try:
-      self._sub = await self._conn.js.pull_subscribe(
-        subject=JETSTREAM_SIGNAL_SUBJECT_FILTER,
-        durable=settings.jetstream.SIGNAL_CONSUMER,
-        stream=JETSTREAM_SIGNAL_STREAM,
-      )
-    except BadRequestError as exc:
-      log.error(
-        "Failed to create JetStream pull consumer '%s': %s",
-        settings.jetstream.SIGNAL_CONSUMER,
-        exc,
-      )
-      raise
-
-    self._stop.clear()
-    self._task = asyncio.create_task(self._run(), name="signal-worker")
-    log.info(
-      "JetStream signal worker started stream=%s consumer=%s subject=%s",
-      JETSTREAM_SIGNAL_STREAM,
-      settings.jetstream.SIGNAL_CONSUMER,
-      JETSTREAM_SIGNAL_SUBJECT_FILTER,
+    super().__init__(
+      connection=connection,
+      stream=JETSTREAM_SIGNAL_STREAM,
+      subject=JETSTREAM_SIGNAL_SUBJECT_FILTER,
+      durable=settings.jetstream.SIGNAL_CONSUMER,
     )
-
-  async def stop(self) -> None:
-    """Stop the fetch loop and wait for the current message to finish."""
-    self._stop.set()
-    if self._task is not None:
-      try:
-        await self._task
-      except asyncio.CancelledError:
-        pass
-      self._task = None
-    if self._sub is not None:
-      try:
-        await self._sub.unsubscribe()
-      except Exception as exc:
-        log.warning("Failed to unsubscribe JetStream signal worker: %s", exc)
-    log.info("JetStream signal worker stopped.")
-
-  async def _run(self) -> None:
-    while not self._stop.is_set():
-      try:
-        msgs = await self._sub.fetch(
-          settings.jetstream.FETCH_BATCH,
-          timeout=settings.jetstream.FETCH_TIMEOUT_SECONDS,
-        )
-      except TimeoutError:
-        # An empty fetch window is the normal idle case, not an error. Catch the
-        # built-in base class: nats-py re-raises a bare ``asyncio.TimeoutError``
-        # (which *is* ``builtins.TimeoutError`` since 3.11) when the window
-        # expires before any message or status reply arrives, and only wraps it
-        # as ``FetchTimeoutError`` once the server has answered. The base also
-        # covers ``nats.errors.TimeoutError`` and ``FetchTimeoutError``, both of
-        # which derive from it.
-        continue
-      except asyncio.CancelledError:
-        raise
-      except Exception as exc:
-        log.exception("JetStream fetch failed: %s", exc)
-        # Back off briefly on unexpected errors so we don't spin at 100% CPU
-        # if the connection is in a broken state; ``stop`` breaks out early.
-        await asyncio.sleep(1.0)
-        continue
-
-      for msg in msgs:
-        await self._handle_one(msg)
+    self._service = service
 
   async def _handle_one(self, msg) -> None:
     """Deserialize one envelope, run the pipeline, ack or NAK accordingly."""
@@ -672,6 +766,8 @@ class SignalWorker:
       await self._term(msg)
       return
 
+    delivery_key = delivery_key_for(msg)
+
     try:
       # ``handle_enqueued`` records per-attempt failures onto the persisted
       # row itself (attempts / last_attempt / FAILED). The JetStream message
@@ -680,28 +776,10 @@ class SignalWorker:
       # the DB-tracked retry job. We only NAK for exceptions that fell out
       # of the service entirely (e.g. persist failed before an attempt was
       # even recorded), so JetStream can retry the persist itself.
-      await self._service.handle_enqueued(payload=payload)
+      await self._service.handle_enqueued(payload=payload, delivery_key=delivery_key)
     except Exception as exc:
       log.exception("SIGNAL handler failed: %s — leaving for JetStream redelivery", exc)
       await self._nak(msg)
       return
 
     await self._ack(msg)
-
-  async def _ack(self, msg) -> None:
-    try:
-      await msg.ack()
-    except Exception as exc:
-      log.warning("Failed to ack JetStream message: %s", exc)
-
-  async def _nak(self, msg) -> None:
-    try:
-      await msg.nak()
-    except Exception as exc:
-      log.warning("Failed to nak JetStream message: %s", exc)
-
-  async def _term(self, msg) -> None:
-    try:
-      await msg.term()
-    except Exception as exc:
-      log.warning("Failed to term JetStream message: %s", exc)

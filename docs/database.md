@@ -18,9 +18,10 @@
 | `risk_percent` | Numeric(10,4) | Risk percentage for position sizing |
 | `is_scale_position` | Boolean | Whether this signal scales into an existing position |
 | `scale_strategy` | String(50) (Nullable) | Scale-in strategy name (e.g. `add_on_pullback`) |
-| `status` | Enum | Delivery state: `QUEUED` on insert, `PUBLISHED` after a successful fan-out, `FAILED` once every attempt has been exhausted |
+| `status` | Enum | Delivery state: `QUEUED` on insert, `PUBLISHED` after a successful fan-out, `FAILED` once every attempt has been exhausted — or at once when the payload cannot be parsed into a `TradingSignal` |
 | `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.signal.MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
 | `last_attempt` | DateTime (Nullable) | Timestamp of the most recent fan-out attempt (`NULL` before the first attempt). Drives the retry job's minimum-gap filter. |
+| `delivery_key` | String(128) (Nullable, unique) | Identity of the JetStream message the row was persisted from (`msgid:<Nats-Msg-Id>`, or `seq:<stream>:<seq>@<stored-at>`). A redelivery of the same message finds this row instead of creating a second `signal_id`. `NULL` on rows that predate the column. |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
 | `raw` | JSONB (Nullable) | Raw webhook payload |

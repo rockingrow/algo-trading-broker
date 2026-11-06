@@ -34,6 +34,19 @@ JETSTREAM_SIGNAL_STREAM = "SIGNALS"
 JETSTREAM_SIGNAL_SUBJECT_PREFIX = "SIGNALS"
 JETSTREAM_SIGNAL_SUBJECT_FILTER = "SIGNALS.>"
 
+# JetStream stream that makes worker TRADE reports durable. Workers keep
+# publishing plain core NATS on ``TRADE``; the stream captures those publishes,
+# so a report that arrives while the broker is down or its database is
+# unreachable waits in the stream instead of being dropped — the core
+# subscription it replaced was at-most-once. Work-queue retention removes a
+# report once ``TradeEventConsumer`` has acked it.
+JETSTREAM_TRADE_STREAM = "TRADES"
+JETSTREAM_TRADE_SUBJECT = "TRADE"
+
+# Name the broker's own NATS connection reports to the server, so read-only
+# probes (``make status``) can tell it apart from engines and workers.
+BROKER_CLIENT_NAME = "algo-trading-broker"
+
 # Core-NATS namespace QTE fires its end-to-end drill at — see
 # ``broker/services/demo_signal_service.py``. A demo envelope is a full
 # ``WebhookPayload`` and is rendered to Telegram like any other signal, but it
@@ -117,6 +130,7 @@ class NatsClient:
     """Establish connection to the NATS server."""
     opts: dict = {
       "servers": [settings.nats_url],
+      "name": BROKER_CLIENT_NAME,
       "max_reconnect_attempts": -1,
       "reconnect_time_wait": 5,
       "disconnected_cb": self._on_disconnected,
@@ -131,40 +145,62 @@ class NatsClient:
     log.info("NATS connected to %s", settings.nats_url)
 
     await self.ensure_signal_stream()
+    await self.ensure_trade_stream()
 
   async def ensure_signal_stream(self) -> None:
     """Idempotently create the JetStream stream that backs webhook events.
 
     The webhook endpoint must succeed as long as JetStream itself is reachable,
-    so the stream has to exist before the first ``publish`` call. Calling
+    so the stream has to exist before the first ``publish`` call.
+    """
+    await self._ensure_stream(
+      StreamConfig(
+        name=JETSTREAM_SIGNAL_STREAM,
+        subjects=[JETSTREAM_SIGNAL_SUBJECT_FILTER],
+        retention=RetentionPolicy.WORK_QUEUE,
+        storage=StorageType.FILE,
+        max_msgs=-1,
+        max_bytes=-1,
+        duplicate_window=JETSTREAM_DUPLICATE_WINDOW_SECONDS,
+      )
+    )
+
+  async def ensure_trade_stream(self) -> None:
+    """Idempotently create the stream that captures workers' ``TRADE`` reports."""
+    await self._ensure_stream(
+      StreamConfig(
+        name=JETSTREAM_TRADE_STREAM,
+        subjects=[JETSTREAM_TRADE_SUBJECT],
+        retention=RetentionPolicy.WORK_QUEUE,
+        storage=StorageType.FILE,
+        max_msgs=-1,
+        max_bytes=-1,
+        duplicate_window=JETSTREAM_DUPLICATE_WINDOW_SECONDS,
+      )
+    )
+
+  async def _ensure_stream(self, config: StreamConfig) -> None:
+    """Create *config*'s stream, or reconcile an existing one to it.
+
     ``add_stream`` on an existing stream is a no-op when the config matches; a
     mismatch (an older stream created before ``duplicate_window`` was set, or
     someone tweaking retention/storage out-of-band) is reconciled with
     ``update_stream`` so a deployment that predates a config change does not
     silently keep running on the old one.
     """
-    config = StreamConfig(
-      name=JETSTREAM_SIGNAL_STREAM,
-      subjects=[JETSTREAM_SIGNAL_SUBJECT_FILTER],
-      retention=RetentionPolicy.WORK_QUEUE,
-      storage=StorageType.FILE,
-      max_msgs=-1,
-      max_bytes=-1,
-      duplicate_window=JETSTREAM_DUPLICATE_WINDOW_SECONDS,
-    )
     try:
       await self.js.add_stream(config=config)
       log.info(
         "JetStream stream ensured: %s (subjects=%s, duplicate_window=%.0fs)",
-        JETSTREAM_SIGNAL_STREAM,
-        JETSTREAM_SIGNAL_SUBJECT_FILTER,
-        JETSTREAM_DUPLICATE_WINDOW_SECONDS,
+        config.name,
+        ",".join(config.subjects or []),
+        config.duplicate_window,
       )
       return
     except BadRequestError as exc:
       log.info(
         "JetStream stream '%s' exists with a different config (%s) — updating it",
-        JETSTREAM_SIGNAL_STREAM,
+        config.name,
         exc,
       )
 
@@ -172,17 +208,17 @@ class NatsClient:
       await self.js.update_stream(config=config)
       log.info(
         "JetStream stream '%s' reconciled (duplicate_window=%.0fs)",
-        JETSTREAM_SIGNAL_STREAM,
-        JETSTREAM_DUPLICATE_WINDOW_SECONDS,
+        config.name,
+        config.duplicate_window,
       )
     except Exception as exc:
       # Not every field can be updated in place (storage type, for one). Keep
       # running on the existing stream rather than refusing to start — the
-      # webhook still works, it just does not get this config's guarantees.
+      # broker still works, it just does not get this config's guarantees.
       log.warning(
         "Failed to reconcile JetStream stream '%s': %s. "
-        "Enqueue de-duplication may be inactive.",
-        JETSTREAM_SIGNAL_STREAM,
+        "Its de-duplication or retention may differ from the expected config.",
+        config.name,
         exc,
       )
 

@@ -7,7 +7,8 @@ inbound consumption.
   flow) depend on this narrow interface and never see the inbound consumer
   machinery below.
 
-- ``TradeEventConsumer`` subscribes to the TRADE subject and applies each
+- ``TradeEventConsumer`` drains the ``TRADES`` JetStream stream (which captures
+  the core ``TRADE`` subject workers publish on) and applies each
   position event to the trades table via an injected ``TradeRepository``. It
   depends on the repository abstraction, not on a concrete persistence
   function.
@@ -77,6 +78,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
+from enum import Enum
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -104,18 +106,26 @@ from broker.interfaces import (
   TradeRepository,
 )
 from broker.logger import get_logger
-from broker.nats import JETSTREAM_SIGNAL_SUBJECT_PREFIX, NatsClient, nats_client
+from broker.nats import (
+  JETSTREAM_SIGNAL_SUBJECT_PREFIX,
+  JETSTREAM_TRADE_STREAM,
+  JETSTREAM_TRADE_SUBJECT,
+  NatsClient,
+  nats_client,
+)
 from broker.schemas.account_schema import (
   AccountSettings,
   MarketTypeEnum,
   decompose_worker_id,
 )
+from broker.services.jetstream_worker import JetStreamPullWorker
 from broker.services.account_settings_service import (
   parse_account_settings,
   parse_global_max_open_orders,
   resolve_account_settings,
 )
 from broker.schemas.core import MarketEnum, SignalActionEnum
+from broker.settings import settings
 from broker.schemas.publisher_schema import (
   AdminSignal,
   CryptoLeverageConfig,
@@ -195,8 +205,23 @@ def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
   return result
 
 
-class TradeEventConsumer:
-  """Consumes TRADE events from NATS and persists them via a TradeRepository.
+class TradeOutcome(Enum):
+  """What happened to one TRADE report — decides ack, NAK or term."""
+
+  PERSISTED = "persisted"
+  UNREADABLE = "unreadable"
+  RETRY = "retry"
+
+
+class TradeEventConsumer(JetStreamPullWorker):
+  """Consumes TRADE events from JetStream and persists them via a TradeRepository.
+
+  Workers publish their reports as plain core NATS on ``TRADE``; the ``TRADES``
+  stream captures them, and this durable pull consumer drains it. A report is
+  acked only once it is persisted, so a database outage or a broker restart
+  delays it instead of losing it (the core subscription it replaced dropped
+  every report that arrived while the write failed). A report that can never
+  be read — bad JSON, a schema mismatch — is terminated, not retried.
 
   When a ``TradeCardService`` is injected, each persisted event is also handed
   to it so the trade's live Telegram card is posted or refreshed for every
@@ -206,6 +231,8 @@ class TradeEventConsumer:
   best-effort and never block persistence.
   """
 
+  worker_name = "trade-worker"
+
   def __init__(
     self,
     trade_repository: TradeRepository,
@@ -213,40 +240,38 @@ class TradeEventConsumer:
     card_service: "TradeCardService | None" = None,
     signal_broadcast_service: "SignalBroadcastService | None" = None,
   ) -> None:
+    super().__init__(
+      connection=connection,
+      stream=JETSTREAM_TRADE_STREAM,
+      subject=JETSTREAM_TRADE_SUBJECT,
+      durable=settings.jetstream.TRADE_CONSUMER,
+    )
     self._repo = trade_repository
-    self._conn = connection or nats_client
     self._cards = card_service
     self._signal_broadcast = signal_broadcast_service
-    self._sub: Optional[Subscription] = None
 
-  async def start(self) -> None:
-    """Subscribe to the TRADE subject using the shared NATS connection."""
-    self._sub = await self._conn.nc.subscribe(
-      self._conn.LISTEN_SUBJECT.value, cb=self.handle_subject_trade
-    )
-    log.info("NATS trade listener subscribed to '%s'", self._conn.LISTEN_SUBJECT.value)
+  async def _handle_one(self, msg) -> None:
+    """Process one report and settle it according to the outcome."""
+    outcome = await self.handle_subject_trade(msg)
+    if outcome is TradeOutcome.PERSISTED:
+      await self._ack(msg)
+    elif outcome is TradeOutcome.UNREADABLE:
+      await self._term(msg)
+    else:
+      await self._nak(msg)
 
-  async def stop(self) -> None:
-    """Unsubscribe from the TRADE subject."""
-    if self._sub is not None:
-      try:
-        await self._sub.unsubscribe()
-      except Exception as exc:
-        log.warning("Failed to unsubscribe TRADE listener: %s", exc)
-    log.info("NATS trade listener stopped.")
-
-  async def handle_subject_trade(self, msg) -> None:
-    """Handle incoming TRADE events from the NATS subject."""
+  async def handle_subject_trade(self, msg) -> "TradeOutcome":
+    """Parse, persist and fan out one TRADE report. Never raises."""
     raw = msg.data.decode()
     try:
       data = json.loads(raw)
       event = PositionEvent(**data)
     except json.JSONDecodeError as exc:
       log.error("TRADE listener: malformed JSON: %s | raw=%s", exc, raw)
-      return
+      return TradeOutcome.UNREADABLE
     except ValidationError as exc:
       log.error("TRADE listener: invalid PositionEvent: %s | raw=%s", exc, raw)
-      return
+      return TradeOutcome.UNREADABLE
 
     log.info(
       "TRADE event=%s account_id=%s ref_id=%s status=%s",
@@ -258,8 +283,8 @@ class TradeEventConsumer:
     try:
       trade = await self._repo.upsert_by_position_event(event)
     except Exception as exc:
-      log.exception("Failed to apply TRADE event: %s", exc)
-      return
+      log.exception("Failed to apply TRADE event — left for redelivery: %s", exc)
+      return TradeOutcome.RETRY
 
     if self._cards is not None:
       try:
@@ -274,6 +299,8 @@ class TradeEventConsumer:
       except Exception as exc:
         # Same rule: the execution table is a nicety on top of the TRADE row.
         log.exception("Failed to record execution on the broadcast cycle: %s", exc)
+
+    return TradeOutcome.PERSISTED
 
 
 class SystemEventConsumer:
