@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.services.nats_service import TradeEventConsumer, TradeOutcome
 
@@ -224,3 +226,58 @@ async def test_card_failure_still_acks_the_persisted_report():
   msg = SettlingMsg(json.dumps(_valid_event_dict()).encode())
   await consumer._handle_one(msg)
   assert msg.settled == [("ack",)]
+
+
+@pytest.mark.parametrize(
+  "raw", [b"[]", b'"x"', b"\xff\xfe"], ids=["array", "string", "invalid-utf8"]
+)
+async def test_a_report_that_is_not_an_object_is_terminated(raw):
+  consumer = TradeEventConsumer(trade_repository=FakeTradeRepo())
+  msg = SettlingMsg(raw)
+  await consumer._handle_one(msg)
+  assert msg.settled == [("term",)]
+
+
+async def test_a_report_failing_for_too_long_is_given_up_on():
+  from types import SimpleNamespace
+
+  from broker.services.nats_service import TRADE_MAX_DELIVERIES
+
+  consumer = TradeEventConsumer(trade_repository=FakeTradeRepo(raise_exc=True))
+  msg = SettlingMsg(json.dumps(_valid_event_dict()).encode())
+  msg.metadata = SimpleNamespace(num_delivered=TRADE_MAX_DELIVERIES)
+  await consumer._handle_one(msg)
+  assert msg.settled == [("term",)]
+
+
+class BrokenJetStream:
+  async def pull_subscribe(self, **kwargs):
+    from nats.js.errors import NotFoundError
+
+    raise NotFoundError()
+
+
+class CoreNC:
+  def __init__(self):
+    self.subscribed: list[str] = []
+    self.sub = FakeSubscription()
+
+  async def subscribe(self, subject, cb):
+    self.subscribed.append(subject)
+    return self.sub
+
+
+class ConnWithoutStream:
+  def __init__(self):
+    self.js = BrokenJetStream()
+    self.nc = CoreNC()
+
+
+async def test_start_falls_back_to_core_nats_when_the_stream_is_unusable():
+  conn = ConnWithoutStream()
+  consumer = TradeEventConsumer(trade_repository=FakeTradeRepo(), connection=conn)
+  # The broker must still start: TRADE durability is not a precondition.
+  await consumer.start()
+  assert conn.nc.subscribed == ["TRADE"]
+  await consumer.stop()
+  assert conn.nc.sub.unsubscribed is True

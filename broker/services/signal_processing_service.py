@@ -88,7 +88,7 @@ from broker.nats import (
 )
 from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
-from broker.services.jetstream_worker import JetStreamPullWorker
+from broker.services.jetstream_worker import JetStreamPullWorker, delivery_count
 from broker.settings import settings
 
 log = get_logger(__name__)
@@ -101,6 +101,12 @@ class SignalError(Exception):
     super().__init__(detail)
     self.status_code = status_code
     self.detail = detail
+
+
+# Pauses before each in-place retry of an envelope whose handler raised, before
+# it is NAK-ed. About seven seconds in all: enough to ride out a database
+# failover or a dropped connection, short of JetStream's 30s ack wait.
+INLINE_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0)
 
 
 class SignalParseError(Exception):
@@ -367,6 +373,11 @@ def _attempt_number_for_notification(
   return max_attempts - attempts_before + 1
 
 
+def _first_fanout_unconfirmed(row) -> bool:
+  """A row whose first fan-out started but was never confirmed either way."""
+  return row.status == SignalStatusEnum.QUEUED and row.last_attempt is None
+
+
 class SignalProcessingService:
   """Coordinates persistence, JetStream enqueue, publishing, and notification."""
 
@@ -484,7 +495,10 @@ class SignalProcessingService:
   # ── Handler path (called from the JetStream consumer) ──────────────
 
   async def handle_enqueued(
-    self, payload: WebhookPayload, delivery_key: str | None = None
+    self,
+    payload: WebhookPayload,
+    delivery_key: str | None = None,
+    redelivered: bool = False,
   ) -> Dict[str, Any]:
     """First-time processing of a JetStream envelope.
 
@@ -503,16 +517,34 @@ class SignalProcessingService:
       delivered at least once and executed at most once.
     * anything else (``PUBLISHED``, ``FAILED``, or a recorded failure the
       retry job now owns): already handled — ack and stop.
+
+    The lookup only runs when the message may have been seen before
+    (*redelivered*: JetStream's delivery count is above one, or the worker is
+    retrying it in place), so a first delivery costs no extra query.
     """
+    existing = None
+    if delivery_key is not None and redelivered:
+      existing = await self._signals.get_by_delivery_key(delivery_key)
+
     if await self._is_blocked(payload):
+      if existing is not None and _first_fanout_unconfirmed(existing):
+        # The interrupted first fan-out will not be resumed under a block, and
+        # left QUEUED with no recorded attempt the row would sit there for good
+        # — the retry job never picks such a row. Close it.
+        log.warning(
+          "Redelivered signal_id=%s dropped by the block gate — marked FAILED",
+          existing.id,
+        )
+        if not await self._signals.mark_failed(str(existing.id)):
+          raise RuntimeError("Failed to mark blocked redelivery as FAILED")
       return {"status": "blocked"}
 
-    if delivery_key is not None:
-      existing = await self._signals.get_by_delivery_key(delivery_key)
-      if existing is not None:
-        return await self._handle_redelivery(existing, payload)
+    if existing is not None:
+      return await self._handle_redelivery(existing, payload)
 
-    signal_id = await self._signals.log_signal(payload, delivery_key=delivery_key)
+    signal_id = await self._signals.log_signal(
+      payload, delivery_key=delivery_key, attempts=self._max_attempts
+    )
     if not signal_id:
       raise RuntimeError("Failed to persist signal into database")
 
@@ -525,7 +557,7 @@ class SignalProcessingService:
   async def _handle_redelivery(self, row, payload: WebhookPayload) -> Dict[str, Any]:
     """A JetStream message came back for a row that already exists."""
     signal_id = str(row.id)
-    if row.status == SignalStatusEnum.QUEUED and row.last_attempt is None:
+    if _first_fanout_unconfirmed(row):
       log.warning(
         "Redelivered signal_id=%s was never confirmed published — fanning out "
         "again under the same signal_id",
@@ -598,7 +630,10 @@ class SignalProcessingService:
       # Deterministic: the same payload fails the same way on every attempt,
       # so give up now rather than spend the remaining retries on it.
       log.error("Signal %s cannot be parsed, marked FAILED: %s", signal_id, exc)
-      await self._signals.mark_failed(signal_id)
+      if not await self._signals.mark_failed(signal_id):
+        # Left QUEUED with no attempt recorded, nothing would ever revisit
+        # the row; raising hands it back to JetStream redelivery instead.
+        raise RuntimeError(f"Failed to mark unparseable signal {signal_id} FAILED")
       return {"status": "invalid", "signal_id": signal_id}
     except Exception as exc:
       log.exception(
@@ -607,7 +642,12 @@ class SignalProcessingService:
         attempts_before,
         exc,
       )
-      await self._signals.record_attempt_failure(signal_id)
+      if await self._signals.record_attempt_failure(signal_id) is None:
+        # The retry job only picks rows with a recorded attempt; one that could
+        # not be recorded goes back to JetStream redelivery instead.
+        raise RuntimeError(
+          f"Fan-out failed and the attempt could not be recorded: {signal_id}"
+        ) from exc
       return {
         "status": "retry_scheduled",
         "signal_id": signal_id,
@@ -697,31 +737,27 @@ class SignalProcessingService:
 
 
 def delivery_key_for(msg) -> str | None:
-  """Identity of a JetStream message that survives its redelivery.
+  """Identity of a stored JetStream message that survives its redelivery.
 
-  The webhook stamps every envelope with a ``Nats-Msg-Id`` (also JetStream's
-  de-duplication id), so that is the key whenever it is there. A producer that
-  publishes straight onto ``SIGNALS.<strategy>`` without one (QTE's ``nats``
-  transport may) still gets a stable key from the message's stream sequence,
-  paired with the time the stream stored it so a stream that is recreated —
-  and restarts its sequence at 1 — cannot collide with an older row.
+  The stream sequence names the stored message and does not change when it is
+  redelivered; the time the stream stored it is paired with it so a stream
+  that is recreated — and restarts its sequence at 1 — cannot collide with an
+  older row. ``Nats-Msg-Id`` is deliberately not used: it is chosen by the
+  producer and JetStream only de-duplicates it inside the stream's duplicate
+  window, so a producer that reuses an id later would have its new signal
+  mistaken for the old one for good.
 
-  ``None`` when the message carries neither (a hand-built message in a test),
-  which simply turns the redelivery check off for it.
+  ``None`` when the message carries no metadata (a hand-built message in a
+  test), which turns the redelivery check off for it.
   """
-  headers = getattr(msg, "headers", None) or {}
-  msg_id = headers.get("Nats-Msg-Id")
-  if msg_id:
-    return f"msgid:{msg_id}"[:128]
   try:
     metadata = msg.metadata
-    key = (
+    return (
       f"seq:{metadata.stream}:{metadata.sequence.stream}"
       f"@{metadata.timestamp.isoformat()}"
     )
   except Exception:
     return None
-  return key[:128]
 
 
 class SignalWorker(JetStreamPullWorker):
@@ -733,6 +769,8 @@ class SignalWorker(JetStreamPullWorker):
     self,
     service: SignalProcessingService,
     connection: NatsClient | None = None,
+    *,
+    inline_retry_delays: tuple[float, ...] = INLINE_RETRY_DELAYS_SECONDS,
   ) -> None:
     super().__init__(
       connection=connection,
@@ -741,12 +779,13 @@ class SignalWorker(JetStreamPullWorker):
       durable=settings.jetstream.SIGNAL_CONSUMER,
     )
     self._service = service
+    self._inline_retry_delays = inline_retry_delays
 
   async def _handle_one(self, msg) -> None:
     """Deserialize one envelope, run the pipeline, ack or NAK accordingly."""
     try:
       envelope = json.loads(msg.data.decode())
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
       log.error("SIGNAL envelope: malformed JSON: %s | raw=%s", exc, msg.data)
       # A malformed envelope will never become valid — term instead of NAK so
       # JetStream stops redelivering it.
@@ -767,19 +806,37 @@ class SignalWorker(JetStreamPullWorker):
       return
 
     delivery_key = delivery_key_for(msg)
+    redelivered = delivery_count(msg) > 1
 
-    try:
-      # ``handle_enqueued`` records per-attempt failures onto the persisted
-      # row itself (attempts / last_attempt / FAILED). The JetStream message
-      # is still ack-ed on the happy path AND on those recorded failures — a
-      # NAK here would only cause JetStream to redeliver, which would race
-      # the DB-tracked retry job. We only NAK for exceptions that fell out
-      # of the service entirely (e.g. persist failed before an attempt was
-      # even recorded), so JetStream can retry the persist itself.
-      await self._service.handle_enqueued(payload=payload, delivery_key=delivery_key)
-    except Exception as exc:
-      log.exception("SIGNAL handler failed: %s — leaving for JetStream redelivery", exc)
-      await self._nak(msg)
-      return
+    # ``handle_enqueued`` records per-attempt failures onto the persisted row
+    # itself (attempts / last_attempt / FAILED), and the message is ack-ed on
+    # those too — a NAK would only make JetStream redeliver, racing the
+    # DB-tracked retry job. Only an exception that fell out of the service
+    # (the block gate could not be read, the persist failed) is retried here.
+    #
+    # In place first, holding the stream's order: signals of one cycle must
+    # reach the workers in sequence, and a NAK sends this envelope to the back
+    # while the next one — perhaps its own FLAT — goes ahead. Only once the
+    # in-place retries are spent is it NAK-ed for a delayed redelivery.
+    delays = iter(self._inline_retry_delays)
+    while True:
+      try:
+        await self._service.handle_enqueued(
+          payload=payload, delivery_key=delivery_key, redelivered=redelivered
+        )
+        break
+      except Exception as exc:
+        delay = next(delays, None)
+        if delay is None:
+          log.exception(
+            "SIGNAL handler failed: %s — leaving for JetStream redelivery", exc
+          )
+          await self._nak(msg)
+          return
+        log.warning("SIGNAL handler failed: %s — retrying in %.1fs", exc, delay)
+        await self._in_progress(msg)
+        await asyncio.sleep(delay)
+        # The failed attempt may have written the row before it raised.
+        redelivered = True
 
     await self._ack(msg)

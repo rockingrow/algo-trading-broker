@@ -118,7 +118,7 @@ from broker.schemas.account_schema import (
   MarketTypeEnum,
   decompose_worker_id,
 )
-from broker.services.jetstream_worker import JetStreamPullWorker
+from broker.services.jetstream_worker import JetStreamPullWorker, delivery_count
 from broker.services.account_settings_service import (
   parse_account_settings,
   parse_global_max_open_orders,
@@ -205,6 +205,14 @@ def _parse_strategy_magic_map(raw: Optional[str]) -> dict[str, int]:
   return result
 
 
+# Deliveries a TRADE report gets before it is given up on: one every
+# ``NAK_DELAY_SECONDS`` (5s), so about an hour. Long enough to outlast a
+# database restart; a report failing the same way for an hour (a value its
+# column cannot hold) is a bug to read in the log, not something to retry
+# forever.
+TRADE_MAX_DELIVERIES = 720
+
+
 class TradeOutcome(Enum):
   """What happened to one TRADE report — decides ack, NAK or term."""
 
@@ -249,25 +257,63 @@ class TradeEventConsumer(JetStreamPullWorker):
     self._repo = trade_repository
     self._cards = card_service
     self._signal_broadcast = signal_broadcast_service
+    self._core_sub: Optional[Subscription] = None
+
+  async def start(self) -> None:
+    """Pull from the ``TRADES`` stream, or fall back to core NATS.
+
+    TRADE durability is an improvement, not a precondition: if the stream
+    cannot be used (JetStream limits reached, another stream already owning
+    the subject), the broker still starts and consumes ``TRADE`` the way it
+    did before the stream existed — at most once — and says so at ``error``.
+    """
+    try:
+      await super().start()
+    except Exception as exc:
+      log.error(
+        "TRADES stream unavailable (%s) — consuming TRADE over core NATS; "
+        "reports that fail to persist will be lost",
+        exc,
+      )
+      self._core_sub = await self._conn.nc.subscribe(
+        JETSTREAM_TRADE_SUBJECT, cb=self.handle_subject_trade
+      )
+
+  async def stop(self) -> None:
+    if self._core_sub is not None:
+      try:
+        await self._core_sub.unsubscribe()
+      except Exception as exc:
+        log.warning("Failed to unsubscribe TRADE listener: %s", exc)
+      self._core_sub = None
+    await super().stop()
 
   async def _handle_one(self, msg) -> None:
     """Process one report and settle it according to the outcome."""
-    outcome = await self.handle_subject_trade(msg)
+    deliveries = delivery_count(msg)
+    outcome = await self.handle_subject_trade(msg, deliveries=deliveries)
     if outcome is TradeOutcome.PERSISTED:
       await self._ack(msg)
     elif outcome is TradeOutcome.UNREADABLE:
       await self._term(msg)
+    elif deliveries >= TRADE_MAX_DELIVERIES:
+      log.error(
+        "TRADE report given up after %d deliveries: %r", deliveries, msg.data[:500]
+      )
+      await self._term(msg)
     else:
       await self._nak(msg)
 
-  async def handle_subject_trade(self, msg) -> "TradeOutcome":
+  async def handle_subject_trade(self, msg, deliveries: int = 1) -> "TradeOutcome":
     """Parse, persist and fan out one TRADE report. Never raises."""
-    raw = msg.data.decode()
     try:
+      raw = msg.data.decode()
       data = json.loads(raw)
+      if not isinstance(data, dict):
+        raise TypeError(f"expected a JSON object, got {type(data).__name__}")
       event = PositionEvent(**data)
-    except json.JSONDecodeError as exc:
-      log.error("TRADE listener: malformed JSON: %s | raw=%s", exc, raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+      log.error("TRADE listener: malformed report: %s | raw=%r", exc, msg.data[:500])
       return TradeOutcome.UNREADABLE
     except ValidationError as exc:
       log.error("TRADE listener: invalid PositionEvent: %s | raw=%s", exc, raw)
@@ -283,7 +329,12 @@ class TradeEventConsumer(JetStreamPullWorker):
     try:
       trade = await self._repo.upsert_by_position_event(event)
     except Exception as exc:
-      log.exception("Failed to apply TRADE event — left for redelivery: %s", exc)
+      if deliveries <= 1:
+        log.exception("Failed to apply TRADE event — left for redelivery: %s", exc)
+      else:
+        # Logged once with the traceback; the redeliveries of an outage stay
+        # at warning so they do not flood the ERROR-to-Telegram forwarder.
+        log.warning("Failed to apply TRADE event (delivery %d): %s", deliveries, exc)
       return TradeOutcome.RETRY
 
     if self._cards is not None:

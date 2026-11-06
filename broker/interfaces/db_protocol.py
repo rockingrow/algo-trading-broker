@@ -45,7 +45,11 @@ class SignalRepository(Protocol):
   """Persists inbound TradingView webhook signals."""
 
   async def log_signal(
-    self, payload: WebhookPayload, *, delivery_key: str | None = None
+    self,
+    payload: WebhookPayload,
+    *,
+    delivery_key: str | None = None,
+    attempts: int | None = None,
   ) -> str | None: ...
 
   async def get_by_delivery_key(self, delivery_key: str) -> Signal | None: ...

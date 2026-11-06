@@ -33,7 +33,7 @@ class FakeSignalRepository:
     if existing is not None:
       self._rows[existing["id"]] = SimpleNamespace(**existing)
 
-  async def log_signal(self, payload, *, delivery_key=None):
+  async def log_signal(self, payload, *, delivery_key=None, attempts=None):
     self.logged.append(payload)
     if self.return_id == "__persist_fail__":
       return None
@@ -41,7 +41,7 @@ class FakeSignalRepository:
     self._rows[row_id] = SimpleNamespace(
       id=uuid.UUID(row_id),
       status=SignalStatusEnum.QUEUED,
-      attempts=settings.signal.MAX_ATTEMPTS,
+      attempts=attempts if attempts is not None else settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       delivery_key=delivery_key,
       raw=payload.model_dump(mode="json"),
@@ -637,11 +637,13 @@ async def test_broadcaster_is_optional():
 
 async def test_redelivery_of_a_published_signal_is_not_fanned_out_again():
   service, publisher, notifier, broadcaster, signal_repo = _make_service()
-  first = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+  first = await service.handle_enqueued(payload=_payload(), delivery_key="seq:abc")
   assert first["status"] == "accepted"
 
   # JetStream hands the same message back (its ack was lost).
-  again = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+  again = await service.handle_enqueued(
+    payload=_payload(), delivery_key="seq:abc", redelivered=True
+  )
 
   assert again == {"status": "duplicate", "signal_id": first["signal_id"]}
   assert len(signal_repo.logged) == 1
@@ -653,9 +655,11 @@ async def test_redelivery_of_an_interrupted_first_fanout_reuses_the_signal_id():
   signal_id = signal_repo.return_id
   # The first delivery persisted the row, then the broker died before the
   # fan-out was confirmed: QUEUED, no attempt recorded.
-  await signal_repo.log_signal(_payload(), delivery_key="msgid:abc")
+  await signal_repo.log_signal(_payload(), delivery_key="seq:abc")
 
-  result = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+  result = await service.handle_enqueued(
+    payload=_payload(), delivery_key="seq:abc", redelivered=True
+  )
 
   assert result["status"] == "accepted"
   assert result["signal_id"] == signal_id
@@ -666,10 +670,12 @@ async def test_redelivery_of_an_interrupted_first_fanout_reuses_the_signal_id():
 
 async def test_redelivery_with_a_recorded_failure_is_left_to_the_retry_job():
   service, publisher, notifier, broadcaster, signal_repo = _make_service()
-  signal_id = await signal_repo.log_signal(_payload(), delivery_key="msgid:abc")
+  signal_id = await signal_repo.log_signal(_payload(), delivery_key="seq:abc")
   await signal_repo.record_attempt_failure(signal_id)
 
-  result = await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+  result = await service.handle_enqueued(
+    payload=_payload(), delivery_key="seq:abc", redelivered=True
+  )
 
   assert result["status"] == "duplicate"
   assert publisher.published == []
@@ -687,7 +693,7 @@ async def test_block_gate_fails_closed_when_the_setting_cannot_be_read():
   service._settings.read_fails = True
 
   with pytest.raises(RuntimeError):
-    await service.handle_enqueued(payload=_payload(), delivery_key="msgid:abc")
+    await service.handle_enqueued(payload=_payload(), delivery_key="seq:abc")
 
   # Nothing persisted, nothing sent: the worker NAKs and JetStream redelivers.
   assert signal_repo.logged == []
@@ -729,6 +735,8 @@ async def test_max_attempts_and_enqueue_timeout_can_be_injected():
 
   result = await service.handle_enqueued(payload=_payload(), delivery_key=None)
   assert result["status"] == "accepted"
+  # The row's budget is the injected one, not the settings default.
+  assert signal_repo._rows[result["signal_id"]].attempts == 7
 
 
 # ── DeferredEnqueuer shutdown drain ─────────────────────────────────
@@ -776,3 +784,61 @@ async def test_stop_reports_envelopes_it_could_not_flush(caplog):
 
   assert publisher.enqueued == []
   assert "1 envelope(s) never queued" in caplog.text
+
+
+async def test_a_first_delivery_does_not_look_the_key_up():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+  lookups = []
+  original = signal_repo.get_by_delivery_key
+
+  async def counting_lookup(key):
+    lookups.append(key)
+    return await original(key)
+
+  signal_repo.get_by_delivery_key = counting_lookup
+  await service.handle_enqueued(payload=_payload(), delivery_key="seq:abc")
+  assert lookups == []
+
+
+async def test_a_blocked_redelivery_closes_its_interrupted_row():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service(blocked=True)
+  signal_id = await signal_repo.log_signal(_payload(), delivery_key="seq:abc")
+
+  result = await service.handle_enqueued(
+    payload=_payload(), delivery_key="seq:abc", redelivered=True
+  )
+
+  assert result == {"status": "blocked"}
+  # Not left QUEUED with no attempt, where nothing would ever revisit it.
+  assert signal_repo._rows[signal_id].status == SignalStatusEnum.FAILED
+  assert publisher.published == []
+
+
+async def test_an_unrecorded_publish_failure_is_handed_back_to_jetstream():
+  service, publisher, notifier, broadcaster, signal_repo = _make_service(
+    publish_fails=True
+  )
+
+  async def cannot_record(signal_id):
+    return None
+
+  signal_repo.record_attempt_failure = cannot_record
+  with pytest.raises(RuntimeError, match="could not be recorded"):
+    await service.handle_enqueued(payload=_payload(), delivery_key="seq:abc")
+
+
+async def test_an_unrecorded_parse_failure_is_handed_back_to_jetstream(monkeypatch):
+  import broker.services.signal_processing_service as module
+
+  def broken_parse(payload, signal_id):
+    raise ValueError("unknown timeframe")
+
+  monkeypatch.setattr(module, "parse_signal", broken_parse)
+  service, publisher, notifier, broadcaster, signal_repo = _make_service()
+
+  async def cannot_mark(signal_id):
+    return False
+
+  signal_repo.mark_failed = cannot_mark
+  with pytest.raises(RuntimeError, match="FAILED"):
+    await service.handle_enqueued(payload=_payload())

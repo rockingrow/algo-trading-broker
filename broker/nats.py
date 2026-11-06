@@ -144,8 +144,15 @@ class NatsClient:
     self._nc = await nats_lib.connect(**opts)
     log.info("NATS connected to %s", settings.nats_url)
 
-    await self.ensure_signal_stream()
-    await self.ensure_trade_stream()
+    try:
+      await self.ensure_signal_stream()
+      await self.ensure_trade_stream()
+    except BaseException:
+      # The socket is open and nats-py would keep reconnecting it forever; a
+      # caller whose startup failed here has nothing left to close it with.
+      await self._nc.close()
+      self._nc = None
+      raise
 
   async def ensure_signal_stream(self) -> None:
     """Idempotently create the JetStream stream that backs webhook events.

@@ -32,6 +32,15 @@ log = get_logger(__name__)
 NAK_DELAY_SECONDS = 5.0
 
 
+def delivery_count(msg) -> int:
+  """How many times JetStream has delivered *msg* — 1 when it carries no
+  metadata (a hand-built message in a test)."""
+  try:
+    return int(msg.metadata.num_delivered)
+  except Exception:
+    return 1
+
+
 class JetStreamPullWorker:
   """Fetches from a durable pull consumer and hands each message to a subclass."""
 
@@ -123,7 +132,16 @@ class JetStreamPullWorker:
         continue
 
       for msg in msgs:
-        await self._handle_one(msg)
+        try:
+          await self._handle_one(msg)
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          # A handler is meant to settle every message itself; one that slips
+          # through must not end the loop — every later message would sit in
+          # the stream with nothing pulling it. NAK-ed, so it is redelivered.
+          log.exception("%s: unhandled error on a message: %s", self.worker_name, exc)
+          await self._nak(msg)
 
   async def _handle_one(self, msg) -> None:
     """Process one message and settle it. Supplied by the subclass."""
@@ -142,6 +160,13 @@ class JetStreamPullWorker:
       await msg.nak(delay=NAK_DELAY_SECONDS)
     except Exception as exc:
       log.warning("Failed to nak JetStream message: %s", exc)
+
+  async def _in_progress(self, msg) -> None:
+    """Tell JetStream the message is still being worked on (resets ack wait)."""
+    try:
+      await msg.in_progress()
+    except Exception as exc:
+      log.debug("Failed to mark JetStream message in progress: %s", exc)
 
   async def _term(self, msg) -> None:
     try:

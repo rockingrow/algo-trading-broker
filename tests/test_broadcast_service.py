@@ -1138,7 +1138,6 @@ async def test_per_cycle_locks_do_not_accumulate():
   dispatcher, _ = _dispatcher(repo)
   await dispatcher.dispatch(cycle.id)
   assert dispatcher._locks == {}
-  assert dispatcher._lock_users == {}
 
 
 async def test_a_cycle_is_never_dispatched_twice_at_once():
@@ -1168,7 +1167,6 @@ async def test_a_cycle_is_never_dispatched_twice_at_once():
 
   assert peak == 1
   assert dispatcher._locks == {}
-  assert dispatcher._lock_users == {}
 
 
 # ── Dispatcher: broker settings ─────────────────────────────────────

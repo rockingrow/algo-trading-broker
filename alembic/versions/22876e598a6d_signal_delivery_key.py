@@ -4,8 +4,8 @@ JetStream redelivers a ``SIGNALS`` message whose ack never reached it — the
 broker crashed after the fan-out, or the ack was lost — and every redelivery
 used to insert a fresh row with a fresh ``signal_id``. Workers de-duplicate on
 ``signal_id``, so the same alert could open a second position. The message's
-identity (``Nats-Msg-Id``, or stream sequence + store time) is now stored on
-the row under a unique constraint, and a redelivery reuses the row it finds.
+identity (stream sequence + store time) is now stored on the row under a
+unique constraint, and a redelivery reuses the row it finds.
 
 Nullable and not backfilled: rows written before this revision have no key and
 are never redelivered again anyway (their messages were acked long ago).

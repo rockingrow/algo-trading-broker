@@ -26,7 +26,11 @@ class SqlAlchemySignalRepository:
   """Persists inbound TradingView webhook signals to the ``signals`` table."""
 
   async def log_signal(
-    self, payload: WebhookPayload, *, delivery_key: str | None = None
+    self,
+    payload: WebhookPayload,
+    *,
+    delivery_key: str | None = None,
+    attempts: int | None = None,
   ) -> str | None:
     """
     Persist a received TradingView webhook signal.
@@ -34,6 +38,9 @@ class SqlAlchemySignalRepository:
     *delivery_key* identifies the JetStream message the payload came from; it
     is unique on the table, so a second insert for the same message fails
     (and returns ``None``) instead of creating a second ``signal_id``.
+    *attempts* seeds the row's attempt budget — the service passes its own, so
+    the row and the service count from the same number; defaults to
+    ``settings.signal.MAX_ATTEMPTS``.
 
     Returns
     -------
@@ -69,7 +76,7 @@ class SqlAlchemySignalRepository:
       is_scale_position=bool(pos.is_scale_position),
       scale_strategy=pos.scale_strategy,
       status=SignalStatusEnum.QUEUED,
-      attempts=settings.signal.MAX_ATTEMPTS,
+      attempts=attempts if attempts is not None else settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       delivery_key=delivery_key,
       indicators=json.loads(payload.indicators.model_dump_json())

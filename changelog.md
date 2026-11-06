@@ -45,10 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retry.
 - **`TRADE` reports survive a broker or database outage.** They were consumed
   over core NATS and dropped if the write failed. A `TRADES` JetStream stream
-  now captures the subject; reports are acked only once persisted. Workers
-  are unchanged.
-- **NAK-ed envelopes are redelivered after 5 s** instead of immediately, so a
-  database outage no longer spins the handler in a tight loop.
+  now captures the subject; reports are acked only once persisted, retried for
+  up to an hour, and the broker falls back to core NATS if the stream cannot
+  be used. Workers are unchanged.
+- **A failing envelope is retried in place before it is NAK-ed**, so a
+  transient database error cannot let a later signal of the same cycle
+  overtake it; the NAK that follows waits 5 s instead of redelivering at once.
+- **A fan-out whose failure cannot be recorded goes back to JetStream** instead
+  of leaving a `QUEUED` row nothing revisits — the same for an unparseable
+  signal, and for a redelivery that meets the block gate.
+- **One bad message no longer ends a JetStream consumer.** The pull loop
+  survives an exception a handler did not settle, and invalid UTF-8 or a
+  non-object `TRADE` report is terminated instead of crashing it.
+- **A failed stream setup closes the NATS connection** it opened, rather than
+  leaving it reconnecting behind a failed startup.
 - **An unparseable signal is marked `FAILED` at once** instead of spending
   every retry on an input that fails the same way each time.
 - **The deferred-enqueue backlog is flushed on shutdown**, and the envelope the
