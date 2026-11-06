@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The deferred-enqueue backlog is flushed on shutdown**, and the envelope the
   loop held while waiting out its retry interval is no longer lost on cancel.
 - **The webhook token and `X-API-KEY` are compared in constant time.**
+- **A rejected JetStream envelope no longer logs the webhook token.** The
+  malformed-JSON, missing-payload and invalid-payload error lines printed the
+  envelope — `token` included — and ERROR lines reach Telegram. They now go
+  through `redact_secrets`, moved to `broker/security/redaction.py` so the
+  HTTP layer and the consumer share it.
 - **The docs no longer promise HMAC `X-Signature` validation**, which was never
   implemented (and cannot be sent by TradingView). `WEBHOOK_SECRET` is the
   shared payload `token`, and `.env.example` now ships a placeholder for it.

@@ -2,7 +2,6 @@ import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 import json
 import logging
-import re
 import time
 import traceback
 
@@ -30,6 +29,7 @@ from broker.providers import (
   make_signals_notifier,
 )
 from broker.router import get_core_router
+from broker.security.redaction import redact_secrets
 from broker.services.demo_signal_service import DemoSignalConsumer
 from broker.services.nats_service import (
   NatsPublisher,
@@ -250,37 +250,6 @@ def install_webhook_connection_close(app: FastAPI) -> None:
       elapsed * 1000,
     )
     return response
-
-
-_REDACTED = "***"
-
-# Keys whose value is a shared secret rather than data worth logging. The
-# webhook's ``token`` *is* WEBHOOK_SECRET, and a rejected alert's body — the
-# whole of it, before this — went straight into the 422 log line.
-_SECRET_KEYS = frozenset({"token"})
-
-# Same secret seen inside a raw (unparsed) body. The trailing alternative
-# catches a value the snippet window cut in half.
-_SECRET_IN_TEXT = re.compile(r'("token"\s*:\s*")(?:[^"]*"|[^"]*$)')
-
-
-def redact_secrets(value):
-  """Replace secret values anywhere in *value* — dict, list, or raw body text.
-
-  A validation error carries the offending input back to the caller, so
-  everything the webhook was sent (its ``token`` included) reaches the log and
-  the response body unless it is scrubbed here first.
-  """
-  if isinstance(value, dict):
-    return {
-      key: (_REDACTED if key in _SECRET_KEYS else redact_secrets(item))
-      for key, item in value.items()
-    }
-  if isinstance(value, list):
-    return [redact_secrets(item) for item in value]
-  if isinstance(value, str):
-    return _SECRET_IN_TEXT.sub(rf'\1{_REDACTED}"', value)
-  return value
 
 
 def json_syntax_error(errors: list) -> str | None:

@@ -88,6 +88,7 @@ from broker.nats import (
 )
 from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
+from broker.security.redaction import redact_secrets
 from broker.services.jetstream_worker import JetStreamPullWorker, delivery_count
 from broker.settings import settings
 
@@ -786,7 +787,11 @@ class SignalWorker(JetStreamPullWorker):
     try:
       envelope = json.loads(msg.data.decode())
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-      log.error("SIGNAL envelope: malformed JSON: %s | raw=%s", exc, msg.data)
+      log.error(
+        "SIGNAL envelope: malformed JSON: %s | raw=%s",
+        exc,
+        redact_secrets(msg.data.decode(errors="replace")),
+      )
       # A malformed envelope will never become valid — term instead of NAK so
       # JetStream stops redelivering it.
       await self._term(msg)
@@ -794,14 +799,18 @@ class SignalWorker(JetStreamPullWorker):
 
     raw_payload = envelope.get("payload") if isinstance(envelope, dict) else None
     if not isinstance(raw_payload, dict):
-      log.error("SIGNAL envelope: missing payload: %s", envelope)
+      log.error("SIGNAL envelope: missing payload: %s", redact_secrets(envelope))
       await self._term(msg)
       return
 
     try:
       payload = WebhookPayload(**raw_payload)
     except ValidationError as exc:
-      log.error("SIGNAL envelope: invalid WebhookPayload: %s", exc)
+      # ``str(exc)`` echoes each offending input — the token among them.
+      log.error(
+        "SIGNAL envelope: invalid WebhookPayload: %s",
+        exc.errors(include_url=False, include_input=False),
+      )
       await self._term(msg)
       return
 

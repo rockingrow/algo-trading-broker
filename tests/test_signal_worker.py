@@ -309,3 +309,21 @@ async def test_handler_failure_is_naked_with_a_delay():
   await worker._handle_one(msg)
   assert msg.naked is True
   assert msg.nak_delay == NAK_DELAY_SECONDS
+
+
+@pytest.mark.parametrize(
+  "body",
+  [
+    b'{"payload": {"token": "super-secret", "strategy": ',
+    b'{"token": "super-secret"}',
+    b'{"payload": {"token": "super-secret", "strategy": "s"}}',
+  ],
+  ids=["malformed-json", "missing-payload", "invalid-payload"],
+)
+async def test_a_rejected_envelope_never_logs_the_webhook_token(body, caplog):
+  worker = SignalWorker(service=FakeService(), connection=object())  # type: ignore[arg-type]
+  msg = FakeMsg(body)
+  with caplog.at_level(logging.ERROR):
+    await worker._handle_one(msg)
+  assert msg.termed is True
+  assert "super-secret" not in caplog.text
