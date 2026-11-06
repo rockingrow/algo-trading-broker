@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The README is a landing page; the reference moved to `docs/`.** The
+  ~114KB README is split into `docs/architecture.md`, `configuration.md`,
+  `api.md`, `nats.md`, `database.md`, `telegram.md`, `tailscale.md` and
+  `development.md`, unchanged in substance, with every cross-link rewritten to
+  its new page. The README keeps the overview, the quick start and an index.
 - **The public broadcast carries its `Signal:` line again.** The uxid is how a
   reader refers to a cycle and how the message matches the engine's own
   notification; only the private body had it, in its "Signal info" box. The
