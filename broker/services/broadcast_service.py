@@ -63,7 +63,7 @@ from broker.constants import (
   SILENT_SIGNAL,
 )
 from broker.db.listener import BROADCAST_LOG_CHANNEL, PostgresChangeListener
-from broker.db.models import Trade
+from broker.db.models import BroadcastMessageChat, Trade
 from broker.domain.trade_status import TradeStatusPolicy
 from broker.helpers.message_formatter import (
   format_broadcast_message,
@@ -423,17 +423,14 @@ class BroadcastDispatcher:
       ]
     )
     if settings_values.get(SILENT_SIGNAL) == "1":
-      # Silenced: the cycle stays recorded, so the next visible change shows
-      # the full history. Nothing is left pending — a body that was never
-      # sent is not owed to anyone.
       log.debug("SILENT_SIGNAL is enabled; skipping broadcast delivery.")
-      await self._repository.finish_logs(log_ids, delivered=True)
+      await self._park(view, log_ids, reason="silenced")
       return
 
     targets = self._targets(settings_values.get(PUBLIC_BROADCAST_CHAT_IDS_KEY))
     if not targets:
       log.debug("No broadcast chats configured; nothing to deliver.")
-      await self._repository.finish_logs(log_ids, delivered=True)
+      await self._park(view, log_ids, reason="no broadcast chats configured")
       return
 
     ok = await self._deliver_all(view, targets, settings_values)
@@ -444,6 +441,44 @@ class BroadcastDispatcher:
       max_attempts=self._max_attempts,
     )
     await self._repository.mark_broadcast(cycle_id)
+
+  async def _park(
+    self, view: BroadcastCycleView, log_ids: list[uuid.UUID], *, reason: str
+  ) -> None:
+    """Close out a pass that deliberately broadcast nothing.
+
+    A cycle nobody has seen yet is simply dropped: it stays recorded, so the
+    first chat it ever reaches renders the whole history at once, and a body
+    that was never sent is not owed to anyone.
+
+    A cycle that *already has a message in a chat* is a different matter. That
+    message is a live record of the trade, and an edit is the only way its
+    reader learns the position hit TP1 or closed. Dropping the entry would
+    leave it stale for good whenever no further event follows — a closed cycle
+    silenced on its last event keeps showing the trade as running. So the
+    entry is deferred instead, without spending an attempt, and the edit lands
+    when broadcasting is switched back on.
+    """
+    behind = self._chats_behind(view)
+    if behind:
+      log.info(
+        "Broadcast parked (%s) — %d chat(s) still owed an edit, deferring",
+        reason,
+        len(behind),
+      )
+      await self._repository.defer_logs(log_ids, reason=reason)
+      return
+    await self._repository.finish_logs(log_ids, delivered=True)
+
+  @staticmethod
+  def _chats_behind(view: BroadcastCycleView) -> list[BroadcastMessageChat]:
+    """Chat rows holding a posted message older than the cycle's latest seq."""
+    seq = view.message.last_seq or 0
+    return [
+      chat
+      for chat in (view.chats or [])
+      if getattr(chat, "message_id", None) and (chat.delivered_seq or 0) < seq
+    ]
 
   def _targets(
     self, public_raw: str | None

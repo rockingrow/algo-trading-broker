@@ -210,6 +210,15 @@ class FakeBroadcastRepository:
       )
     return True
 
+  async def defer_logs(self, log_ids, *, reason):
+    for entry in self.logs:
+      if entry.id not in log_ids:
+        continue
+      entry.status = BroadcastLogStatusEnum.PENDING
+      entry.attempts = max(0, entry.attempts - 1)
+      entry.last_error = reason
+    return True
+
   async def list_cycles_with_pending_logs(
     self, *, max_attempts, stale_after_seconds, limit=50
   ):
@@ -1139,6 +1148,82 @@ async def test_silent_signal_records_the_cycle_but_sends_nothing():
   assert channel.sent == []
   # The cycle is still tracked, so the next visible signal shows full history.
   assert _cycle_of(repo).events
+
+
+async def test_silent_signal_drops_the_log_of_a_cycle_no_chat_has_seen():
+  """Nothing is owed: no chat holds a message for this trade."""
+  repo, _, cycle = await _run(_payload(), settings_values={SILENT_SIGNAL: "1"})
+
+  assert [entry.status for entry in repo.logs] == [BroadcastLogStatusEnum.DELIVERED]
+  assert repo.chats[cycle.id] == {}
+
+
+async def test_silencing_mid_trade_defers_the_edit_a_posted_message_is_owed():
+  """The chat already shows this trade running; an edit is the only way its
+  reader learns it closed, so the entry waits instead of being dropped."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  silenced, _ = _dispatcher(
+    repo, telegram=channel, settings_values={SILENT_SIGNAL: "1"}
+  )
+  await writer.broadcast(_payload(action=SignalActionEnum.FLAT))
+  await silenced.dispatch(cycle.id)
+
+  assert len(channel.edited) == 0
+  pending = [
+    entry for entry in repo.logs if entry.status == BroadcastLogStatusEnum.PENDING
+  ]
+  assert len(pending) == 1
+  assert pending[0].attempts == 0  # a deferral does not spend an attempt
+
+
+async def test_the_deferred_edit_lands_once_broadcasting_is_back_on():
+  """Un-silencing re-renders the whole cycle into the message that went stale."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  silenced, _ = _dispatcher(
+    repo, telegram=channel, settings_values={SILENT_SIGNAL: "1"}
+  )
+  await writer.broadcast(_payload(action=SignalActionEnum.FLAT))
+  await silenced.dispatch(cycle.id)
+
+  resumed, _ = _dispatcher(repo, telegram=channel)
+  assert await resumed.sweep() == 1
+
+  assert [chat_id for chat_id, _, _ in channel.edited] == ["-100"]
+  assert "FLAT" in channel.edited[-1][2]
+  assert all(entry.status == BroadcastLogStatusEnum.DELIVERED for entry in repo.logs)
+
+
+async def test_removing_every_chat_mid_trade_defers_the_owed_edit_too():
+  """Same hazard through the other switch: both audiences emptied."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  disabled, _ = _dispatcher(repo, private=(), public="", telegram=channel)
+  await writer.broadcast(_payload(action=SignalActionEnum.FLAT))
+  await disabled.dispatch(cycle.id)
+
+  assert len(channel.edited) == 0
+  assert [entry.status for entry in repo.logs][-1] == BroadcastLogStatusEnum.PENDING
+
+  resumed, _ = _dispatcher(repo, telegram=channel)
+  await resumed.sweep()
+  assert "FLAT" in channel.edited[-1][2]
 
 
 async def test_public_chats_come_from_the_broker_setting():
