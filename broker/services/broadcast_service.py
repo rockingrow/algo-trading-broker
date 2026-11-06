@@ -458,17 +458,41 @@ class BroadcastDispatcher:
     silenced on its last event keeps showing the trade as running. So the
     entry is deferred instead, without spending an attempt, and the edit lands
     when broadcasting is switched back on.
+
+    What the deferred pass does *not* owe is a reply notice per parked event.
+    An edit is silent, so the body catching up on four events at once is one
+    quiet correction; four notices would be a burst of chatter about a trade
+    that is long over. The chats behind are caught up on notices here — the
+    way ``_notify_updates`` does when an audience has replies switched off —
+    so switching broadcasting back on fixes the body without replaying the
+    trade into the channel.
     """
     behind = self._chats_behind(view)
-    if behind:
-      log.info(
-        "Broadcast parked (%s) — %d chat(s) still owed an edit, deferring",
-        reason,
-        len(behind),
-      )
-      await self._repository.defer_logs(log_ids, reason=reason)
+    if not behind:
+      await self._repository.finish_logs(log_ids, delivered=True)
       return
-    await self._repository.finish_logs(log_ids, delivered=True)
+
+    log.info(
+      "Broadcast parked (%s) — %d chat(s) still owed an edit, deferring",
+      reason,
+      len(behind),
+    )
+    event_count = len(
+      [event for event in (view.message.events or []) if isinstance(event, dict)]
+    )
+    for chat in behind:
+      await self._repository.upsert_chat(
+        view.message.id,
+        audience=chat.audience,
+        chat_id=chat.chat_id,
+        # Neither is changed: the message is still there, and its stored body
+        # is still what the chat shows (see ``upsert_chat``).
+        message_id=None,
+        message=None,
+        notified_event_count=event_count,
+        last_error=f"parked: {reason}",
+      )
+    await self._repository.defer_logs(log_ids, reason=reason)
 
   @staticmethod
   def _chats_behind(view: BroadcastCycleView) -> list[BroadcastMessageChat]:

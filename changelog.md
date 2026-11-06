@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counter back — a deferral is not a failed delivery, so a day of silence
   cannot quietly exhaust `max_attempts`. The sweeper picks the cycle up once
   broadcasting is on again and the message catches up with the full history.
+  The parked events are caught up on reply notices silently, the way an
+  audience with replies switched off is: the edit is one quiet correction,
+  not a burst of notices about a trade that is already over.
 
 - **The test suite matches what the code does again.** 51 of 701 tests were
   red on `dev`, none of them a product bug: the suite had been left behind by

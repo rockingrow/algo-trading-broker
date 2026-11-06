@@ -1205,6 +1205,33 @@ async def test_the_deferred_edit_lands_once_broadcasting_is_back_on():
   assert all(entry.status == BroadcastLogStatusEnum.DELIVERED for entry in repo.logs)
 
 
+async def test_a_parked_cycle_catches_up_on_notices_without_replaying_them():
+  """The deferred edit is one quiet correction; the events it covers must not
+  come back as a burst of replies once broadcasting resumes."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  silenced, _ = _dispatcher(
+    repo, telegram=channel, settings_values={SILENT_SIGNAL: "1"}
+  )
+  for action in (SignalActionEnum.TP1, SignalActionEnum.TP2, SignalActionEnum.FLAT):
+    await writer.broadcast(_payload(action=action))
+    await silenced.dispatch(cycle.id)
+
+  resumed, _ = _dispatcher(repo, telegram=channel)
+  await resumed.sweep()
+
+  # The body caught up on all four events ...
+  assert "FLAT" in channel.edited[-1][2]
+  # ... and the three parked events were caught up on silently.
+  assert channel.replied == []
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 4
+
+
 async def test_removing_every_chat_mid_trade_defers_the_owed_edit_too():
   """Same hazard through the other switch: both audiences emptied."""
   writer, repo = _notice_writer()
