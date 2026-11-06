@@ -32,8 +32,9 @@ FastAPI, NATS, PostgreSQL. The `bot/` directory is a separate uv project.
    PR is the user's call.
 5. **Payload changes are contract changes.** A field added to
    `broker/schemas/` is a promise to TradingView alert templates, to QTE and to
-   every worker: update `examples/`, `bruno/`, the README section that
-   documents it and `changelog.md` in the same change.
+   every worker: update `examples/`, `bruno/`, the `docs/` page that
+   documents it (usually `docs/api.md` or `docs/nats.md`) and `changelog.md`
+   in the same change.
 6. **Never** expose, commit or copy secrets from `.env`, tokens, chat ids or
    account identifiers. `.env.example` carries placeholders only.
 7. **Never implement on a protected branch.** `dev`, `stage`, `prod` and
@@ -127,11 +128,14 @@ package; never scan from the repository root.
 | Telegram bot (separate uv project, HTTP client only) | `bot/app/`, and read `bot/README.md` first |
 | Canonical payload samples | `examples/webhook/`, `examples/nats/` (+ `examples/nats/subjects.md`) |
 | Manual API requests | `bruno/{webhook,admin,telegram}/` |
+| Reference docs (API, NATS, schema, config, Telegram, Tailscale, dev) | `docs/*.md` — `README.md` only links to them |
 | Broker payload contract as QTE relies on it | [`quant-trading-engine/docs/broker-contract.md`](https://github.com/rockingrow/quant-trading-engine/blob/main/docs/broker-contract.md) |
 
-`README.md` is ~89KB — never read it whole. Run `rg -n '^#{1,3} ' README.md`
-for the section index, then read only that range. `bot/README.md` documents the
-bot's roles, commands and rendering.
+`README.md` is a short landing page; the reference lives in `docs/`. The
+large pages (`docs/api.md`, `docs/database.md`, `docs/nats.md`) should not be
+read whole: run `rg -n '^#{1,3} ' docs/<page>.md` for the section index, then
+read only that range. `bot/README.md` documents the bot's roles, commands and
+rendering.
 
 Do not scan `.venv/`, `uv.lock`, `__pycache__/`, `.pytest_cache/` or `logs/`.
 
