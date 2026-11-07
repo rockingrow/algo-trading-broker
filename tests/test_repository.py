@@ -1885,6 +1885,22 @@ async def test_finish_logs_fails_an_entry_that_used_up_its_attempts(monkeypatch)
   assert entry.status == BroadcastLogStatusEnum.FAILED
 
 
+async def test_defer_logs_returns_an_entry_to_pending_without_spending_an_attempt(
+  monkeypatch,
+):
+  """Parking a cycle while broadcasting is off is not a delivery attempt — the
+  counter must not creep towards ``max_attempts`` while nothing is tried."""
+  entry = _log(uuid.uuid4(), status=BroadcastLogStatusEnum.SENDING, attempts=1)
+  session = FakeSession(results=[[entry]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyBroadcastMessageRepository().defer_logs([entry.id], reason="silenced")
+
+  assert entry.status == BroadcastLogStatusEnum.PENDING
+  assert entry.attempts == 0
+  assert entry.last_error == "silenced"
+
+
 async def test_reclaim_stale_logs_returns_them_to_pending(monkeypatch):
   """A dispatcher that died mid-delivery leaves entries in SENDING; nothing
   else would ever pick them up again."""

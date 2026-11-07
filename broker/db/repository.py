@@ -1399,6 +1399,31 @@ class SqlAlchemyBroadcastMessageRepository:
       log.exception("Failed to finish broadcast logs: %s", exc)
       return False
 
+  async def defer_logs(self, log_ids: list[uuid.UUID], *, reason: str) -> bool:
+    """Hand claimed entries back as ``PENDING`` without spending an attempt.
+
+    A deferral is not a failed delivery: nothing was tried, because the
+    configuration said not to broadcast right now. The attempt counter is
+    rolled back so a cycle parked for a day of silence is not quietly
+    exhausted past ``max_attempts`` and dropped — it waits for the setting to
+    change, then delivers the edit it owes.
+    """
+    if not log_ids:
+      return True
+    try:
+      async with get_session() as session:
+        result = await session.execute(
+          select(BroadcastMessageLog).where(BroadcastMessageLog.id.in_(log_ids))
+        )
+        for row in result.scalars().all():
+          row.status = BroadcastLogStatusEnum.PENDING
+          row.attempts = max(0, (row.attempts or 0) - 1)
+          row.last_error = (reason or "")[:255] or None
+      return True
+    except Exception as exc:
+      log.exception("Failed to defer broadcast logs: %s", exc)
+      return False
+
   async def list_cycles_with_pending_logs(
     self, *, max_attempts: int, stale_after_seconds: int, limit: int = 50
   ) -> list[uuid.UUID]:

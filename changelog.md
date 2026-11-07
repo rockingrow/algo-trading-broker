@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Turning broadcasting off mid-trade no longer freezes a posted message
+  for good.** With `SILENT_SIGNAL` set, or with both audiences' chat ids
+  emptied, the dispatcher marked the cycle's pending write-log entries
+  *delivered* without sending anything. For a trade no chat had seen that is
+  right — the first message it ever gets renders the whole history. For a
+  trade whose message was already in the channel it meant the edit that
+  entry stood for was thrown away: the message kept showing the position as
+  running, and only a *later* event could re-render it. A cycle silenced on
+  its closing `FLAT` had no later event, so the stale body was permanent.
+
+  Such a pass is now *parked* rather than closed: when a chat still holds a
+  message older than the cycle's latest `seq`, the entry goes back to
+  `PENDING` through the new `defer_logs`, which also rolls the attempt
+  counter back — a deferral is not a failed delivery, so a day of silence
+  cannot quietly exhaust `max_attempts`. The sweeper picks the cycle up once
+  broadcasting is on again and the message catches up with the full history.
+  The parked events are caught up on reply notices silently, the way an
+  audience with replies switched off is: the edit is one quiet correction,
+  not a burst of notices about a trade that is already over.
+
 - **The test suite matches what the code does again.** 51 of 701 tests were
   red on `dev`, none of them a product bug: the suite had been left behind by
   three deliberate changes. `signal_uxid` is upper-cased at ingress, so every
