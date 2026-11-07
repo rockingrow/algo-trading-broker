@@ -5,6 +5,314 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-11-07
+
+### Fixed
+
+- **Turning broadcasting off mid-trade no longer freezes a posted message
+  for good.** With `SILENT_SIGNAL` set, or with both audiences' chat ids
+  emptied, the dispatcher marked the cycle's pending write-log entries
+  *delivered* without sending anything. For a trade no chat had seen that is
+  right — the first message it ever gets renders the whole history. For a
+  trade whose message was already in the channel it meant the edit that
+  entry stood for was thrown away: the message kept showing the position as
+  running, and only a *later* event could re-render it. A cycle silenced on
+  its closing `FLAT` had no later event, so the stale body was permanent.
+
+  Such a pass is now *parked* rather than closed: when a chat still holds a
+  message older than the cycle's latest `seq`, the entry goes back to
+  `PENDING` through the new `defer_logs`, which also rolls the attempt
+  counter back — a deferral is not a failed delivery, so a day of silence
+  cannot quietly exhaust `max_attempts`. The sweeper picks the cycle up once
+  broadcasting is on again and the message catches up with the full history.
+  The parked events are caught up on reply notices silently, the way an
+  audience with replies switched off is: the edit is one quiet correction,
+  not a burst of notices about a trade that is already over.
+- **A redelivered signal no longer becomes a second position.** JetStream
+  redelivers a `SIGNALS` message whose ack never arrived (a crash after the
+  fan-out, a lost ack), and every redelivery inserted a fresh row with a fresh
+  `signal_id` that workers could not recognise. Rows now carry the message's
+  identity in a unique `signals.delivery_key` (migration `22876e598a6d`); a
+  redelivery reuses its row — re-sent under the same `signal_id` if its first
+  fan-out was never confirmed, dropped otherwise.
+- **Two dispatches of one broadcast cycle could run at once.** The per-cycle
+  lock was discarded when it read as unlocked, which is also true in the gap
+  between a release and the next waiter waking up; a third dispatch then got a
+  fresh lock and delivered the same cycle concurrently. The lock is now kept
+  while any dispatch holds or awaits it.
+- **The `signal_blocked` gate fails closed.** A failed settings read answered
+  "not set" and let signals through a block; it now NAKs the envelope for a
+  retry.
+- **`TRADE` reports survive a broker or database outage.** They were consumed
+  over core NATS and dropped if the write failed. A `TRADES` JetStream stream
+  now captures the subject; reports are acked only once persisted, retried for
+  up to an hour, and the broker falls back to core NATS if the stream cannot
+  be used. Workers are unchanged.
+- **A failing envelope is retried in place before it is NAK-ed**, so a
+  transient database error cannot let a later signal of the same cycle
+  overtake it; the NAK that follows waits 5 s instead of redelivering at once.
+- **A fan-out whose failure cannot be recorded goes back to JetStream** instead
+  of leaving a `QUEUED` row nothing revisits — the same for an unparseable
+  signal, and for a redelivery that meets the block gate.
+- **One bad message no longer ends a JetStream consumer.** The pull loop
+  survives an exception a handler did not settle, and invalid UTF-8 or a
+  non-object `TRADE` report is terminated instead of crashing it.
+- **A failed stream setup closes the NATS connection** it opened, rather than
+  leaving it reconnecting behind a failed startup.
+- **An unparseable signal is marked `FAILED` at once** instead of spending
+  every retry on an input that fails the same way each time.
+- **The deferred-enqueue backlog is flushed on shutdown**, and the envelope the
+  loop held while waiting out its retry interval is no longer lost on cancel.
+- **The webhook token and `X-API-KEY` are compared in constant time.**
+- **A rejected JetStream envelope no longer logs the webhook token.** The
+  malformed-JSON, missing-payload and invalid-payload error lines printed the
+  envelope — `token` included — and ERROR lines reach Telegram. They now go
+  through `redact_secrets`, moved to `broker/security/redaction.py` so the
+  HTTP layer and the consumer share it.
+- **The docs no longer promise HMAC `X-Signature` validation**, which was never
+  implemented (and cannot be sent by TradingView). `WEBHOOK_SECRET` is the
+  shared payload `token`, and `.env.example` now ships a placeholder for it.
+- The two unused imports `ruff check` flagged in migration `ee01d4811f96`.
+
+- **The test suite matches what the code does again.** 51 of 701 tests were
+  red on `dev`, none of them a product bug: the suite had been left behind by
+  three deliberate changes. `signal_uxid` is upper-cased at ingress, so every
+  fixture that keyed a cycle by lowercase hex missed it — including the 20
+  broadcast-dispatcher tests, which looked their own cycle up by the wrong
+  key. The broadcast body is a monospace `<pre>` layout now, so the 27
+  assertions still looking for `<b>`/`<code>` markup, for a timestamp on the
+  entry block and for an `Executions (n)` table could not match. A partial
+  take-profit has had its own `TP1` status since that header state was added,
+  so "TP1 keeps the cycle running" asserted the status it replaced.
+  `action_to_emoji(SL)` was still spelled as the cross the hollow red circle
+  replaced, and two tests reached for settings fields that no longer exist
+  (`TelegramSettings.CHAT_ID`) or compared a compose mount against a Windows
+  path separator.
+- **`signal_uxid` rejects a non-hex id again.** Upper-casing the id widened
+  its pattern to `[0-9A-Z]`, which accepted letters past `F` — a uxid is a
+  slice of a UUID4's hex, so `9F2C4B7E18A3D60Z` is malformed and could key a
+  cycle of its own. Back to `[0-9A-F]`, and the error message says "hex"
+  rather than "alphanumeric".
+- **A broadcast that Telegram never answered is no longer posted again.**
+  `sendMessage` ran on one five-second budget for connecting *and* for the
+  reply. A slow `api.telegram.org` therefore raised `ReadTimeout` on a message
+  it had already accepted, and the dispatcher, told only that the send
+  "failed", had no `message_id` to edit and posted the whole cycle afresh on
+  every 30-second pass — forty duplicate messages on 2026-11-03.
+
+  A send now reports a `SendOutcome`, the way an edit already reported an
+  `EditOutcome`: `OK` with an id, `FAILED` when Telegram answered and refused
+  (nothing was posted, so a retry is safe), and `UNKNOWN` when the request
+  broke mid-flight or came back without an id. `UNKNOWN` marks the body
+  delivered instead of sending it again — the message is assumed to be in the
+  chat — while a genuinely newer event still gets its own message. The read
+  budget is also separated from the connect budget
+  (`TELEGRAM_HTTP_READ_TIMEOUT`, 20s), so a slow reply is no longer mistaken
+  for a lost message.
+
+### Changed
+
+- **`broker/db/repository.py` is a package**, one module per aggregate, with
+  the same import path. Sessions open through `repository._session`, the one
+  attribute tests patch.
+- **`SignalWorker` and `TradeEventConsumer` share `JetStreamPullWorker`**
+  (`broker/services/jetstream_service.py`): the fetch loop, idle/backoff
+  handling and ack/NAK/term live in one place.
+- **The app lifespan runs on an `AsyncExitStack`**: services stop in reverse
+  start order, and a service that fails to start unwinds the ones before it.
+- `SignalProcessingService` takes `enqueue_timeout` / `max_attempts` as
+  optional constructor arguments; the unused `process` alias and
+  `attempt_number_for_notification` wrapper are gone.
+- The broker names its NATS connection `algo-trading-broker`; `make status`
+  identifies it by that name now that it holds no core `TRADE` subscription.
+- **The README is a landing page; the reference moved to `docs/`.** The
+  ~114KB README is split into `docs/architecture.md`, `configuration.md`,
+  `api.md`, `nats.md`, `database.md`, `telegram.md`, `tailscale.md` and
+  `development.md`, unchanged in substance, with every cross-link rewritten to
+  its new page. The README keeps the overview, the quick start and an index.
+- **The public broadcast carries its `Signal:` line again.** The uxid is how a
+  reader refers to a cycle and how the message matches the engine's own
+  notification; only the private body had it, in its "Signal info" box. The
+  public body now shows it under the entry levels, and it is never printed
+  twice.
+- **An entry reads as a green or a red square** (`🟩` / `🟥`). The two
+  chart glyphs they replaced were a pixel apart at the size Telegram draws an
+  emoji, and the dots that replaced those said nothing about being an entry: a
+  circle in this table is also a position flag (`FLAG_ON`/`FLAG_OFF`), a
+  broker or NATS status and a stop, and the engine draws one for service
+  up/down notices and backtest severity badges too. A square is only ever an
+  entry. `bot/app/emojis.py`, which re-renders the broker's trade card, moves
+  with the table, and the direction assertions now read the constants instead
+  of pasting a glyph in.
+
+  `quant-trading-engine` carries the same change in
+  [#50](https://github.com/rockingrow/quant-trading-engine/pull/50), so one
+  trade reads the same in both services' messages. The Markdown backtest
+  report and the HTML dashboard keep their themed `L` / `S` column.
+
+### Added
+
+- **`SIGNALS_DEMO.<strategy>` — a drill subject that notifies Telegram and
+  commands nothing.** A signal producer (QTE's `make demo-signal`) publishes
+  the *same* webhook envelope here that it would publish to
+  `SIGNALS.<strategy>`, and `DemoSignalConsumer` records it onto its broadcast
+  cycle — so the card is rendered by the ordinary renderer and reads like a
+  real signal — and posts one `Demo signal received` line to the operator
+  channel. That is all it does. It answers "does a signal from this strategy
+  still reach Telegram, rendered correctly, with the payload this producer
+  builds?" without a worker opening anything.
+
+  Three properties keep a drill away from workers, and none of them is a
+  branch someone has to get right:
+
+  - **The subject's first token differs.** It is not `SIGNALS.DEMO.*`: the
+    JetStream stream `SIGNALS` captures `SIGNALS.>`, so a demo published one
+    token deeper would be stored in the very buffer `SignalWorker` drains and
+    fanned out like any other signal. `SIGNALS_DEMO` cannot match that filter.
+  - **The consumer accepts no publisher.** It holds nothing that could reach a
+    worker.
+  - **A drill is never persisted into `signals`.** It must not be:
+    `WORKER_CONNECTED_ACK` replays every signal persisted in the last
+    `max_retry_timeout` seconds into `retry_signals`, which would hand a drill
+    to the next worker that connects.
+
+  Core NATS, backed by no stream: nothing about a drill is durable or
+  redelivered, and there is no block gate, no retry and no attempt counter. As
+  on `SIGNALS.<strategy>`, access to the cluster is the authentication — the
+  envelope carries `token` and the consumer does not verify it, because
+  `POST /secret/webhook` is the path that checks tokens. Documented in
+  `examples/nats/subjects.md` with `examples/nats/signals_demo.envelope.json`;
+  the startup notification now names the subject it is listening on.
+
+- **`/subscribeall` and `/unsubscribeall` switch live trade cards on or off for
+  every linked account at once.** With the opt-in per account, a user holding
+  several accounts needed a `/switch` plus `/subscribe` round for each one; the
+  bulk pair covers all of them in one command and replies with how many accounts
+  it touched. They compose with the per-account pair: `/subscribeall`, then
+  `/switch` and `/unsubscribe` on one account, leaves the others on.
+
+  - `POST /v1/telegram/{telegram_user_id}/broadcast/subscribe-all` and
+    `…/unsubscribe-all` run one `UPDATE account_bot_links SET
+    trade_cards_enabled` over the caller's links. Response:
+    `{"subscribed": bool, "accounts": n}`; `404` when the caller holds no link,
+    `500` when the write fails. Idempotent, and no new migration.
+  - The switch covers the links held **now**: an account linked later starts
+    off, and the bot's reply says so.
+  - Command names are lowercase because Telegram only accepts `[a-z0-9_]`.
+  - New `bruno/telegram/user` requests: `Broadcast - Subscribe All` and
+    `Broadcast - Unsubscribe All`.
+
+### Changed
+
+- **`inputs.skip_windows` accepts a string or a list of strings.** The field
+  was typed `str`, so a strategy sending the input as a JSON array failed
+  `WebhookPayload` validation and the whole signal was rejected
+  (`Input should be a valid string [...] input_type=list`). It is now
+  `list[str]`, with a `before` validator wrapping a single string into a
+  one-item list; a blank string becomes `[]`, and an omitted field stays
+  `None`. Nothing routes on the field — it is audit payload — so both shapes
+  are kept rather than one of them costing a signal.
+
+- **`/subscribe` and `/unsubscribe` act on the active account, not on every
+  account the user holds.** The live-trade-card opt-in was one row per Telegram
+  user, so a user linked to accounts A and B who subscribed got cards for both
+  and could not turn B off alone. It is now per account and follows `/switch`
+  like `/flat` and `/maxorders` do: `/switch` to B, `/unsubscribe`, and A keeps
+  its cards.
+
+  - The flag is `account_bot_links.trade_cards_enabled` (default `false`);
+    `trade_broadcast_subscriptions` and its model are gone. `list_broadcast_targets`
+    now filters on the flag instead of joining that table.
+  - It lives on the link, so `/unlink` and `/admin_rotate` discard it with the
+    link. Before, the per-user row survived an unlink and silently resumed cards
+    for the next account the user linked.
+  - `GET` / `POST /v1/telegram/{telegram_user_id}/broadcast[/subscribe|/unsubscribe]`
+    resolve the caller's active account and answer `404` when nothing is linked
+    (they used to work for an unlinked id). The response keeps `subscribed` and
+    adds `account_id`, `market` and `gateway`, so the bot can name the account it
+    really changed. Request shape and URLs are unchanged; the `bruno/` collection notes
+    describe the new behaviour.
+  - The bot's confirmation names the account and says the others are unchanged;
+    the `/help` text and the command-menu descriptions say "active account".
+
+  **Migration:** `486671e7d451`. `scripts/docker-entrypoint.sh` runs
+  `alembic upgrade head` (under `set -e`) before the broker starts, so a
+  container deploy applies it by itself and there is nothing to run by hand.
+  The revision adds the column and drops `trade_broadcast_subscriptions`.
+
+  **Rolling back is not just an image swap.** The previous image does not know
+  this revision, so its entrypoint's `alembic upgrade head` fails with `Can't
+  locate revision identified by '486671e7d451'` and the container never starts.
+  Run `make db-downgrade` first (it recreates `trade_broadcast_subscriptions`
+  empty). The code also fails soft against a schema it was not written for —
+  started by hand with `make run` on an unmigrated database it finds no card
+  recipients and refuses linking, because every query that loads a whole link
+  row breaks — so the symptom there is quiet, not a crash.
+
+  **Every existing subscription is cleared — nothing is backfilled.** All links
+  start with cards off, so after the deploy nobody gets a trade card until they
+  `/subscribe` again, once per account they want (`/switch` between them). Tell
+  users before rolling this out. The downgrade recreates the old table empty:
+  a per-account flag cannot be folded back into a per-user row without guessing
+  which account the user meant.
+
+- **The broadcast header has a third state: `[🎯TP1]`.** A cycle whose `TP1`
+  filled read `[⏳RUNNING]`, the same as an entry that had given nothing back
+  yet — the one thing the header is there to tell apart. `TP1` is now its own
+  `broadcast_messages.status`, so the header walks `RUNNING` → `TP1` →
+  `CLOSED`:
+
+  - `TP1` renders `[🎯TP1]` in the cycle's message body and in the two-line
+    reply notice posted under it.
+  - `TP2`, `SL`, `R_SL` and `FLAT` still render `[🏁CLOSED]` — `TP2` takes the
+    rest of the position off, so it closes the cycle rather than getting a
+    header of its own.
+  - The status only moves forward (`broker/domain/broadcast_status.py`):
+    `CLOSED` stays terminal against a replayed or late `TP1`, and `TP1` is
+    sticky against a scale-in entry that would otherwise take the header back
+    to `RUNNING`.
+  - The owner-facing trade card reads the same three words off the *trade's*
+    own status: `PARTIALLY_CLOSED`, or a `TP1` last action, renders `[🎯TP1]`.
+    Both renderers changed — `broker/helpers/trade_card.py` and the bot's
+    mirror in `bot/app/presenters/trade_card.py`.
+
+  **Migration:** `e5f6a7b8c9d0` — apply it **before** restarting the broker:
+  a broker running ahead of the migration fails the status write with an
+  invalid-enum error, and `record_event` rolls the transaction back with the
+  appended event in it, so that TP1 line would never reach the message body.
+  The revision adds the `TP1` label to the
+  `broadcaststatusenum` Postgres type (inserted before `CLOSED`, so the enum's
+  order matches the lifecycle). Existing rows are not rewritten: a cycle that
+  is mid-TP1 right now keeps `RUNNING` in the column until its next action
+  arrives, but its message still renders `[🎯TP1]` — the body header is folded
+  from the cycle's stored events as well as read off the row, which is how the
+  reply notices have always been rendered and what keeps the two from
+  disagreeing.
+  The downgrade moves any `TP1` row back to `RUNNING` and leaves the label in
+  place, since Postgres cannot drop an enum value.
+
+### Fixed
+
+- **Revision `e5f6a7b8c9d0` is back in the chain.** It had been deleted after
+  the change above was merged, so a production broker ran the code that writes
+  `status = 'TP1'` against a `broadcaststatusenum` type that only knew
+  `RUNNING` and `CLOSED`. Every TP1 signal failed `record_event` with
+  `invalid input value for enum broadcaststatusenum: "TP1"` and rolled the
+  transaction back with the appended event in it, so the TP1 line never
+  reached the broadcast body. The fan-out to the workers was unaffected --
+  the signal was already published when the write failed. **Apply
+  `make db-upgrade` before the next TP1 arrives**; cycles that lost their TP1
+  event this way cannot have it back, since the body is rebuilt from the
+  stored events.
+
+- **Forwarded error logs are HTML-escaped.** `TelegramLogHandler` wraps a
+  record in `<pre>` and sends it with `parse_mode=HTML`, so a traceback
+  carrying an exception repr (`<class 'asyncpg...'>`) was rejected with
+  `can't parse entities: Unsupported start tag "class"` -- losing exactly the
+  alert worth forwarding. `TelegramLogNotification` now escapes the text
+  before boxing it. Every other channel is untouched: those bodies are markup
+  the formatters wrote on purpose.
+
 ## [1.2.0] - 2026-10-19
 
 ### Changed

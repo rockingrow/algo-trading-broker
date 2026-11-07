@@ -91,6 +91,21 @@ def test_connections_are_sorted_into_engine_workers_and_the_rest():
   assert clients.unidentified == [stranger]
 
 
+def test_the_named_broker_connection_is_dropped_without_a_trade_subscription():
+  # TRADE is consumed through JetStream now, so the broker holds no core
+  # subscription on it; its connection name is what identifies it.
+  broker_connection = {
+    "cid": 6,
+    "name": "algo-trading-broker",
+    "ip": "172.18.0.4",
+    "subscriptions_list": ["SYSTEM", "SIGNALS_DEMO.>", "_INBOX.abc.*"],
+  }
+  clients = status.classify_connections([broker_connection])
+  assert clients.engines == []
+  assert clients.workers == []
+  assert clients.unidentified == []
+
+
 def test_the_brokers_own_connection_is_never_a_worker_or_a_stranger():
   clients = status.classify_connections([BROKER_CONNECTION])
 

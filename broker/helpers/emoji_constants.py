@@ -8,8 +8,11 @@ and easy to swap out without hunting through multiple files.
 import emoji
 
 # ── Trading signal actions ────────────────────────────────────────────────────
-LONG: str = emoji.emojize(":chart_increasing:")  # 📈
-SHORT: str = emoji.emojize(":chart_decreasing:")  # 📉
+# An entry is drawn as a square, and only an entry is. A circle is also a
+# position flag, a broker/NATS status and a stop, so a green dot in a chat
+# never told a reader they were looking at a trade.
+LONG: str = emoji.emojize(":green_square:")  # 🟩
+SHORT: str = emoji.emojize(":red_square:")  # 🟥
 TP1: str = emoji.emojize(":bullseye:")  # 🎯
 TP2: str = emoji.emojize(":rocket:")  # 🚀
 R_SL: str = emoji.emojize(":shield:")  # 🛡️
@@ -52,6 +55,11 @@ ERROR_ALERT: str = emoji.emojize(":police_car_light:")  # 🚨
 GEAR: str = emoji.emojize(":gear:")  # ⚙️
 ADMIN_FLAT: str = emoji.emojize(":shield:")  # 🛡️
 BLOCKED: str = emoji.emojize(":prohibited:")  # 🚫
+
+# ── Demo / drill ──────────────────────────────────────────────────────────────
+# The end-to-end drill QTE fires at SIGNALS_DEMO.<strategy>: a real payload
+# rendered as a real card, which never reaches a worker.
+DEMO_SIGNAL: str = emoji.emojize(":test_tube:")  # 🧪
 
 # ── Broadcast cycle status ────────────────────────────────────────────────────
 # One Telegram message per signal cycle: the header carries a status icon that

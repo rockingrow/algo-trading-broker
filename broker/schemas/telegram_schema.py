@@ -131,9 +131,27 @@ class CommandResultResponse(BaseModel):
 
 
 class BroadcastSubscriptionResponse(BaseModel):
-  """Whether the caller is opted in to live trade-card DMs."""
+  """Whether the caller is opted in to live trade-card DMs for their *active*
+  account, and which account that is.
+
+  The opt-in is per account, so the answer is meaningless without naming the
+  account it was read from or written to — and the caller may have switched
+  accounts since it last resolved one, so the response is the authority."""
 
   subscribed: bool
+  account_id: str
+  market: MarketTypeEnum
+  gateway: Optional[str] = None
+
+
+class BroadcastBulkSubscriptionResponse(BaseModel):
+  """Outcome of switching live trade-card DMs on or off for **every** account
+  the caller is linked to (the bot's ``/subscribeall`` / ``/unsubscribeall``)."""
+
+  subscribed: bool
+  # How many linked accounts the switch covered — the caller's links at the
+  # moment of the call; an account linked afterwards starts off.
+  accounts: int
 
 
 class OpenPositionsResponse(BaseModel):

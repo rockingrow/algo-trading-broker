@@ -10,6 +10,8 @@ The subjects are grouped by direction of flow:
   configuration the broker pushes down to workers.
 - [**Worker → Broker**](#worker--broker) — position events and the connect
   handshake workers push up to the broker.
+- [**Producer → Broker**](#producer--broker) — the drill subject a signal
+  producer fires to prove its path to Telegram without commanding anything.
 - [**Internal (Broker → Broker)**](#internal-broker--broker) — the durable
   JetStream webhook buffer the broker feeds itself.
 
@@ -150,6 +152,10 @@ travels inside one `WORKER_CONNECTED_ACK`:
 
 ## `TRADE` — position events
 
+Published as plain core NATS. The broker's JetStream stream `TRADES` captures
+the subject, so a report sent while the broker is down is stored and applied
+when it comes back rather than lost; nothing changes on the worker side.
+
 Payload is a `PositionEvent`, published by a worker whenever a row in its local
 `positions` table is inserted (`event: CREATED`) or updated (`event: UPDATED`).
 Besides the trade fields (`symbol`, `action`, `volume`, `opened_price`,
@@ -210,3 +216,42 @@ optional `indicators` / `inputs`) under a `payload` key.
 | Message | Example |
 | ------- | ------- |
 | Webhook envelope | [`signals.webhook_envelope.json`](signals.webhook_envelope.json) |
+
+---
+
+# Producer → Broker
+
+## `SIGNALS_DEMO.<strategy>` — the end-to-end drill (core NATS)
+
+Not exchanged with workers, and never will be. A signal producer — today
+[Quant-Trading-Engine](https://github.com/rockingrow/quant-trading-engine), via
+its `make demo-signal` — publishes the **same** webhook envelope here that it
+would publish to `SIGNALS.<strategy>`, and the broker's `DemoSignalConsumer`
+records it onto its broadcast cycle and posts one line to the operator channel.
+That is all: the drill answers "does a signal from this strategy still reach
+Telegram, rendered correctly, with the payload this producer builds?" without
+a worker opening anything.
+
+Three properties make that safe, and the first is the reason for the subject's
+name:
+
+- **It is a different first token, not `SIGNALS.DEMO.*`.** The JetStream stream
+  `SIGNALS` captures `SIGNALS.>`, so a demo published one token deeper would be
+  stored in the very buffer `SignalWorker` drains and *would* reach workers.
+  `SIGNALS_DEMO` cannot match that filter.
+- **The consumer holds no publisher.** It is constructed without one, so there
+  is no branch that could forward a drill by mistake.
+- **A drill is not persisted into `signals`.** It must not be: the
+  `WORKER_CONNECTED_ACK` handshake replays every signal persisted in the last
+  `max_retry_timeout` seconds into `retry_signals`, which would hand a drill to
+  the next worker that connects.
+
+It is backed by no stream, so nothing here is durable or redelivered — a drill
+that did not arrive is a drill to run again. Access to NATS is the
+authentication, exactly as on `SIGNALS.<strategy>`: the envelope carries
+`token` and the consumer does not verify it, because `POST /secret/webhook` is
+the path that checks tokens.
+
+| Message | Example |
+| ------- | ------- |
+| Demo envelope | [`signals_demo.envelope.json`](signals_demo.envelope.json) |

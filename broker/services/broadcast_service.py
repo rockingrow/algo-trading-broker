@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass, field
 from typing import Optional
 
 from broker.constants import (
@@ -63,7 +64,7 @@ from broker.constants import (
   SILENT_SIGNAL,
 )
 from broker.db.listener import BROADCAST_LOG_CHANNEL, PostgresChangeListener
-from broker.db.models import Trade
+from broker.db.models import BroadcastMessageChat, Trade
 from broker.domain.trade_status import TradeStatusPolicy
 from broker.helpers.message_formatter import (
   format_broadcast_message,
@@ -84,6 +85,8 @@ from broker.services.notification_service import (
   BroadcastNotifier,
   ChatTarget,
   EditOutcome,
+  SendOutcome,
+  SendResult,
   parse_chat_targets,
 )
 from broker.settings import settings
@@ -268,6 +271,15 @@ def _market_of(event: PositionEvent, trade: Trade | None) -> MarketTypeEnum | No
     return None
 
 
+@dataclass
+class _CycleLock:
+  """Serialises the dispatches of one cycle, so two notifications for the same
+  trade are applied one after the other instead of racing into the same chat."""
+
+  lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+  users: int = 0
+
+
 class BroadcastDispatcher:
   """Reader half: turns committed cycle changes into Telegram edits.
 
@@ -301,7 +313,12 @@ class BroadcastDispatcher:
     self._max_attempts = max_attempts
     self._sweep_interval = sweep_interval_seconds
     self._stale_after = stale_after_seconds
-    self._locks: dict[str, asyncio.Lock] = {}
+    # One entry per cycle being dispatched: its lock and how many dispatches
+    # hold or await it. The count, not ``Lock.locked()``, decides when the
+    # entry may go — between a release and the next waiter's wake-up the lock
+    # reads as unlocked, and dropping it there let a third dispatch create a
+    # fresh lock and run alongside the waiter on the same cycle.
+    self._locks: dict[str, _CycleLock] = {}
     self._sweeper: Optional[asyncio.Task] = None
     self._stop = asyncio.Event()
 
@@ -381,18 +398,20 @@ class BroadcastDispatcher:
 
   async def dispatch(self, cycle_id: uuid.UUID) -> None:
     """Claim a cycle's pending changes and push the cycle to every chat."""
-    lock = self._lock_for(cycle_id)
+    key = str(cycle_id)
+    entry = self._locks.get(key)
+    if entry is None:
+      entry = self._locks[key] = _CycleLock()
+    entry.users += 1
     try:
-      async with lock:
+      async with entry.lock:
         await self._dispatch_locked(cycle_id)
     finally:
-      # Drop the lock once nothing holds or awaits it, so a long-running broker
-      # does not accumulate one lock per trade it ever broadcast. A waiter that
-      # already has the object keeps it alive (``locked()`` is True), and a
-      # waiter that has not acquired yet cannot be interleaved here — there is
-      # no await between taking the object and acquiring it.
-      if not lock.locked():
-        self._locks.pop(str(cycle_id), None)
+      # Drop the entry once no dispatch holds or awaits it, so a long-running
+      # broker does not accumulate one lock per trade it ever broadcast.
+      entry.users -= 1
+      if entry.users == 0:
+        del self._locks[key]
 
   async def _dispatch_locked(self, cycle_id: uuid.UUID) -> None:
     """Everything after the per-cycle lock is taken."""
@@ -421,17 +440,14 @@ class BroadcastDispatcher:
       ]
     )
     if settings_values.get(SILENT_SIGNAL) == "1":
-      # Silenced: the cycle stays recorded, so the next visible change shows
-      # the full history. Nothing is left pending — a body that was never
-      # sent is not owed to anyone.
       log.debug("SILENT_SIGNAL is enabled; skipping broadcast delivery.")
-      await self._repository.finish_logs(log_ids, delivered=True)
+      await self._park(view, log_ids, reason="silenced")
       return
 
     targets = self._targets(settings_values.get(PUBLIC_BROADCAST_CHAT_IDS_KEY))
     if not targets:
       log.debug("No broadcast chats configured; nothing to deliver.")
-      await self._repository.finish_logs(log_ids, delivered=True)
+      await self._park(view, log_ids, reason="no broadcast chats configured")
       return
 
     ok = await self._deliver_all(view, targets, settings_values)
@@ -442,6 +458,68 @@ class BroadcastDispatcher:
       max_attempts=self._max_attempts,
     )
     await self._repository.mark_broadcast(cycle_id)
+
+  async def _park(
+    self, view: BroadcastCycleView, log_ids: list[uuid.UUID], *, reason: str
+  ) -> None:
+    """Close out a pass that deliberately broadcast nothing.
+
+    A cycle nobody has seen yet is simply dropped: it stays recorded, so the
+    first chat it ever reaches renders the whole history at once, and a body
+    that was never sent is not owed to anyone.
+
+    A cycle that *already has a message in a chat* is a different matter. That
+    message is a live record of the trade, and an edit is the only way its
+    reader learns the position hit TP1 or closed. Dropping the entry would
+    leave it stale for good whenever no further event follows — a closed cycle
+    silenced on its last event keeps showing the trade as running. So the
+    entry is deferred instead, without spending an attempt, and the edit lands
+    when broadcasting is switched back on.
+
+    What the deferred pass does *not* owe is a reply notice per parked event.
+    An edit is silent, so the body catching up on four events at once is one
+    quiet correction; four notices would be a burst of chatter about a trade
+    that is long over. The chats behind are caught up on notices here — the
+    way ``_notify_updates`` does when an audience has replies switched off —
+    so switching broadcasting back on fixes the body without replaying the
+    trade into the channel.
+    """
+    behind = self._chats_behind(view)
+    if not behind:
+      await self._repository.finish_logs(log_ids, delivered=True)
+      return
+
+    log.info(
+      "Broadcast parked (%s) — %d chat(s) still owed an edit, deferring",
+      reason,
+      len(behind),
+    )
+    event_count = len(
+      [event for event in (view.message.events or []) if isinstance(event, dict)]
+    )
+    for chat in behind:
+      await self._repository.upsert_chat(
+        view.message.id,
+        audience=chat.audience,
+        chat_id=chat.chat_id,
+        # Neither is changed: the message is still there, and its stored body
+        # is still what the chat shows (see ``upsert_chat``).
+        message_id=None,
+        message=None,
+        notified_event_count=event_count,
+        last_error=f"parked: {reason}",
+      )
+    await self._repository.defer_logs(log_ids, reason=reason)
+
+  @staticmethod
+  def _chats_behind(view: BroadcastCycleView) -> list[BroadcastMessageChat]:
+    """Chat rows holding a posted message older than the cycle's latest seq."""
+    seq = view.message.last_seq or 0
+    return [
+      chat
+      for chat in (view.chats or [])
+      if getattr(chat, "message_id", None) and (chat.delivered_seq or 0) < seq
+    ]
 
   def _targets(
     self, public_raw: str | None
@@ -540,6 +618,21 @@ class BroadcastDispatcher:
       )
     return all(results)
 
+  async def _send(self, chat: ChatTarget, text: str) -> SendResult:
+    """Post a new message, tolerating a notifier that only hands back an id.
+
+    :class:`BroadcastNotifier` reports a :class:`SendOutcome`; a double or an
+    older notifier may only offer ``send_and_get_message_id``, in which case
+    an id is OK and its absence is FAILED — the behaviour before the outcome
+    existed.
+    """
+    sender = getattr(self._notifier, "send_message", None)
+    if sender is not None:
+      return SendResult(*await sender(chat, text))
+    message_id = await self._notifier.send_and_get_message_id(chat, text)
+    outcome = SendOutcome.OK if message_id else SendOutcome.FAILED
+    return SendResult(outcome, message_id)
+
   async def _deliver(
     self,
     *,
@@ -560,6 +653,11 @@ class BroadcastDispatcher:
     transient failure keeps the stored id and retries on the next pass instead,
     which is what stops a rate limit from littering the chat with duplicate
     copies of the cycle.
+
+    A *new* send that Telegram never answered is the same hazard from the
+    other end: there is no id to store, yet the message is probably in the
+    chat. That body is marked delivered rather than sent again — see
+    :class:`SendOutcome`.
 
     An edit that lands also posts a reply notice for every event this chat has
     not been told about yet: the edit alone changes the message silently, so a
@@ -620,7 +718,29 @@ class BroadcastDispatcher:
         message_id,
       )
 
-    new_message_id = await self._notifier.send_and_get_message_id(chat, text)
+    outcome, new_message_id = await self._send(chat, text)
+    if outcome is SendOutcome.UNKNOWN:
+      # Telegram never answered, so there is no message id — but the message
+      # is very likely in the chat already. Sending this body again would post
+      # a visible duplicate on every pass, which is exactly what happened on
+      # 2026-11-03: one stuck cycle became forty copies. ``delivered_seq`` is
+      # advanced instead, so the guard at the top of this method treats this
+      # body as shown; a genuinely newer event still gets its own message.
+      await self._repository.upsert_chat(
+        record_id,
+        audience=audience,
+        chat_id=stored_chat_id,
+        message_id=None,
+        message=text,
+        delivered_seq=seq,
+        notified_event_count=len(notices),
+        last_error="send outcome unknown",
+      )
+      log.warning(
+        "Broadcast send unanswered chat_id=%s — assuming it landed, not re-sending",
+        chat.label,
+      )
+      return False
     if new_message_id is None:
       await self._repository.upsert_chat(
         record_id,
@@ -692,12 +812,3 @@ class BroadcastDispatcher:
 
   # ── internals ──────────────────────────────────────────────────────
 
-  def _lock_for(self, cycle_id: uuid.UUID) -> asyncio.Lock:
-    """Per-cycle lock, so two notifications for the same trade are applied one
-    after the other instead of racing each other into the same chat."""
-    key = str(cycle_id)
-    lock = self._locks.get(key)
-    if lock is None:
-      lock = asyncio.Lock()
-      self._locks[key] = lock
-    return lock

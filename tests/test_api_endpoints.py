@@ -64,11 +64,6 @@ class FakeSignalService:
       "timestamp": payload.timestamp.isoformat(),
     }
 
-  # ``enqueue`` is what the webhook route calls now; ``process`` is kept as an
-  # alias on the real service for back-compat and remains available here so
-  # tests can still monkey-patch ``ctx["signal_service"].process``.
-  process = enqueue
-
 
 class FakeSettingRepo:
   def __init__(self):

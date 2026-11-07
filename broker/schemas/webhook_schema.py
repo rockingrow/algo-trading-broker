@@ -72,7 +72,10 @@ class InputsSchema(BaseModel):
   over_wt_value: Optional[int] = None
   safe_wt_value: Optional[int] = None
   use_session: Optional[bool] = None
-  skip_windows: Optional[str] = None
+  # Accepts either the single string TradingView alert templates interpolate
+  # ("08:00-09:00") or a ready-made list, and always normalises to a list so
+  # the audit payload has one shape downstream.
+  skip_windows: Optional[list[str]] = None
   bb_len: Optional[int] = None
   bb_mult: Optional[float] = None
   show_imb: Optional[bool] = None
@@ -90,6 +93,22 @@ class InputsSchema(BaseModel):
   ema_filter_tf: Optional[str] = None
   use_cooldown: Optional[bool] = None
   cooldown_bars: Optional[int] = None
+
+  @field_validator("skip_windows", mode="before")
+  @classmethod
+  def _coerce_skip_windows(cls, value):
+    """Wrap a single window string into the one-item list the field stores.
+
+    Pine alert templates write this input straight out, so the same strategy
+    reaches the broker as `"08:00-09:00"` one build and as a JSON array the
+    next. Both are valid; rejecting either loses an audit payload over a field
+    nothing routes on. A blank string is treated as "no windows" rather than a
+    one-item list holding an empty window.
+    """
+    if isinstance(value, str):
+      window = value.strip()
+      return [window] if window else []
+    return value
 
 
 class WebhookPayload(BaseModel):
@@ -122,7 +141,7 @@ class WebhookPayload(BaseModel):
   symbol: str
   timeframe: str
   timestamp: datetime
-  # Short id (exactly 16 lowercase-hex chars, i.e. what :func:`new_uxid`
+  # Short id (exactly 16 uppercase-hex chars, i.e. what :func:`new_uxid`
   # produces) shared by every alert of one trade cycle: the entry and each of
   # its TP/SL/FLAT follow-ups. Together with ``strategy`` it keys the single
   # Telegram broadcast message the cycle is rendered into, so a strategy that
@@ -147,8 +166,8 @@ class WebhookPayload(BaseModel):
     message.
 
     Anything else is rejected unless it matches the exact uxid shape (16
-    uppercase alphanumeric characters). Uppercase is accepted and normalised, so a
-    strategy that writes UUIDs in either case works either way. Rejecting at
+    hex characters). Lowercase is accepted and upper-cased, so a strategy that
+    writes UUID hex in either case keys the same cycle either way. Rejecting at
     the boundary is deliberate: a malformed id — a shortened one, a UUID with
     dashes, a random string — could collide against a real cycle id and quietly
     merge two unrelated trades. Failing fast with a 422 forces the strategy to
@@ -162,7 +181,6 @@ class WebhookPayload(BaseModel):
     normalised = text.upper()
     if not is_valid_uxid(normalised):
       raise ValueError(
-        f"signal_uxid must be exactly {UXID_LENGTH} uppercase alphanumeric characters, "
-        f"got {value!r}"
+        f"signal_uxid must be exactly {UXID_LENGTH} hex characters, got {value!r}"
       )
     return normalised

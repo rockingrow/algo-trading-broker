@@ -3,7 +3,8 @@
 Covers four layers with in-memory fakes (no DB / NATS / Telegram):
 - ``TradeCardService`` — posting, editing, skipping and forgetting cards,
 - the card renderer and its keyboard,
-- the ``/v1/telegram/*`` per-trade and opt-in endpoints,
+- the ``/v1/telegram/*`` per-trade endpoints (the per-account opt-in ones are
+  in ``test_telegram_endpoints.py``),
 - the ``POST /admin/accounts/{uuid}/link-telegram`` endpoint.
 """
 
@@ -30,7 +31,6 @@ from broker.helpers.trade_card import (
 from broker.providers import (
   get_account_repository,
   get_publisher,
-  get_trade_broadcast_repository,
   get_trade_repository,
 )
 from broker.router import get_core_router
@@ -49,21 +49,12 @@ API_KEY = "test-api-key"
 
 
 class FakeBroadcastRepo:
-  def __init__(self, subscribed: set[int] | None = None, targets: list[str] | None = None):
-    self._subscribed = {str(u) for u in (subscribed or set())}
+  """The card service only asks who to send to; the opt-in endpoints are
+  covered against their own fake in ``test_telegram_endpoints.py``."""
+
+  def __init__(self, targets: list[str] | None = None):
     self._targets = targets or []
     self.target_calls: list[tuple] = []
-
-  async def subscribe(self, telegram_user_id, platform=None):
-    self._subscribed.add(str(telegram_user_id))
-    return True
-
-  async def unsubscribe(self, telegram_user_id, platform=None):
-    self._subscribed.discard(str(telegram_user_id))
-    return True
-
-  async def is_subscribed(self, telegram_user_id, platform=None):
-    return str(telegram_user_id) in self._subscribed
 
   async def list_broadcast_targets(self, account_id, market, gateway, platform=None):
     self.target_calls.append((account_id, market, gateway))
@@ -266,7 +257,9 @@ async def test_card_is_posted_to_every_subscriber_when_a_trade_opens():
   assert notifier.edits == []
   # A running trade's card carries its two buttons.
   for _, _, markup in notifier.sent:
-    labels = [b["callback_data"].rsplit(":", 1)[0] for b in markup["inline_keyboard"][0]]
+    labels = [
+      b["callback_data"].rsplit(":", 1)[0] for b in markup["inline_keyboard"][0]
+    ]
     assert labels == [CALLBACK_DETAIL, CALLBACK_EXIT]
 
 
@@ -288,7 +281,9 @@ async def test_existing_card_is_edited_not_reposted_on_partial_close():
   chat_id, message_id, body, markup = notifier.edits[0]
   # The Bot API takes the id as a string; the row stores it as an int.
   assert (chat_id, message_id) == ("111", "42")
-  assert "[" + em.CYCLE_RUNNING + "RUNNING]" in body
+  # A partial fill is its own header state: the position is still live, but
+  # the card must not keep saying RUNNING as if nothing had come off it.
+  assert "[" + em.TP1 + "TP1]" in body
   assert f"{em.TP1} TP1" in body
   # Still running, so the buttons stay.
   assert markup is not None
@@ -504,6 +499,30 @@ def test_card_header_matches_the_broadcast_style():
   assert lines[2] == "-----------"
 
 
+def test_card_header_reads_tp1_after_a_partial_fill():
+  """The third header state: the trade gave something back but is not out, so
+  it reads neither RUNNING nor CLOSED."""
+  trade = _make_trade(TradeStatusEnum.PARTIALLY_CLOSED, last_action="TP1")
+  body = format_trade_card(trade)
+  assert body.splitlines()[0] == f"[{em.TP1}TP1]"
+  # Not a close: the entry price keeps its own label.
+  assert "Price: <code>" in body
+
+
+def test_card_header_reads_tp1_on_a_tp1_action_alone():
+  """A worker that reports the TP1 fill without moving the status off OPENED
+  still gets the TP1 header — either signal is enough."""
+  trade = _make_trade(TradeStatusEnum.OPENED, last_action="TP1")
+  assert format_trade_card(trade).splitlines()[0] == f"[{em.TP1}TP1]"
+
+
+def test_card_header_reads_closed_once_the_rest_is_out():
+  """TP1 is not sticky on the card the way it is on a broadcast cycle: the
+  card renders the trade's own status, and a closed trade is closed."""
+  trade = _make_trade(TradeStatusEnum.CLOSED, last_action="TP2")
+  assert format_trade_card(trade).splitlines()[0] == f"[{em.CYCLE_CLOSED}CLOSED]"
+
+
 def test_card_says_how_a_trade_ended():
   """TP2 / SL / R_SL all persist as CLOSED, so the bracket status alone is not
   enough — the "Actions:" box is what says how a trade ended."""
@@ -703,36 +722,6 @@ def test_exit_409s_on_an_already_closed_trade():
   )
   assert r.status_code == 409
   assert publisher.admin_signals == []
-
-
-# ── Trade-card opt-in endpoints ──────────────────────────────────────
-
-
-@pytest.fixture
-def broadcast_ctx():
-  app = FastAPI()
-  app.include_router(get_core_router())
-  repo = FakeBroadcastRepo()
-  app.dependency_overrides[get_trade_broadcast_repository] = lambda: repo
-  app.dependency_overrides[ensure_api_key] = lambda: None
-  return {"client": TestClient(app), "repo": repo}
-
-
-def test_subscribe_then_status_then_unsubscribe(broadcast_ctx):
-  client = broadcast_ctx["client"]
-  h = {"X-API-KEY": API_KEY}
-
-  r = client.get("/v1/telegram/555/broadcast", headers=h)
-  assert r.status_code == 200 and r.json() == {"subscribed": False}
-
-  r = client.post("/v1/telegram/555/broadcast/subscribe", headers=h)
-  assert r.status_code == 200 and r.json() == {"subscribed": True}
-
-  r = client.get("/v1/telegram/555/broadcast", headers=h)
-  assert r.json() == {"subscribed": True}
-
-  r = client.post("/v1/telegram/555/broadcast/unsubscribe", headers=h)
-  assert r.status_code == 200 and r.json() == {"subscribed": False}
 
 
 # ── Admin link-telegram endpoint ─────────────────────────────────────

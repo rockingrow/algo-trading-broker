@@ -16,6 +16,7 @@ simplified model of them.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -210,6 +211,15 @@ class FakeBroadcastRepository:
       )
     return True
 
+  async def defer_logs(self, log_ids, *, reason):
+    for entry in self.logs:
+      if entry.id not in log_ids:
+        continue
+      entry.status = BroadcastLogStatusEnum.PENDING
+      entry.attempts = max(0, entry.attempts - 1)
+      entry.last_error = reason
+    return True
+
   async def list_cycles_with_pending_logs(
     self, *, max_attempts, stale_after_seconds, limit=50
   ):
@@ -358,7 +368,7 @@ class FakeSignalRepository:
     return self.rows.get(signal_id)
 
 
-def _payload(action=SignalActionEnum.LONG, uxid="9f2c4b7e18a3d605", **overrides):
+def _payload(action=SignalActionEnum.LONG, uxid="9F2C4B7E18A3D605", **overrides):
   base = dict(
     strategy="strat",
     symbol="XAUUSD",
@@ -395,7 +405,7 @@ def _trade_event(**overrides) -> PositionEvent:
   return PositionEvent(**base)
 
 
-def _signal_row(strategy="strat", uxid="9f2c4b7e18a3d605", symbol="XAUUSD"):
+def _signal_row(strategy="strat", uxid="9F2C4B7E18A3D605", symbol="XAUUSD"):
   return SimpleNamespace(strategy=strategy, signal_uxid=uxid, symbol=symbol)
 
 
@@ -438,7 +448,7 @@ async def _run(payload, repo=None, **dispatcher_kwargs):
   return repo, channel, cycle
 
 
-def _cycle_of(repo, strategy="strat", uxid="9f2c4b7e18a3d605", symbol="XAUUSD"):
+def _cycle_of(repo, strategy="strat", uxid="9F2C4B7E18A3D605", symbol="XAUUSD"):
   return repo.cycles[(symbol, strategy, uxid)]
 
 
@@ -620,7 +630,7 @@ async def test_delivery_stores_message_id_body_and_sequence():
   chat = repo.chats[cycle.id]["-100"]
   assert chat.message_id == "101"
   assert chat.audience == BroadcastAudienceEnum.PRIVATE
-  assert "<b>XAUUSD</b>" in chat.message
+  assert "LONG XAUUSD" in chat.message
   assert chat.delivered_seq == cycle.last_seq == 1
 
 
@@ -713,8 +723,8 @@ async def test_a_follow_up_replies_to_the_edited_message_in_every_audience():
   private_message_id = repo.chats[cycle.id]["-100"].message_id
   public_message_id = repo.chats[cycle.id]["-300"].message_id
   assert channel.replied == [
-    ("-100", private_message_id, f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"),
-    ("-300", public_message_id, f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"),
+    ("-100", private_message_id, f"[{em.TP1}TP1]\n{em.TP1} TP1"),
+    ("-300", public_message_id, f"[{em.TP1}TP1]\n{em.TP1} TP1"),
   ]
 
 
@@ -745,7 +755,7 @@ async def test_events_delivered_together_get_one_notice_each():
   await dispatcher.dispatch(cycle.id)
 
   assert [text for _, _, text in channel.replied] == [
-    f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1",
+    f"[{em.TP1}TP1]\n{em.TP1} TP1",
     f"[{em.CYCLE_CLOSED}CLOSED]\n{em.TP2} TP2",
   ]
 
@@ -888,8 +898,8 @@ async def test_edited_body_accumulates_the_whole_cycle():
   await dispatcher.dispatch(cycle.id)
 
   _, _, text = channel.edited[-1]
-  assert "<b>LONG</b>" in text
-  assert "<b>TP1</b>" in text
+  assert "LONG XAUUSD" in text
+  assert f"{em.TP1} TP1" in text
 
 
 async def test_closing_action_flips_the_cycle_to_closed():
@@ -903,14 +913,16 @@ async def test_closing_action_flips_the_cycle_to_closed():
   await dispatcher.dispatch(cycle.id)
 
   assert cycle.status == BroadcastStatusEnum.CLOSED
-  assert "<b>CLOSED</b>" in channel.edited[-1][2]
+  assert channel.edited[-1][2].startswith(f"[{em.CYCLE_CLOSED}CLOSED]")
 
 
-async def test_tp1_keeps_the_cycle_running():
+async def test_tp1_gives_the_cycle_its_own_status():
+  """A partial take-profit is neither RUNNING nor CLOSED: part of the position
+  is out and the rest is still live, which is what the TP1 status says."""
   writer, repo = _writer()
   await writer.broadcast(_payload())
   await writer.broadcast(_payload(action=SignalActionEnum.TP1))
-  assert _cycle_of(repo).status == BroadcastStatusEnum.RUNNING
+  assert _cycle_of(repo).status == BroadcastStatusEnum.TP1
 
 
 # ── Dispatcher: the private execution table ─────────────────────────
@@ -925,12 +937,12 @@ async def test_private_body_carries_the_worker_table():
   await dispatcher.dispatch(_cycle_of(repo).id)
 
   bodies = {chat_id: text for chat_id, text in channel.sent}
-  assert "Executions (1)" in bodies["-100"]
+  assert "Workers (1)" in bodies["-100"]
   assert "MT5 ****5678" in bodies["-100"]
   assert "OPENED" in bodies["-100"]
   assert "Strategy:" in bodies["-100"]
   # The public copy stays the bare cycle body.
-  assert "Executions" not in bodies["-300"]
+  assert "Workers" not in bodies["-300"]
   assert "Strategy:" not in bodies["-300"]
 
 
@@ -1128,6 +1140,35 @@ async def test_per_cycle_locks_do_not_accumulate():
   assert dispatcher._locks == {}
 
 
+async def test_a_cycle_is_never_dispatched_twice_at_once():
+  # A holds the lock, B waits on it, and C arrives in the gap after A releases
+  # but before B wakes. Reading ``Lock.locked()`` there used to drop the lock
+  # and hand C a fresh one, so B and C delivered the same cycle concurrently.
+  repo, _, cycle = await _run(_payload())
+  dispatcher, _ = _dispatcher(repo)
+  running = 0
+  peak = 0
+
+  async def slow_dispatch(cycle_id):
+    nonlocal running, peak
+    running += 1
+    peak = max(peak, running)
+    await asyncio.sleep(0.01)
+    running -= 1
+
+  dispatcher._dispatch_locked = slow_dispatch
+  first = asyncio.create_task(dispatcher.dispatch(cycle.id))
+  await asyncio.sleep(0)
+  second = asyncio.create_task(dispatcher.dispatch(cycle.id))
+  await asyncio.sleep(0)
+  await asyncio.sleep(0.011)
+  third = asyncio.create_task(dispatcher.dispatch(cycle.id))
+  await asyncio.gather(first, second, third)
+
+  assert peak == 1
+  assert dispatcher._locks == {}
+
+
 # ── Dispatcher: broker settings ─────────────────────────────────────
 
 
@@ -1139,15 +1180,124 @@ async def test_silent_signal_records_the_cycle_but_sends_nothing():
   assert _cycle_of(repo).events
 
 
+async def test_silent_signal_drops_the_log_of_a_cycle_no_chat_has_seen():
+  """Nothing is owed: no chat holds a message for this trade."""
+  repo, _, cycle = await _run(_payload(), settings_values={SILENT_SIGNAL: "1"})
+
+  assert [entry.status for entry in repo.logs] == [BroadcastLogStatusEnum.DELIVERED]
+  assert repo.chats[cycle.id] == {}
+
+
+async def test_silencing_mid_trade_defers_the_edit_a_posted_message_is_owed():
+  """The chat already shows this trade running; an edit is the only way its
+  reader learns it closed, so the entry waits instead of being dropped."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  silenced, _ = _dispatcher(
+    repo, telegram=channel, settings_values={SILENT_SIGNAL: "1"}
+  )
+  await writer.broadcast(_payload(action=SignalActionEnum.FLAT))
+  await silenced.dispatch(cycle.id)
+
+  assert len(channel.edited) == 0
+  pending = [
+    entry for entry in repo.logs if entry.status == BroadcastLogStatusEnum.PENDING
+  ]
+  assert len(pending) == 1
+  assert pending[0].attempts == 0  # a deferral does not spend an attempt
+
+
+async def test_the_deferred_edit_lands_once_broadcasting_is_back_on():
+  """Un-silencing re-renders the whole cycle into the message that went stale."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  silenced, _ = _dispatcher(
+    repo, telegram=channel, settings_values={SILENT_SIGNAL: "1"}
+  )
+  await writer.broadcast(_payload(action=SignalActionEnum.FLAT))
+  await silenced.dispatch(cycle.id)
+
+  resumed, _ = _dispatcher(repo, telegram=channel)
+  assert await resumed.sweep() == 1
+
+  assert [chat_id for chat_id, _, _ in channel.edited] == ["-100"]
+  assert "FLAT" in channel.edited[-1][2]
+  assert all(entry.status == BroadcastLogStatusEnum.DELIVERED for entry in repo.logs)
+
+
+async def test_a_parked_cycle_catches_up_on_notices_without_replaying_them():
+  """The deferred edit is one quiet correction; the events it covers must not
+  come back as a burst of replies once broadcasting resumes."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  silenced, _ = _dispatcher(
+    repo, telegram=channel, settings_values={SILENT_SIGNAL: "1"}
+  )
+  for action in (SignalActionEnum.TP1, SignalActionEnum.TP2, SignalActionEnum.FLAT):
+    await writer.broadcast(_payload(action=action))
+    await silenced.dispatch(cycle.id)
+
+  resumed, _ = _dispatcher(repo, telegram=channel)
+  await resumed.sweep()
+
+  # The body caught up on all four events ...
+  assert "FLAT" in channel.edited[-1][2]
+  # ... and the three parked events were caught up on silently.
+  assert channel.replied == []
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 4
+
+
+async def test_removing_every_chat_mid_trade_defers_the_owed_edit_too():
+  """Same hazard through the other switch: both audiences emptied."""
+  writer, repo = _notice_writer()
+  dispatcher, channel = _dispatcher(repo)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+
+  disabled, _ = _dispatcher(repo, private=(), public="", telegram=channel)
+  await writer.broadcast(_payload(action=SignalActionEnum.FLAT))
+  await disabled.dispatch(cycle.id)
+
+  assert len(channel.edited) == 0
+  assert [entry.status for entry in repo.logs][-1] == BroadcastLogStatusEnum.PENDING
+
+  resumed, _ = _dispatcher(repo, telegram=channel)
+  await resumed.sweep()
+  assert "FLAT" in channel.edited[-1][2]
+
+
 async def test_public_chats_come_from_the_broker_setting():
   _, channel, _ = await _run(_payload(), private=(), public="-300,-400")
   assert [chat_id for chat_id, _ in channel.sent] == ["-300", "-400"]
 
 
 async def test_notification_timezone_setting_is_applied():
-  _, channel, _ = await _run(
-    _payload(), settings_values={NOTIFICATION_TIMEZONE_KEY: "0"}
+  writer, repo = _writer()
+  dispatcher, channel = _dispatcher(
+    repo, settings_values={NOTIFICATION_TIMEZONE_KEY: "0"}
   )
+
+  await writer.broadcast(_payload())
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(_cycle_of(repo).id)
+
   assert "2026-01-01 00:00:00 (UTC+0)" in channel.sent[0][1]
 
 
@@ -1217,7 +1367,7 @@ def test_market_of_reads_the_event_then_the_trade():
 
 
 def test_only_terminal_actions_close_a_cycle():
-  running = [SignalActionEnum.LONG, SignalActionEnum.SHORT, SignalActionEnum.TP1]
+  running = [SignalActionEnum.LONG, SignalActionEnum.SHORT]
   closing = [
     SignalActionEnum.TP2,
     SignalActionEnum.SL,
@@ -1226,6 +1376,12 @@ def test_only_terminal_actions_close_a_cycle():
   ]
   assert all(status_for_action(a) == BroadcastStatusEnum.RUNNING for a in running)
   assert all(status_for_action(a) == BroadcastStatusEnum.CLOSED for a in closing)
+
+
+def test_tp1_gets_its_own_status_without_closing_the_cycle():
+  """A partial take-profit leaves the rest of the position open, so it is not
+  a close — but it is not RUNNING either, which would hide the fill."""
+  assert status_for_action(SignalActionEnum.TP1) == BroadcastStatusEnum.TP1
 
 
 def test_closed_is_terminal():
@@ -1237,3 +1393,30 @@ def test_closed_is_terminal():
     merge_status(BroadcastStatusEnum.RUNNING, BroadcastStatusEnum.CLOSED)
     == BroadcastStatusEnum.CLOSED
   )
+  assert (
+    merge_status(BroadcastStatusEnum.CLOSED, BroadcastStatusEnum.TP1)
+    == BroadcastStatusEnum.CLOSED
+  )
+
+
+def test_tp1_does_not_fall_back_to_running():
+  """A scale-in entry arriving after the partial fill must not take the header
+  back to RUNNING, which reads as a trade that has given nothing back."""
+  assert (
+    merge_status(BroadcastStatusEnum.TP1, BroadcastStatusEnum.RUNNING)
+    == BroadcastStatusEnum.TP1
+  )
+  assert (
+    merge_status(BroadcastStatusEnum.RUNNING, BroadcastStatusEnum.TP1)
+    == BroadcastStatusEnum.TP1
+  )
+  assert (
+    merge_status(BroadcastStatusEnum.TP1, BroadcastStatusEnum.CLOSED)
+    == BroadcastStatusEnum.CLOSED
+  )
+
+
+def test_an_unrecognised_stored_status_is_read_as_running():
+  """A bare string from a fake or a partially loaded row still merges."""
+  assert merge_status("MYSTERY", BroadcastStatusEnum.TP1) == BroadcastStatusEnum.TP1
+  assert merge_status("TP1", BroadcastStatusEnum.RUNNING) == BroadcastStatusEnum.TP1

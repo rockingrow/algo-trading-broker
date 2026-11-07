@@ -34,3 +34,12 @@ async def test_unconfigured_key_raises_500(monkeypatch):
   with pytest.raises(HTTPException) as exc:
     await ensure_api_key(api_key="anything")
   assert exc.value.status_code == 500
+
+
+async def test_non_ascii_key_is_rejected_not_crashed(monkeypatch):
+  # ``secrets.compare_digest`` refuses non-ASCII ``str``; the guard compares
+  # bytes so a garbage header is a 401, not a 500.
+  monkeypatch.setattr(mod.settings.broker_api, "API_KEY", "secret-key")
+  with pytest.raises(HTTPException) as exc:
+    await ensure_api_key(api_key="sécret-kéy")
+  assert exc.value.status_code == 401

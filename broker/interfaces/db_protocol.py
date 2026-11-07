@@ -44,7 +44,17 @@ class BroadcastCycleView:
 class SignalRepository(Protocol):
   """Persists inbound TradingView webhook signals."""
 
-  async def log_signal(self, payload: WebhookPayload) -> str | None: ...
+  async def log_signal(
+    self,
+    payload: WebhookPayload,
+    *,
+    delivery_key: str | None = None,
+    attempts: int | None = None,
+  ) -> str | None: ...
+
+  async def get_by_delivery_key(self, delivery_key: str) -> Signal | None: ...
+
+  async def mark_failed(self, signal_id: str) -> bool: ...
 
   async def mark_published(self, signal_id: str) -> bool: ...
 
@@ -64,6 +74,8 @@ class SettingRepository(Protocol):
   """Reads and writes broker-level key/value settings."""
 
   async def get(self, key: str) -> str | None: ...
+
+  async def get_strict(self, key: str) -> str | None: ...
 
   async def get_many(self, keys: list[str]) -> dict[str, str]: ...
 
@@ -155,25 +167,40 @@ class AccountRepository(Protocol):
 
 @runtime_checkable
 class TradeBroadcastRepository(Protocol):
-  """Per-user opt-in for live trade-card DMs, and recipient lookup."""
+  """Per-account opt-in for live trade-card DMs, and recipient lookup."""
 
   async def subscribe(
     self,
     telegram_user_id: int,
+    account_uuid: uuid.UUID,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool: ...
 
   async def unsubscribe(
     self,
     telegram_user_id: int,
+    account_uuid: uuid.UUID,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool: ...
 
   async def is_subscribed(
     self,
     telegram_user_id: int,
+    account_uuid: uuid.UUID,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool: ...
+
+  async def subscribe_all(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> int | None: ...
+
+  async def unsubscribe_all(
+    self,
+    telegram_user_id: int,
+    platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
+  ) -> int | None: ...
 
   async def list_broadcast_targets(
     self,
@@ -233,6 +260,8 @@ class BroadcastMessageRepository(Protocol):
     error: str | None = None,
     max_attempts: int | None = None,
   ) -> bool: ...
+
+  async def defer_logs(self, log_ids: list[uuid.UUID], *, reason: str) -> bool: ...
 
   async def list_cycles_with_pending_logs(
     self, *, max_attempts: int, stale_after_seconds: int, limit: int = 50

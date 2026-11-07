@@ -69,36 +69,71 @@ def _record(events=None, status=BroadcastStatusEnum.RUNNING, **overrides):
 
 def test_header_carries_entry_emoji_symbol_and_timeframe():
   msg = format_broadcast_message(_record())
-  assert em.LONG in msg
-  assert "<b>OANDA:XAUUSD</b>" in msg
-  assert "(H1)" in msg  # timeframe "60" -> H1
+  assert f"{em.LONG} LONG OANDA:XAUUSD (H1)" in msg  # timeframe "60" -> H1
 
 
 def test_header_shows_strategy_and_cycle_id():
   msg = format_broadcast_message(_record(), include_meta=True)
-  assert "Strategy: <b>strat</b>" in msg
-  assert "Signal: <code>9f2c4b7e18a3d605</code>" in msg
+  assert "Strategy: strat" in msg
+  assert "Signal: 9f2c4b7e18a3d605" in msg
 
 
-def test_header_omits_strategy_and_cycle_id_without_include_meta():
+def test_header_omits_strategy_without_include_meta():
   """The public audience gets the bare body — no strategy internals."""
   msg = format_broadcast_message(_record())
   assert "Strategy:" not in msg
-  assert "Signal:" not in msg
+
+
+def test_public_body_still_carries_the_signal_uxid():
+  """The uxid is how a reader refers to a cycle, so it is not an internal."""
+  msg = format_broadcast_message(_record())
+  assert "Signal: 9f2c4b7e18a3d605" in msg
+
+
+def test_the_signal_uxid_is_not_repeated_for_the_private_audience():
+  """Private shows it in the "Signal info" box; it must not appear twice."""
+  msg = format_broadcast_message(_record(), include_meta=True)
+  assert msg.count("Signal: ") == 1
 
 
 def test_running_cycle_shows_the_running_icon():
   msg = format_broadcast_message(_record())
-  assert em.CYCLE_RUNNING in msg
-  assert "<b>RUNNING</b>" in msg
+  assert msg.startswith(f"[{em.CYCLE_RUNNING}RUNNING]")
 
 
 def test_closed_cycle_shows_the_closed_icon():
   msg = format_broadcast_message(
     _record(events=[_event(), _event("SL")], status=BroadcastStatusEnum.CLOSED)
   )
-  assert em.CYCLE_CLOSED in msg
-  assert "<b>CLOSED</b>" in msg
+  assert msg.startswith(f"[{em.CYCLE_CLOSED}CLOSED]")
+
+
+def test_tp1_cycle_shows_the_tp1_icon_and_word():
+  """A partial take-profit is the third header state — the position is still
+  live, so neither RUNNING (nothing taken off) nor CLOSED (trade out) says it."""
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.TP1)
+  )
+  assert msg.startswith(f"[{em.TP1}TP1]")
+
+
+def test_tp2_cycle_still_shows_closed():
+  """TP2 takes the rest of the position off, so it keeps the closing header
+  rather than getting one of its own."""
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP2")], status=BroadcastStatusEnum.CLOSED)
+  )
+  assert msg.startswith(f"[{em.CYCLE_CLOSED}CLOSED]")
+
+
+def test_header_catches_up_with_a_cycle_recorded_before_the_tp1_status():
+  """A row written before the TP1 status existed still says RUNNING, but its
+  events say the partial fill happened — and the reply notice under the body
+  is rendered from those events, so the body has to agree with it."""
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.RUNNING)
+  )
+  assert msg.startswith(f"[{em.TP1}TP1]")
 
 
 def test_header_keeps_the_entry_emoji_after_the_cycle_closes():
@@ -107,7 +142,7 @@ def test_header_keeps_the_entry_emoji_after_the_cycle_closes():
   msg = format_broadcast_message(
     _record(events=[_event("SHORT"), _event("TP2")], status=BroadcastStatusEnum.CLOSED)
   )
-  assert msg.startswith(em.SHORT)
+  assert msg.splitlines()[1].startswith(em.SHORT)
 
 
 def test_missing_timeframe_is_omitted():
@@ -122,21 +157,25 @@ def test_every_event_appears_in_order():
   msg = format_broadcast_message(
     _record(events=[_event(), _event("TP1"), _event("SL")])
   )
-  assert msg.index("<b>LONG</b>") < msg.index("<b>TP1</b>") < msg.index("<b>SL</b>")
+  # The entry names the direction in the header; its follow-ups are listed
+  # in the Actions box, in the order they arrived.
+  assert msg.index("LONG") < msg.index(f"{em.TP1} TP1") < msg.index(f"{em.SL} SL")
 
 
 def test_entry_event_renders_price_size_risk_and_levels():
   msg = format_broadcast_message(_record())
-  assert "@ <code>100</code>" in msg
-  assert "× <code>1</code>" in msg
-  assert "Risk: <code>2%</code>" in msg
-  assert "SL: <code>95</code> | TP1: <code>110</code> | TP2: <code>120</code>" in msg
+  assert "Price: 100" in msg
+  assert "Quantity: 1 | Risk: 2%" in msg
+  assert "SL: 95 | TP1: 110 | TP2: 120" in msg
 
 
 def test_follow_up_event_does_not_repeat_the_levels():
-  msg = format_broadcast_message(_record(events=[_event("TP1", price=110.0)]))
-  assert "TP2: <code>120</code>" not in msg
-  assert "@ <code>110</code>" in msg
+  """The brackets belong to the entry box; an action line carries only what
+  that action did."""
+  msg = format_broadcast_message(_record(events=[_event(), _event("TP1", price=110.0)]))
+  actions = msg.split("Actions:", 1)[1]
+  assert "TP2: 120" not in actions
+  assert "Price: 110" in actions
 
 
 def test_position_flags_render_on_the_entry():
@@ -151,7 +190,8 @@ def test_position_flags_render_on_the_entry():
           scale_strategy="pullback",
         )
       ]
-    )
+    ),
+    include_meta=True,
   )
   assert "TP1%: 50%" in msg
   assert f"SL→BE: {em.FLAG_OFF}" in msg
@@ -167,37 +207,40 @@ def test_flags_absent_when_the_strategy_sent_none():
 
 def test_unknown_action_falls_back_to_the_default_emoji():
   msg = format_broadcast_message(_record(events=[_event("SOMETHING_NEW")]))
-  assert em.DEFAULT_SIGNAL in msg
-  assert "<b>SOMETHING_NEW</b>" in msg
+  assert f"{em.DEFAULT_SIGNAL} SOMETHING_NEW" in msg
 
 
 def test_empty_cycle_still_renders_a_header():
   msg = format_broadcast_message(_record(events=[]))
-  assert "<b>OANDA:XAUUSD</b>" in msg
+  assert f"{em.DEFAULT_SIGNAL} OANDA:XAUUSD (H1)" in msg
 
 
 # ── Time formatting ────────────────────────────────────────────────
 
 
 def test_time_defaults_to_utc_plus_7():
-  msg = format_broadcast_message(_record())
+  msg = format_broadcast_message(_record(events=[_event(), _event("TP1")]))
   assert "2026-01-01 19:30:00 (UTC+7)" in msg
 
 
 def test_time_honors_custom_timezone_offset():
-  msg = format_broadcast_message(_record(), timezone_offset="-5")
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP1")]), timezone_offset="-5"
+  )
   assert "2026-01-01 07:30:00 (UTC-5)" in msg
 
 
 def test_naive_timestamp_is_read_as_utc():
   msg = format_broadcast_message(
-    _record(events=[_event(timestamp="2026-01-01T12:30:00")])
+    _record(events=[_event(), _event("TP1", timestamp="2026-01-01T12:30:00")])
   )
   assert "2026-01-01 19:30:00 (UTC+7)" in msg
 
 
 def test_unparseable_timestamp_is_shown_as_is():
-  msg = format_broadcast_message(_record(events=[_event(timestamp="whenever")]))
+  msg = format_broadcast_message(
+    _record(events=[_event(), _event("TP1", timestamp="whenever")])
+  )
   assert "whenever" in msg
 
 
@@ -210,7 +253,7 @@ def test_no_retry_marker_on_a_first_attempt():
 
 
 def test_retry_marker_shows_the_attempt_number():
-  msg = format_broadcast_message(_record(events=[_event(attempt=3)]))
+  msg = format_broadcast_message(_record(events=[_event(), _event("TP1", attempt=3)]))
   assert f"{em.CYCLE_RETRY} attempt 3" in msg
 
 
@@ -285,7 +328,7 @@ def _worker(account_id="12345678", gateway="MT5", status=TradeStatusEnum.OPENED)
 
 
 def test_no_execution_table_without_workers():
-  assert "Executions" not in format_broadcast_message(_record())
+  assert "Workers" not in format_broadcast_message(_record())
 
 
 def test_no_execution_table_without_include_meta():
@@ -293,7 +336,7 @@ def test_no_execution_table_without_include_meta():
   msg = format_broadcast_message(
     _record(), workers=[_worker(), _worker("87654321", status=TradeStatusEnum.CLOSED)]
   )
-  assert "Executions" not in msg
+  assert "Workers" not in msg
 
 
 def test_execution_table_lists_worker_and_status():
@@ -302,15 +345,16 @@ def test_execution_table_lists_worker_and_status():
     workers=[_worker(), _worker("87654321", status=TradeStatusEnum.CLOSED)],
     include_meta=True,
   )
-  assert "Executions (2)" in msg
+  assert "Workers (2)" in msg
   assert "MT5 ****5678" in msg
   assert "MT5 ****4321" in msg
   assert "OPENED" in msg
   assert "CLOSED" in msg
-  # No inner <pre> here — the whole broadcast body is boxed once at send
-  # time (BroadcastNotifier), and Telegram disallows nesting <pre> tags.
-  assert "<pre>" not in msg
-  assert "Worker".ljust(len("MT5 ****5678")) + "  Status" in msg
+  # The body is boxed once at send time (BroadcastNotifier) and each later
+  # section closes that box before opening its own, because Telegram
+  # disallows a <pre> nested inside another.
+  assert "<pre>" not in msg.replace("</pre>\n<pre>", "")
+  assert "Name".ljust(len("MT5 ****5678")) + "  Status" in msg
 
 
 def test_worker_label_masks_the_account_id():
@@ -332,9 +376,9 @@ def test_worker_label_keeps_a_short_account_id_as_is():
 
 
 def test_notice_is_exactly_the_status_and_the_action():
-  record = _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.RUNNING)
+  record = _record(events=[_event(), _event("TP1")], status=BroadcastStatusEnum.TP1)
   notice = format_broadcast_update_notice(record, 1)
-  assert notice == f"[{em.CYCLE_RUNNING}RUNNING]\n{em.TP1} TP1"
+  assert notice == f"[{em.TP1}TP1]\n{em.TP1} TP1"
   assert len(notice.splitlines()) == 2
 
 
@@ -345,13 +389,14 @@ def test_notice_of_a_closing_action_says_closed():
 
 
 def test_notice_of_an_earlier_action_is_not_back_dated_to_closed():
-  """The row's status is already CLOSED once the trade is out; an intermediate
-  TP1 was still announced while the position was running."""
+  """The row's status is already CLOSED once the trade is out; the
+  intermediate TP1 was still announced while the position was live, so its
+  notice keeps the status it had at the time."""
   record = _record(
     events=[_event(), _event("TP1"), _event("TP2")],
     status=BroadcastStatusEnum.CLOSED,
   )
-  assert format_broadcast_update_notice(record, 1).startswith(f"[{em.CYCLE_RUNNING}")
+  assert format_broadcast_update_notice(record, 1).startswith(f"[{em.TP1}TP1]")
   assert format_broadcast_update_notice(record, 2).startswith(f"[{em.CYCLE_CLOSED}")
 
 

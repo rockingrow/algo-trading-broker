@@ -60,8 +60,9 @@ def test_webhook_payload_generates_a_signal_uxid_when_absent():
 
 
 def test_webhook_payload_keeps_the_signal_uxid_it_was_given():
+  """Upper-cased on the way in, but the same id: the hex digits are kept."""
   p = WebhookPayload(**_payload_dict(signal_uxid="9f2c4b7e18a3d605"))
-  assert p.signal_uxid == "9f2c4b7e18a3d605"
+  assert p.signal_uxid == "9F2C4B7E18A3D605"
 
 
 def test_webhook_payload_blank_signal_uxid_is_replaced():
@@ -80,7 +81,7 @@ def test_webhook_payload_signal_uxid_survives_a_json_roundtrip():
   original = WebhookPayload(**_payload_dict(signal_uxid="9f2c4b7e18a3d605"))
   assert (
     WebhookPayload(**json.loads(original.model_dump_json())).signal_uxid
-    == "9f2c4b7e18a3d605"
+    == "9F2C4B7E18A3D605"
   )
 
 
@@ -94,19 +95,19 @@ def test_webhook_payload_generator_produces_a_valid_uxid():
   p2 = WebhookPayload(**_payload_dict(signal_uxid=p1.signal_uxid))
   assert p2.signal_uxid == p1.signal_uxid
   assert len(p1.signal_uxid) == 16
-  assert p1.signal_uxid == p1.signal_uxid.lower()
+  assert p1.signal_uxid == p1.signal_uxid.upper()
 
 
-def test_webhook_payload_uxid_uppercase_hex_is_normalised():
-  """Different Pine templates uppercase UUID hex; that must not create a
-  second cycle for the same underlying id."""
-  p = WebhookPayload(**_payload_dict(signal_uxid="9F2C4B7E18A3D605"))
-  assert p.signal_uxid == "9f2c4b7e18a3d605"
+def test_webhook_payload_uxid_lowercase_hex_is_normalised():
+  """Different Pine templates write UUID hex in either case; that must not
+  create a second cycle for the same underlying id."""
+  p = WebhookPayload(**_payload_dict(signal_uxid="9f2c4b7e18a3d605"))
+  assert p.signal_uxid == "9F2C4B7E18A3D605"
 
 
 def test_webhook_payload_uxid_trims_surrounding_whitespace():
   p = WebhookPayload(**_payload_dict(signal_uxid=" 9f2c4b7e18a3d605  "))
-  assert p.signal_uxid == "9f2c4b7e18a3d605"
+  assert p.signal_uxid == "9F2C4B7E18A3D605"
 
 
 def test_webhook_payload_uxid_wrong_length_is_rejected():
@@ -141,6 +142,23 @@ def test_indicators_and_inputs_allow_extra_fields():
   assert ind.model_dump()["custom_metric"] == 42
   inp = InputsSchema(bb_len=20, my_param="x")
   assert inp.model_dump()["my_param"] == "x"
+
+
+def test_inputs_skip_windows_accepts_string_and_list():
+  assert InputsSchema(skip_windows="08:00-09:00").skip_windows == ["08:00-09:00"]
+  assert InputsSchema(skip_windows=["08:00-09:00", "20:00-21:00"]).skip_windows == [
+    "08:00-09:00",
+    "20:00-21:00",
+  ]
+  assert InputsSchema(skip_windows=[]).skip_windows == []
+  assert InputsSchema(skip_windows="  ").skip_windows == []
+  assert InputsSchema().skip_windows is None
+  assert InputsSchema(skip_windows=None).skip_windows is None
+
+
+def test_inputs_skip_windows_rejects_non_string_items():
+  with pytest.raises(ValidationError):
+    InputsSchema(skip_windows=[1, 2])
 
 
 def test_position_optional_numbers_default_none():

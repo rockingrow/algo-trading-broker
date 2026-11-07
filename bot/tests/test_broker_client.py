@@ -375,6 +375,38 @@ async def test_broadcast_subscribe_unsubscribe_status_paths():
   await client.aclose()
 
 
+async def test_broadcast_subscribe_all_unsubscribe_all_paths():
+  seen = []
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    seen.append((request.method, request.url.path))
+    return httpx.Response(200, json={"subscribed": True, "accounts": 3})
+
+  client = _client(handler)
+  assert await client.subscribe_all_broadcast(555) == {
+    "subscribed": True,
+    "accounts": 3,
+  }
+  await client.unsubscribe_all_broadcast(555)
+  assert seen == [
+    ("POST", "/v1/telegram/555/broadcast/subscribe-all"),
+    ("POST", "/v1/telegram/555/broadcast/unsubscribe-all"),
+  ]
+  await client.aclose()
+
+
+async def test_broadcast_all_is_none_when_nothing_is_linked():
+  """The broker answers 404 for a user with no account; the bot sees None."""
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(404, json={"detail": "No account linked"})
+
+  client = _client(handler)
+  assert await client.subscribe_all_broadcast(555) is None
+  assert await client.unsubscribe_all_broadcast(555) is None
+  await client.aclose()
+
+
 async def test_admin_link_telegram_path_and_body():
   captured = {}
 

@@ -44,7 +44,7 @@ from nats.js.errors import NotFoundError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from broker.nats import JETSTREAM_SIGNAL_STREAM
+from broker.nats import BROKER_CLIENT_NAME, JETSTREAM_SIGNAL_STREAM
 from broker.schemas.publisher_schema import PublishTopicEnum
 from broker.settings import settings
 
@@ -312,13 +312,15 @@ async def probe_clients(accounts: list[KnownAccount] | None) -> list[LinkReport]
 def classify_connections(connections: Sequence[dict[str, Any]]) -> NatsClients:
   """Sort NATS connections into the engine, the workers and everything else.
 
-  The broker's own connection is the one listening on ``TRADE`` — workers
-  publish there and never subscribe — and is dropped along with this probe's.
+  The broker's own connection is dropped along with this probe's. It names
+  itself ``BROKER_CLIENT_NAME``; a broker from before ``TRADE`` moved onto
+  JetStream is recognised by its core subscription on ``TRADE`` instead —
+  workers publish there and never subscribe.
   """
   clients = NatsClients()
   for entry in connections:
     subscriptions = entry.get("subscriptions_list") or []
-    if entry.get("name") == STATUS_CLIENT_NAME:
+    if entry.get("name") in (STATUS_CLIENT_NAME, BROKER_CLIENT_NAME):
       continue
     if PublishTopicEnum.TRADE.value in subscriptions:
       continue

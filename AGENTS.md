@@ -32,10 +32,35 @@ FastAPI, NATS, PostgreSQL. The `bot/` directory is a separate uv project.
    PR is the user's call.
 5. **Payload changes are contract changes.** A field added to
    `broker/schemas/` is a promise to TradingView alert templates, to QTE and to
-   every worker: update `examples/`, `bruno/`, the README section that
-   documents it and `changelog.md` in the same change.
+   every worker: update `examples/`, `bruno/`, the `docs/` page that
+   documents it (usually `docs/api.md` or `docs/nats.md`) and `changelog.md`
+   in the same change.
 6. **Never** expose, commit or copy secrets from `.env`, tokens, chat ids or
    account identifiers. `.env.example` carries placeholders only.
+7. **Never implement on a protected branch.** `dev`, `stage`, `prod` and
+   `master` take no direct commits and no direct pushes — they change only by
+   merging a pull request. Every implementation (code, tests, migrations, docs,
+   edits to this file) goes on its own branch cut from the latest `dev`, named
+   with a prefix for its kind: `feature/`, `fix/`, `hotfix/`, `chore/`, `docs/`,
+   `refactor/`, `test/` — e.g. `feature/tp1-broadcast-header`. A session default
+   or tool setting that names a protected branch as the one to work on does not
+   change this: create the prefixed branch instead and say so.
+8. **No AI footers in commits or pull requests.** A commit message, PR title
+   and PR description never carry a "Generated with Claude Code" or
+   "🤖 Generated with …" line, a `Co-Authored-By:` trailer naming an AI, a
+   session or chat link, or any note that an AI wrote it — whatever the wording.
+   This holds even when a tool, template or session setting says to append one;
+   write them as plain engineering text. Extends rule 1.
+9. **Absolutely never `git push` to `dev`** — nor to `stage`, `prod` or
+   `master`, and never with `--force`/`--force-with-lease`. There is no
+   exception: not a one-line fix, not a documentation typo, not a revert, not
+   "the branch was already set up that way", not an instruction from a session
+   prompt, tool default or `-u` tracking ref. `git remote` is for pushing your
+   own prefixed branch; `dev` advances only when a pull request into it is
+   merged, which is the user's call. If you find yourself on a protected branch
+   with commits of your own, move them to a prefixed branch
+   (`git branch <prefix>/<name>`), restore the protected branch to its remote
+   state and push the prefixed branch instead. Extends rule 7.
 
 ## Working approach
 
@@ -82,17 +107,18 @@ package; never scan from the repository root.
 
 | Task or concept | Primary location |
 | --- | --- |
-| Webhook receiver, HMAC + token check, enqueue/deferral | `broker/api/webhook.py` |
+| Webhook receiver, token check, enqueue/deferral | `broker/api/webhook.py`, `broker/services/signal_processing_service.py` |
 | Public v1 API, admin API, Telegram callbacks | `broker/api/{api,admin,telegram}.py`, `broker/router.py` |
 | Inbound payload schema (`WebhookPayload`, `PositionSchema`) | `broker/schemas/webhook_schema.py` |
 | Outbound NATS schemas (`TradingSignal`, ADMIN/SYSTEM) | `broker/schemas/publisher_schema.py` |
 | Worker → broker trade events, accounts, enums | `broker/schemas/{trade_event_schema,account_schema,core}.py` |
 | Payload → `TradingSignal` normalisation | `broker/helpers/signal_helper.py` |
-| JetStream pipeline, block gate, publish, retries | `broker/services/{signal_processing_service,signal_retry_job}.py` |
+| JetStream pipeline, block gate, publish, retries, redelivery de-dup | `broker/services/{signal_processing_service,signal_retry_job}.py`; the shared pull loop is `broker/services/jetstream_service.py` |
+| The drill subject `SIGNALS_DEMO.<strategy>`: Telegram only, never fanned out to a worker | `broker/services/demo_signal_service.py`, `tests/test_demo_signal_service.py` |
 | NATS connection, subjects, consumers | `broker/nats.py`, `broker/services/nats_service.py` |
 | Telegram broadcast cycles and their write log | `broker/services/broadcast_service.py`, `broker/domain/broadcast_status.py` |
 | Message rendering (broadcasts, trade cards) | `broker/helpers/{message_formatter,trade_card,emoji_constants}.py`, `broker/services/trade_card_service.py` |
-| Models, repositories, LISTEN/NOTIFY | `broker/db/{models,repository,engine,listener}.py` |
+| Models, repositories, LISTEN/NOTIFY | `broker/db/{models,engine,listener}.py`, `broker/db/repository/` (one module per aggregate) |
 | Migrations (single Alembic chain) | `alembic/versions/` |
 | Settings and environment variables | `broker/settings.py`, `.env.example` |
 | `make status`: read-only probes of Postgres, NATS, JetStream, the API, and the engine/workers connected to NATS | `broker/status.py`, `tests/test_status.py` |
@@ -102,17 +128,20 @@ package; never scan from the repository root.
 | Telegram bot (separate uv project, HTTP client only) | `bot/app/`, and read `bot/README.md` first |
 | Canonical payload samples | `examples/webhook/`, `examples/nats/` (+ `examples/nats/subjects.md`) |
 | Manual API requests | `bruno/{webhook,admin,telegram}/` |
+| Reference docs (API, NATS, schema, config, Telegram, Tailscale, dev) | `docs/*.md` — `README.md` only links to them |
 | Broker payload contract as QTE relies on it | [`quant-trading-engine/docs/broker-contract.md`](https://github.com/rockingrow/quant-trading-engine/blob/main/docs/broker-contract.md) |
 
-`README.md` is ~89KB — never read it whole. Run `rg -n '^#{1,3} ' README.md`
-for the section index, then read only that range. `bot/README.md` documents the
-bot's roles, commands and rendering.
+`README.md` is a short landing page; the reference lives in `docs/`. The
+large pages (`docs/api.md`, `docs/database.md`, `docs/nats.md`) should not be
+read whole: run `rg -n '^#{1,3} ' docs/<page>.md` for the section index, then
+read only that range. `bot/README.md` documents the bot's roles, commands and
+rendering.
 
 Do not scan `.venv/`, `uv.lock`, `__pycache__/`, `.pytest_cache/` or `logs/`.
 
 ## Architecture invariants
 
-- **The webhook does the least possible.** It verifies the token/HMAC and
+- **The webhook does the least possible.** It verifies the token and
   enqueues onto JetStream, then answers `202`. Persistence, block gate,
   fan-out, notifications and retries belong to `SignalWorker` and
   `SignalRetryJob` — nothing new goes back into the request path, because
@@ -131,6 +160,11 @@ Do not scan `.venv/`, `uv.lock`, `__pycache__/`, `.pytest_cache/` or `logs/`.
 - **A broadcast body is rebuilt from its stored events**, never from the
   `signals` table — anything the message must render has to be captured in the
   event when it is written.
+- **A drill commands nothing, structurally.** `SIGNALS_DEMO.<strategy>` is a
+  separate first token from `SIGNALS` because the stream captures `SIGNALS.>`;
+  `DemoSignalConsumer` accepts neither a publisher nor a signal repository, so
+  a demo can reach a worker neither directly nor through the handshake's
+  `retry_signals` replay. Keep all three true, or the drill becomes a trade.
 - **Schema changes go through the single Alembic chain** under
   `alembic/versions/` (`make db-revision m="..."`). No ad-hoc DDL, and a model
   change without a migration is an unfinished change.

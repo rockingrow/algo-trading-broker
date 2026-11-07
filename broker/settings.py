@@ -36,7 +36,9 @@ class WebhookSettings(BaseSettings):
 
   HOST: str = "0.0.0.0"
   PORT: int = 80
-  SECRET: str = ""  # empty = no HMAC validation
+  # Shared secret every producer sends as the payload's ``token``. Required:
+  # left empty, the webhook answers 500 to every alert rather than accept any.
+  SECRET: str = ""
   # Uvicorn's 5s default is shorter than the gap between TradingView alerts, so
   # TradingView reuses a pooled connection the server has already closed and the
   # alert dies as "server closed the connection unexpectedly".
@@ -146,6 +148,13 @@ class TelegramSettings(BaseSettings):
   # stuck send occupies the notification queue.
   HTTP_TIMEOUT: float = 5.0
 
+  # Read timeout (seconds) on api.telegram.org, separate from the connect
+  # budget above. A send that times out *after* Telegram accepted it leaves
+  # the broker without a ``message_id`` for a message that is already in the
+  # chat (see ``SendOutcome.UNKNOWN``), so waiting longer for the answer is
+  # cheaper than treating a slow reply as a lost message.
+  HTTP_READ_TIMEOUT: float = 20.0
+
   # Token of the *bot-service* BotFather bot (the one end-users actually DM to
   # link and drive their account — BOT_TELEGRAM_TOKEN in the bot's config).
   # Read from the shared .env so the broker can DM an account's owner directly
@@ -198,13 +207,15 @@ class SignalSettings(BaseSettings):
 
 
 class JetStreamSettings(BaseSettings):
-  """JetStream consumer that feeds ``handle_enqueued`` (env prefix ``JETSTREAM_``)."""
+  """JetStream consumers of the broker (env prefix ``JETSTREAM_``)."""
 
   model_config = _config("JETSTREAM_")
 
   # Consumer name is durable so a broker restart resumes from the same position
   # on the stream instead of skipping past unacked messages.
   SIGNAL_CONSUMER: str = "broker_signal_handler"
+  # Durable consumer on the ``TRADES`` stream feeding ``TradeEventConsumer``.
+  TRADE_CONSUMER: str = "broker_trade_handler"
   # Batch size and fetch timeout picked for a single-writer webhook: even the
   # noisiest TradingView setup rarely bursts more than a handful of alerts a
   # second, so 10-per-fetch keeps latency low while amortising the pull round trip.

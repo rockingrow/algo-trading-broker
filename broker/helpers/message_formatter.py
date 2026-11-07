@@ -62,6 +62,9 @@ def format_number(value) -> str:
 
 _STATUS_ICONS = {
   BroadcastStatusEnum.RUNNING: em.CYCLE_RUNNING,
+  # The partial take-profit borrows the TP1 action's own glyph, so the header
+  # and the line it came from read as the same event.
+  BroadcastStatusEnum.TP1: em.TP1,
   BroadcastStatusEnum.CLOSED: em.CYCLE_CLOSED,
 }
 
@@ -229,6 +232,14 @@ def format_broadcast_message(
   except ValueError:
     status = BroadcastStatusEnum.RUNNING
 
+  # Fold the status from the events too, the way the reply notices do, so the
+  # body and the notice posted under it cannot disagree: a cycle recorded
+  # before the TP1 status existed still carries RUNNING on the row while its
+  # events already say a partial take-profit filled. Merged rather than
+  # replaced, so a row the events alone would not close stays closed.
+  if events:
+    status = merge_status(status, _status_through(events, len(events) - 1, status))
+
   status_icon = _STATUS_ICONS.get(status, em.CYCLE_RUNNING)
   timeframe = f" ({format_timeframe(record.timeframe)})" if record.timeframe else ""
 
@@ -250,6 +261,14 @@ def format_broadcast_message(
     if entry_block:
       position_lines.append(entry_block)
   position_lines.append(_BROADCAST_DIVIDER)
+  # The uxid is the only handle a reader has on a cycle: it is what they quote
+  # when they ask about a position, and what matches the message to the
+  # engine's own private notification. The private body carries it in the
+  # "Signal info" box below, which the public channel never gets, so the
+  # public body carries it here instead — never both.
+  if not include_meta and record.signal_uxid:
+    position_lines.append(f"Signal: {record.signal_uxid}")
+    position_lines.append(_BROADCAST_DIVIDER)
   position_box = "\n".join(position_lines)
 
   # Box 2: Actions
@@ -370,4 +389,22 @@ def format_blocked_message(payload: WebhookPayload) -> str:
     f"Symbol: <b>{payload.symbol}</b>\n"
     f"Reason: Signal processing is temporarily disabled "
     f"(<code>{SIGNAL_BLOCKED}</code> != 1)"
+  )
+
+
+def format_demo_signal_message(payload: WebhookPayload) -> str:
+  """Operator-channel line for a drill that arrived on the demo subject.
+
+  Goes to the broker-log chats, not to the signal subscribers: the broadcast
+  card a drill produces is rendered by the ordinary renderer and is meant to
+  look like a real signal, so this is the one place that says it was not one.
+  """
+  position = payload.position
+  return (
+    f"{em.DEMO_SIGNAL} <b>Demo signal received</b>\n"
+    f"Strategy: <code>{payload.strategy}</code>\n"
+    f"Symbol: <b>{payload.symbol}</b> ({format_timeframe(payload.timeframe)})\n"
+    f"Action: <b>{_enum_value(position.action)}</b>\n"
+    f"Cycle: <code>{payload.signal_uxid}</code>\n"
+    f"Not forwarded to any worker — the broadcast card beside it is a drill."
   )
