@@ -1,6 +1,6 @@
 """Unit tests for the SQLAlchemy repositories.
 
-A real Postgres engine isn't available in CI, so ``broker.db.repository.get_session``
+A real Postgres engine isn't available in CI, so ``broker.db.repository._session.get_session``
 is monkeypatched with an in-memory fake session. The fakes implement just
 enough of the SQLAlchemy AsyncSession surface (execute/add/flush/refresh) for
 the repository code paths under test — these tests target the repository's
@@ -13,6 +13,7 @@ import contextlib
 import uuid
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
 from broker.db import repository as repo_mod
@@ -26,6 +27,7 @@ from broker.db.models import (
   BroadcastMessageLog,
   BroadcastMessageWorker,
   BrokerSetting,
+  Signal,
   Trade,
 )
 from broker.db.repository import (
@@ -43,6 +45,7 @@ from broker.schemas.core import (
   BroadcastLogStatusEnum,
   BroadcastStatusEnum,
   SignalActionEnum,
+  SignalStatusEnum,
 )
 from broker.schemas.trade_event_schema import PositionEvent
 from broker.schemas.trade_schema import TradeStatusEnum
@@ -104,7 +107,7 @@ def _patch_session(monkeypatch, session: FakeSession):
   async def fake_get_session():
     yield session
 
-  monkeypatch.setattr(repo_mod, "get_session", fake_get_session)
+  monkeypatch.setattr(repo_mod._session, "get_session", fake_get_session)
 
 
 # ── SignalRepository.log_signal ─────────────────────────────────────
@@ -1502,7 +1505,7 @@ async def test_record_event_retries_once_when_another_writer_wins(monkeypatch):
   async def fake_get_session():
     yield sessions.pop(0)
 
-  monkeypatch.setattr(repo_mod, "get_session", fake_get_session)
+  monkeypatch.setattr(repo_mod._session, "get_session", fake_get_session)
 
   event = {"action": "TP1", "timestamp": "2026-01-01T01:00:00+00:00"}
   row = await SqlAlchemyBroadcastMessageRepository().record_event(
@@ -1525,7 +1528,7 @@ async def test_record_event_returns_none_on_error(monkeypatch):
     raise RuntimeError("db down")
     yield
 
-  monkeypatch.setattr(repo_mod, "get_session", boom)
+  monkeypatch.setattr(repo_mod._session, "get_session", boom)
 
   assert (
     await SqlAlchemyBroadcastMessageRepository().record_event(
@@ -1931,3 +1934,71 @@ async def test_mark_broadcast_missing_row_is_false(monkeypatch):
   assert (
     await SqlAlchemyBroadcastMessageRepository().mark_broadcast(uuid.uuid4()) is False
   )
+
+
+# ── Redelivery key, permanent failure, strict setting read ──────────
+
+
+async def test_log_signal_stores_the_delivery_key(monkeypatch):
+  session = FakeSession(results=[])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemySignalRepository().log_signal(_payload(), delivery_key="msgid:abc")
+  assert session.added[0].delivery_key == "msgid:abc"
+
+
+async def test_get_by_delivery_key_returns_the_row(monkeypatch):
+  row = Signal(id=uuid.uuid4(), delivery_key="msgid:abc")
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  assert await SqlAlchemySignalRepository().get_by_delivery_key("msgid:abc") is row
+
+
+async def test_get_by_delivery_key_raises_on_db_error(monkeypatch):
+  @contextlib.asynccontextmanager
+  async def boom():
+    raise RuntimeError("db down")
+    yield
+
+  monkeypatch.setattr(repo_mod._session, "get_session", boom)
+  # "Unknown" must not read as "not delivered yet".
+  with pytest.raises(RuntimeError):
+    await SqlAlchemySignalRepository().get_by_delivery_key("msgid:abc")
+
+
+async def test_mark_failed_flips_the_row_and_drains_attempts(monkeypatch):
+  row = Signal(
+    id=uuid.uuid4(), status=SignalStatusEnum.QUEUED, attempts=3, last_attempt=None
+  )
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  assert await SqlAlchemySignalRepository().mark_failed(str(row.id)) is True
+  assert row.status == SignalStatusEnum.FAILED
+  assert row.attempts == 0
+  assert row.last_attempt is not None
+
+
+async def test_mark_failed_rejects_an_invalid_id():
+  assert await SqlAlchemySignalRepository().mark_failed("not-a-uuid") is False
+
+
+async def test_get_strict_returns_the_value(monkeypatch):
+  row = BrokerSetting(id=uuid.uuid4(), key="signal_blocked", value="1")
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  assert await SqlAlchemySettingRepository().get_strict("signal_blocked") == "1"
+
+
+async def test_get_strict_raises_where_get_answers_none(monkeypatch):
+  @contextlib.asynccontextmanager
+  async def boom():
+    raise RuntimeError("db down")
+    yield
+
+  monkeypatch.setattr(repo_mod._session, "get_session", boom)
+  assert await SqlAlchemySettingRepository().get("signal_blocked") is None
+  with pytest.raises(RuntimeError):
+    await SqlAlchemySettingRepository().get_strict("signal_blocked")

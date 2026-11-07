@@ -15,26 +15,35 @@ class FakeMsg:
     self.acked = False
     self.naked = False
     self.termed = False
+    self.nak_delay = None
 
   async def ack(self):
     self.acked = True
 
-  async def nak(self):
+  async def nak(self, delay=None):
     self.naked = True
+    self.nak_delay = delay
 
   async def term(self):
     self.termed = True
 
 
 class FakeService:
-  def __init__(self, raise_exc: Exception | None = None):
+  def __init__(self, raise_exc: Exception | None = None, fail_times: int | None = None):
+    self.attempts: list[bool] = []
+    self._fail_times = fail_times
     self.calls: list[dict] = []
+    self.delivery_keys: list[str | None] = []
     self._raise = raise_exc
 
-  async def handle_enqueued(self, *, payload):
-    if self._raise is not None:
+  async def handle_enqueued(self, *, payload, delivery_key=None, redelivered=False):
+    self.attempts.append(redelivered)
+    if self._raise is not None and (self._fail_times is None or self._fail_times > 0):
+      if self._fail_times is not None:
+        self._fail_times -= 1
       raise self._raise
     self.calls.append(payload.model_dump())
+    self.delivery_keys.append(delivery_key)
     return {"status": "accepted"}
 
 
@@ -97,7 +106,7 @@ async def test_invalid_webhook_payload_is_termed():
 
 async def test_handler_failure_is_naked_for_redelivery():
   service = FakeService(raise_exc=RuntimeError("boom"))
-  worker = SignalWorker(service=service, connection=object())  # type: ignore[arg-type]
+  worker = SignalWorker(service=service, connection=object(), inline_retry_delays=())  # type: ignore[arg-type]
   msg = FakeMsg(_envelope())
   await worker._handle_one(msg)
 
@@ -186,3 +195,135 @@ async def test_unexpected_fetch_error_is_still_logged_and_backed_off(
   assert "JetStream fetch failed" in caplog.text
   assert sleeps == [1.0]
   assert service.calls == []
+
+
+# ── Delivery key and NAK delay ──────────────────────────────────────
+
+
+async def test_delivery_key_is_the_stream_sequence_and_store_time():
+  from datetime import datetime, timezone
+  from types import SimpleNamespace
+
+  from broker.services.signal_processing_service import delivery_key_for
+
+  msg = FakeMsg(_envelope())
+  # A producer-chosen Nats-Msg-Id is ignored: JetStream only de-duplicates it
+  # inside its window, so a reused id must not alias an older signal.
+  msg.headers = {"Nats-Msg-Id": "reused-id"}
+  msg.metadata = SimpleNamespace(
+    stream="SIGNALS",
+    sequence=SimpleNamespace(stream=42, consumer=7),
+    timestamp=datetime(2026, 11, 6, tzinfo=timezone.utc),
+  )
+  assert delivery_key_for(msg) == "seq:SIGNALS:42@2026-11-06T00:00:00+00:00"
+
+
+async def test_delivery_key_is_none_for_a_message_without_identity():
+  from broker.services.signal_processing_service import delivery_key_for
+
+  # FakeMsg has no headers and no metadata — like a hand-built test message.
+  assert delivery_key_for(FakeMsg(_envelope())) is None
+
+
+def _jetstream_msg(num_delivered: int = 1) -> FakeMsg:
+  from datetime import datetime, timezone
+  from types import SimpleNamespace
+
+  msg = FakeMsg(_envelope())
+  msg.metadata = SimpleNamespace(
+    stream="SIGNALS",
+    sequence=SimpleNamespace(stream=42, consumer=7),
+    timestamp=datetime(2026, 11, 6, tzinfo=timezone.utc),
+    num_delivered=num_delivered,
+  )
+  return msg
+
+
+async def test_worker_passes_the_delivery_key_to_the_service():
+  service = FakeService()
+  worker = SignalWorker(service=service, connection=object())  # type: ignore[arg-type]
+  await worker._handle_one(_jetstream_msg())
+  assert service.delivery_keys == ["seq:SIGNALS:42@2026-11-06T00:00:00+00:00"]
+  # First delivery: no redelivery lookup.
+  assert service.attempts == [False]
+
+
+async def test_a_redelivered_message_is_flagged():
+  service = FakeService()
+  worker = SignalWorker(service=service, connection=object())  # type: ignore[arg-type]
+  await worker._handle_one(_jetstream_msg(num_delivered=2))
+  assert service.attempts == [True]
+
+
+async def test_a_transient_failure_is_retried_in_place_before_any_nak(monkeypatch):
+  sleeps: list[float] = []
+
+  async def fake_sleep(seconds):
+    sleeps.append(seconds)
+
+  monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+  service = FakeService(raise_exc=RuntimeError("db blip"), fail_times=2)
+  worker = SignalWorker(
+    service=service,
+    connection=object(),  # type: ignore[arg-type]
+    inline_retry_delays=(0.5, 1.0, 2.0),
+  )
+  msg = _jetstream_msg()
+  await worker._handle_one(msg)
+
+  # Held in place — the next envelope cannot overtake it — then acked.
+  assert msg.acked is True
+  assert msg.naked is False
+  assert sleeps == [0.5, 1.0]
+  # A retry may find the row its failed attempt wrote.
+  assert service.attempts == [False, True, True]
+
+
+async def test_invalid_utf8_envelope_is_termed():
+  service = FakeService()
+  worker = SignalWorker(service=service, connection=object())  # type: ignore[arg-type]
+  msg = FakeMsg(b"\xff\xfe")
+  await worker._handle_one(msg)
+  assert msg.termed is True
+
+
+async def test_an_unhandled_handler_error_does_not_end_the_loop(caplog):
+  class ExplodingWorker(SignalWorker):
+    async def _handle_one(self, msg):
+      raise TypeError("unexpected")
+
+  worker = ExplodingWorker(service=FakeService(), connection=object())  # type: ignore[arg-type]
+  first, second = FakeMsg(_envelope()), FakeMsg(_envelope())
+  worker._sub = FakeSub(worker, [[first, second]])
+  await worker._run()
+  # Both messages were attempted and handed back; the loop survived.
+  assert first.naked is True and second.naked is True
+
+
+async def test_handler_failure_is_naked_with_a_delay():
+  from broker.services.jetstream_service import NAK_DELAY_SECONDS
+
+  service = FakeService(raise_exc=RuntimeError("db down"))
+  worker = SignalWorker(service=service, connection=object(), inline_retry_delays=())  # type: ignore[arg-type]
+  msg = FakeMsg(_envelope())
+  await worker._handle_one(msg)
+  assert msg.naked is True
+  assert msg.nak_delay == NAK_DELAY_SECONDS
+
+
+@pytest.mark.parametrize(
+  "body",
+  [
+    b'{"payload": {"token": "super-secret", "strategy": ',
+    b'{"token": "super-secret"}',
+    b'{"payload": {"token": "super-secret", "strategy": "s"}}',
+  ],
+  ids=["malformed-json", "missing-payload", "invalid-payload"],
+)
+async def test_a_rejected_envelope_never_logs_the_webhook_token(body, caplog):
+  worker = SignalWorker(service=FakeService(), connection=object())  # type: ignore[arg-type]
+  msg = FakeMsg(body)
+  with caplog.at_level(logging.ERROR):
+    await worker._handle_one(msg)
+  assert msg.termed is True
+  assert "super-secret" not in caplog.text

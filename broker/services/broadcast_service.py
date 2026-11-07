@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass, field
 from typing import Optional
 
 from broker.constants import (
@@ -270,6 +271,15 @@ def _market_of(event: PositionEvent, trade: Trade | None) -> MarketTypeEnum | No
     return None
 
 
+@dataclass
+class _CycleLock:
+  """Serialises the dispatches of one cycle, so two notifications for the same
+  trade are applied one after the other instead of racing into the same chat."""
+
+  lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+  users: int = 0
+
+
 class BroadcastDispatcher:
   """Reader half: turns committed cycle changes into Telegram edits.
 
@@ -303,7 +313,12 @@ class BroadcastDispatcher:
     self._max_attempts = max_attempts
     self._sweep_interval = sweep_interval_seconds
     self._stale_after = stale_after_seconds
-    self._locks: dict[str, asyncio.Lock] = {}
+    # One entry per cycle being dispatched: its lock and how many dispatches
+    # hold or await it. The count, not ``Lock.locked()``, decides when the
+    # entry may go — between a release and the next waiter's wake-up the lock
+    # reads as unlocked, and dropping it there let a third dispatch create a
+    # fresh lock and run alongside the waiter on the same cycle.
+    self._locks: dict[str, _CycleLock] = {}
     self._sweeper: Optional[asyncio.Task] = None
     self._stop = asyncio.Event()
 
@@ -383,18 +398,20 @@ class BroadcastDispatcher:
 
   async def dispatch(self, cycle_id: uuid.UUID) -> None:
     """Claim a cycle's pending changes and push the cycle to every chat."""
-    lock = self._lock_for(cycle_id)
+    key = str(cycle_id)
+    entry = self._locks.get(key)
+    if entry is None:
+      entry = self._locks[key] = _CycleLock()
+    entry.users += 1
     try:
-      async with lock:
+      async with entry.lock:
         await self._dispatch_locked(cycle_id)
     finally:
-      # Drop the lock once nothing holds or awaits it, so a long-running broker
-      # does not accumulate one lock per trade it ever broadcast. A waiter that
-      # already has the object keeps it alive (``locked()`` is True), and a
-      # waiter that has not acquired yet cannot be interleaved here — there is
-      # no await between taking the object and acquiring it.
-      if not lock.locked():
-        self._locks.pop(str(cycle_id), None)
+      # Drop the entry once no dispatch holds or awaits it, so a long-running
+      # broker does not accumulate one lock per trade it ever broadcast.
+      entry.users -= 1
+      if entry.users == 0:
+        del self._locks[key]
 
   async def _dispatch_locked(self, cycle_id: uuid.UUID) -> None:
     """Everything after the per-cycle lock is taken."""
@@ -795,12 +812,3 @@ class BroadcastDispatcher:
 
   # ── internals ──────────────────────────────────────────────────────
 
-  def _lock_for(self, cycle_id: uuid.UUID) -> asyncio.Lock:
-    """Per-cycle lock, so two notifications for the same trade are applied one
-    after the other instead of racing each other into the same chat."""
-    key = str(cycle_id)
-    lock = self._locks.get(key)
-    if lock is None:
-      lock = asyncio.Lock()
-      self._locks[key] = lock
-    return lock

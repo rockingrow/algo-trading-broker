@@ -44,7 +44,17 @@ class BroadcastCycleView:
 class SignalRepository(Protocol):
   """Persists inbound TradingView webhook signals."""
 
-  async def log_signal(self, payload: WebhookPayload) -> str | None: ...
+  async def log_signal(
+    self,
+    payload: WebhookPayload,
+    *,
+    delivery_key: str | None = None,
+    attempts: int | None = None,
+  ) -> str | None: ...
+
+  async def get_by_delivery_key(self, delivery_key: str) -> Signal | None: ...
+
+  async def mark_failed(self, signal_id: str) -> bool: ...
 
   async def mark_published(self, signal_id: str) -> bool: ...
 
@@ -64,6 +74,8 @@ class SettingRepository(Protocol):
   """Reads and writes broker-level key/value settings."""
 
   async def get(self, key: str) -> str | None: ...
+
+  async def get_strict(self, key: str) -> str | None: ...
 
   async def get_many(self, keys: list[str]) -> dict[str, str]: ...
 

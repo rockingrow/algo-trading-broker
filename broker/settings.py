@@ -36,7 +36,9 @@ class WebhookSettings(BaseSettings):
 
   HOST: str = "0.0.0.0"
   PORT: int = 80
-  SECRET: str = ""  # empty = no HMAC validation
+  # Shared secret every producer sends as the payload's ``token``. Required:
+  # left empty, the webhook answers 500 to every alert rather than accept any.
+  SECRET: str = ""
   # Uvicorn's 5s default is shorter than the gap between TradingView alerts, so
   # TradingView reuses a pooled connection the server has already closed and the
   # alert dies as "server closed the connection unexpectedly".
@@ -205,13 +207,15 @@ class SignalSettings(BaseSettings):
 
 
 class JetStreamSettings(BaseSettings):
-  """JetStream consumer that feeds ``handle_enqueued`` (env prefix ``JETSTREAM_``)."""
+  """JetStream consumers of the broker (env prefix ``JETSTREAM_``)."""
 
   model_config = _config("JETSTREAM_")
 
   # Consumer name is durable so a broker restart resumes from the same position
   # on the stream instead of skipping past unacked messages.
   SIGNAL_CONSUMER: str = "broker_signal_handler"
+  # Durable consumer on the ``TRADES`` stream feeding ``TradeEventConsumer``.
+  TRADE_CONSUMER: str = "broker_trade_handler"
   # Batch size and fetch timeout picked for a single-writer webhook: even the
   # noisiest TradingView setup rarely bursts more than a handful of alerts a
   # second, so 10-per-fetch keeps latency low while amortising the pull round trip.

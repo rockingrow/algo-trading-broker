@@ -16,6 +16,7 @@ simplified model of them.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -1136,6 +1137,35 @@ async def test_per_cycle_locks_do_not_accumulate():
   repo, _, cycle = await _run(_payload())
   dispatcher, _ = _dispatcher(repo)
   await dispatcher.dispatch(cycle.id)
+  assert dispatcher._locks == {}
+
+
+async def test_a_cycle_is_never_dispatched_twice_at_once():
+  # A holds the lock, B waits on it, and C arrives in the gap after A releases
+  # but before B wakes. Reading ``Lock.locked()`` there used to drop the lock
+  # and hand C a fresh one, so B and C delivered the same cycle concurrently.
+  repo, _, cycle = await _run(_payload())
+  dispatcher, _ = _dispatcher(repo)
+  running = 0
+  peak = 0
+
+  async def slow_dispatch(cycle_id):
+    nonlocal running, peak
+    running += 1
+    peak = max(peak, running)
+    await asyncio.sleep(0.01)
+    running -= 1
+
+  dispatcher._dispatch_locked = slow_dispatch
+  first = asyncio.create_task(dispatcher.dispatch(cycle.id))
+  await asyncio.sleep(0)
+  second = asyncio.create_task(dispatcher.dispatch(cycle.id))
+  await asyncio.sleep(0)
+  await asyncio.sleep(0.011)
+  third = asyncio.create_task(dispatcher.dispatch(cycle.id))
+  await asyncio.gather(first, second, third)
+
+  assert peak == 1
   assert dispatcher._locks == {}
 
 

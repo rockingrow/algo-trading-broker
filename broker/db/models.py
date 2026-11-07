@@ -66,6 +66,7 @@ class Signal(Base):
   """
 
   __tablename__ = "signals"
+  __table_args__ = (UniqueConstraint("delivery_key", name="uq_signals_delivery_key"),)
 
   # WebhookPayload columns
   strategy: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -121,6 +122,14 @@ class Signal(Base):
   last_attempt: Mapped[datetime | None] = mapped_column(
     DateTime(timezone=True), nullable=True
   )
+  # Identity of the JetStream message this row was persisted from: its stream
+  # sequence and the time the stream stored it, both unchanged by a
+  # redelivery. JetStream redelivers a message whose ack never arrived (a
+  # crash after the fan-out, a lost ack), and without this key each
+  # redelivery became a second row — a second ``signal_id`` the workers could
+  # not recognise as the same alert. Unique, so a redelivery finds the row it
+  # already wrote; nullable for rows that predate the column.
+  delivery_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
   # Complex objects stored as JSONB
   indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)
