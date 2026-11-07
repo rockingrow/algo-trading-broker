@@ -301,7 +301,7 @@ async def test_an_unhandled_handler_error_does_not_end_the_loop(caplog):
 
 
 async def test_handler_failure_is_naked_with_a_delay():
-  from broker.services.jetstream_worker import NAK_DELAY_SECONDS
+  from broker.services.jetstream_service import NAK_DELAY_SECONDS
 
   service = FakeService(raise_exc=RuntimeError("db down"))
   worker = SignalWorker(service=service, connection=object(), inline_retry_delays=())  # type: ignore[arg-type]

@@ -116,7 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same import path. Sessions open through `repository._session`, the one
   attribute tests patch.
 - **`SignalWorker` and `TradeEventConsumer` share `JetStreamPullWorker`**
-  (`broker/services/jetstream_worker.py`): the fetch loop, idle/backoff
+  (`broker/services/jetstream_service.py`): the fetch loop, idle/backoff
   handling and ack/NAK/term live in one place.
 - **The app lifespan runs on an `AsyncExitStack`**: services stop in reverse
   start order, and a service that fails to start unwinds the ones before it.

@@ -44,7 +44,7 @@ so all three flows can be exercised with in-memory fakes. It raises
 ``SignalError`` for HTTP translation on the enqueue path only.
 
 ``SignalWorker`` (a ``JetStreamPullWorker``, see
-``broker/services/jetstream_worker.py``) pulls envelopes back off JetStream and
+``broker/services/jetstream_service.py``) pulls envelopes back off JetStream and
 hands them to ``handle_enqueued`` — the webhook route only persists the signal and enqueues
 it, so splitting the pipeline this way keeps the HTTP request short enough
 that TradingView's connection is not held open across the fan-out. JetStream's
@@ -89,7 +89,7 @@ from broker.nats import (
 from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.security.redaction import redact_secrets
-from broker.services.jetstream_worker import JetStreamPullWorker, delivery_count
+from broker.services.jetstream_service import JetStreamPullWorker, delivery_count
 from broker.settings import settings
 
 log = get_logger(__name__)

@@ -64,7 +64,7 @@ algo-trading-broker/
 │   ├── interfaces/      # Protocols for DI (DB, notifier, publisher)
 │   ├── schemas/         # Pydantic schemas (webhook, publisher, subscriber, trade, account, admin)
 │   ├── security/        # Auth guard (ensure_api_key — X-API-KEY)
-│   ├── services/        # nats_service, notification_service, jetstream_worker (pull loop),
+│   ├── services/        # nats_service, notification_service, jetstream_service (pull loop),
 │   │                    #   signal_processing_service (+ SignalWorker), signal_retry_job
 │   ├── app.py           # FastAPI application factory
 │   ├── main.py          # Entrypoint (uvicorn runner)

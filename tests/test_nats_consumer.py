@@ -203,7 +203,7 @@ async def test_persisted_report_is_acked():
 
 
 async def test_report_is_naked_with_delay_when_the_write_fails():
-  from broker.services.jetstream_worker import NAK_DELAY_SECONDS
+  from broker.services.jetstream_service import NAK_DELAY_SECONDS
 
   consumer = TradeEventConsumer(trade_repository=FakeTradeRepo(raise_exc=True))
   msg = SettlingMsg(json.dumps(_valid_event_dict()).encode())

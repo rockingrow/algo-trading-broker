@@ -113,7 +113,7 @@ package; never scan from the repository root.
 | Outbound NATS schemas (`TradingSignal`, ADMIN/SYSTEM) | `broker/schemas/publisher_schema.py` |
 | Worker → broker trade events, accounts, enums | `broker/schemas/{trade_event_schema,account_schema,core}.py` |
 | Payload → `TradingSignal` normalisation | `broker/helpers/signal_helper.py` |
-| JetStream pipeline, block gate, publish, retries, redelivery de-dup | `broker/services/{signal_processing_service,signal_retry_job}.py`; the shared pull loop is `broker/services/jetstream_worker.py` |
+| JetStream pipeline, block gate, publish, retries, redelivery de-dup | `broker/services/{signal_processing_service,signal_retry_job}.py`; the shared pull loop is `broker/services/jetstream_service.py` |
 | The drill subject `SIGNALS_DEMO.<strategy>`: Telegram only, never fanned out to a worker | `broker/services/demo_signal_service.py`, `tests/test_demo_signal_service.py` |
 | NATS connection, subjects, consumers | `broker/nats.py`, `broker/services/nats_service.py` |
 | Telegram broadcast cycles and their write log | `broker/services/broadcast_service.py`, `broker/domain/broadcast_status.py` |

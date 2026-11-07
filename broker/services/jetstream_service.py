@@ -1,5 +1,5 @@
 """
-broker/services/jetstream_worker.py — the pull-consumer loop every durable
+broker/services/jetstream_service.py — the pull-consumer loop every durable
 JetStream subscription of the broker shares.
 
 ``SignalWorker`` (stream ``SIGNALS``) and ``TradeEventConsumer`` (stream

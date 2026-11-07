@@ -118,7 +118,7 @@ from broker.schemas.account_schema import (
   MarketTypeEnum,
   decompose_worker_id,
 )
-from broker.services.jetstream_worker import JetStreamPullWorker, delivery_count
+from broker.services.jetstream_service import JetStreamPullWorker, delivery_count
 from broker.services.account_settings_service import (
   parse_account_settings,
   parse_global_max_open_orders,
