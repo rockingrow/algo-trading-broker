@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A database blip no longer hands a worker an empty configuration.** The
+  `WORKER_CONNECTED` handshake read the crypto settings and the strategy magic
+  map through calls that turn a failed read into "not set", then cached that
+  answer for 30s. A worker connecting during the blip got an empty
+  `strategy_magic_map` (which it keeps until it reconnects), and a crypto
+  worker was told its settings were not configured. Both reads now fail
+  loudly, are never cached when they fail, and the worker gets
+  `WORKER_CONNECTED_ERROR` with `reason: "broker settings unavailable"` so it
+  retries. Workers of either market may now receive that error.
+- **The reconnect replay no longer resends `FAILED` signals.** `retry_signals`
+  replayed every recent row regardless of status, including a redelivery the
+  block gate had marked `FAILED` — so a reconnecting worker could execute a
+  signal the gate stopped. Only `PUBLISHED` and `QUEUED` rows are replayed now,
+  and the query reads two columns instead of whole rows.
+- **The webhook secret is no longer stored in `signals.raw`.** Every persisted
+  payload kept its `token`, i.e. `WEBHOOK_SECRET`. New rows are written without
+  it, the retry job and the replay rebuild the payload without it, and the
+  migration `b7b5db860df2` strips it from existing rows (its downgrade is a
+  no-op: the secret is not restored). No wire contract changes.
+- **Startup and shutdown no longer wait on a throttled Telegram.** The
+  start/stop notices are capped at 3s. Unbounded, the startup notice kept the
+  webhook from serving and the shutdown notice could exhaust Docker's 10s stop
+  grace period, SIGKILLing the broker with deferred enqueues still in memory.
+  The broker service also gets `stop_grace_period: 30s`.
+
 ## [1.2.1] - 2026-11-07
 
 ### Fixed

@@ -65,6 +65,20 @@ class SqlAlchemySettingRepository:
       log.exception("Failed to read broker settings keys=%s: %s", keys, exc)
       return {}
 
+  async def get_many_strict(self, keys: list[str]) -> dict[str, str]:
+    """Like :meth:`get_many`, but a database error raises instead of reading
+    as "none of these keys exist".
+
+    For reads whose answer is handed on and kept — the WORKER_CONNECTED
+    handshake caches these and a worker runs on the ACK until it reconnects —
+    where an empty result on a failed read would pass for "not configured".
+    """
+    async with _session.get_session() as session:
+      result = await session.execute(
+        select(BrokerSetting).where(BrokerSetting.key.in_(keys))
+      )
+      return {row.key: row.value for row in result.scalars().all()}
+
   async def set(self, key: str, value: str) -> bool:
     """Upsert a broker_settings row. Returns True on success, False on error."""
     try:

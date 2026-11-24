@@ -97,7 +97,7 @@ from broker.constants import (
   MAX_RETRY_TIMEOUT_KEY,
   STRATEGY_MAGIC_MAP_KEY,
 )
-from broker.helpers.signal_helper import parse_signal
+from broker.helpers.signal_helper import parse_signal, payload_from_stored
 from broker.interfaces import (
   AccountRepository,
   SettingRepository,
@@ -140,7 +140,6 @@ from broker.schemas.publisher_schema import (
   TradingSignal,
 )
 from broker.schemas.trade_event_schema import PositionEvent
-from broker.schemas.webhook_schema import WebhookPayload
 
 log = get_logger(__name__)
 
@@ -463,18 +462,34 @@ class SystemEventConsumer:
     # (crypto workers only), the magic map (mandatory for every market), and
     # the replay of recent signals so a reconnecting worker catches up on what
     # it missed while offline.
+    #
+    # The crypto block and the magic map are read strictly: a worker keeps the
+    # ACK until it reconnects, so answering "not configured" or an empty map
+    # because one read failed would leave it misconfigured for good. A failed
+    # read answers WORKER_CONNECTED_ERROR instead, which the worker retries.
     crypto_leverage: Optional[CryptoLeverageConfig] = None
-    if event.market == MarketEnum.CRYPTO.value:
-      # Resolved first so a misconfigured crypto worker is rejected before we
-      # spend a signals query on a handshake that cannot be answered.
-      crypto_leverage = await self._build_crypto_leverage(event.account_id, reply_to)
-      if crypto_leverage is None:
-        # Settings are missing or invalid; _build_crypto_leverage already
-        # replied with the reason. Never follow that with an ACK — a crypto
-        # worker must not be told it is configured when it is not.
-        return
+    try:
+      if event.market == MarketEnum.CRYPTO.value:
+        # Resolved first so a misconfigured crypto worker is rejected before we
+        # spend a signals query on a handshake that cannot be answered.
+        crypto_leverage = await self._build_crypto_leverage(event.account_id, reply_to)
+        if crypto_leverage is None:
+          # Settings are missing or invalid; _build_crypto_leverage already
+          # replied with the reason. Never follow that with an ACK — a crypto
+          # worker must not be told it is configured when it is not.
+          return
 
-    magic_map = await self._build_strategy_magic_map(event.strategies)
+      magic_map = await self._build_strategy_magic_map(event.strategies)
+    except Exception as exc:
+      log.error(
+        "SYSTEM handshake account_id=%s: broker settings unreadable, "
+        "answering ERROR so the worker retries: %s",
+        event.account_id,
+        exc,
+      )
+      await self._reply_error(reply_to, event.account_id, "broker settings unavailable")
+      return
+
     retry_signals = await self._build_retry_signals(event.account_id, event.strategies)
     account_settings = await self._build_account_settings(event)
 
@@ -669,7 +684,7 @@ class SystemEventConsumer:
       if not isinstance(raw_payload, dict) or not signal_id:
         continue
       try:
-        payload = WebhookPayload(**raw_payload)
+        payload = payload_from_stored(raw_payload)
         # Replaying with the persisted row id is what makes the replay
         # recognisable: the worker sees the same signal_id it saw live and
         # drops the duplicate. The cycle id rides along from the payload.
@@ -718,7 +733,9 @@ class SystemEventConsumer:
     ``/admin/settings/crypto-*`` write can never land between the two reads.
     Both hits and misses are cached; worst case an operator who just changed a
     setting via the admin API waits up to the TTL for it to reach the next
-    handshake.
+    handshake. A failed read is neither: it raises (``get_many_strict``) and
+    leaves the cache as it was, so a database blip is never remembered as
+    "crypto settings not configured".
     """
     now = time.monotonic()
     if (
@@ -727,7 +744,7 @@ class SystemEventConsumer:
     ):
       return self._crypto_settings_cache
 
-    values = await self._settings.get_many(
+    values = await self._settings.get_many_strict(
       [CRYPTO_ALLOWED_SYMBOL_KEY, CRYPTO_MAX_LEVERAGE_KEY]
     )
     symbols_raw = values.get(CRYPTO_ALLOWED_SYMBOL_KEY)
@@ -743,7 +760,9 @@ class SystemEventConsumer:
     The ``strategy_magic_map`` setting is stored as JSON text; parsing happens
     once here and the result is cached, so a reconnect storm re-reads the DB at
     most once per TTL and an admin edit reaches new handshakes within the TTL.
-    Both hits and misses (empty map) are cached.
+    Both hits and misses (empty map) are cached. A failed read raises
+    (``get_strict``) and is not cached: an empty map handed to a worker stays
+    with it until it reconnects, so "unreadable" must never pass for "unset".
     """
     now = time.monotonic()
     if (
@@ -752,9 +771,8 @@ class SystemEventConsumer:
     ):
       return self._magic_map_cache
 
-    self._magic_map_cache = _parse_strategy_magic_map(
-      await self._settings.get(STRATEGY_MAGIC_MAP_KEY)
-    )
+    raw = await self._settings.get_strict(STRATEGY_MAGIC_MAP_KEY)
+    self._magic_map_cache = _parse_strategy_magic_map(raw)
     self._magic_map_cached_at = now
     return self._magic_map_cache
 

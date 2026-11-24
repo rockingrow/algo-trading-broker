@@ -44,7 +44,9 @@ class FakeSignalRepository:
       attempts=attempts if attempts is not None else settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       delivery_key=delivery_key,
-      raw=payload.model_dump(mode="json"),
+      # Stored like the real repository: without the webhook token, so the
+      # retry path is exercised on exactly what it reads in production.
+      raw=payload.model_dump(mode="json", exclude={"token"}),
     )
     return row_id
 
@@ -487,6 +489,39 @@ async def test_retry_signal_replays_fanout_and_marks_published_on_success():
   assert signal_repo.published_ids == [signal_id]
   # Second attempt overall: attempts=2 on entry → attempt number 2.
   assert broadcaster.calls[0][1] == 2
+
+
+async def test_retry_signal_rebuilds_a_row_stored_without_the_token():
+  """``signals.raw`` no longer holds the webhook token; the retry path must
+  still rebuild and fan the signal out from it."""
+  publisher = FakePublisher()
+  signal_id = str(uuid.uuid4())
+  raw = _payload().model_dump(mode="json", exclude={"token"})
+  assert "token" not in raw
+  signal_repo = FakeSignalRepository(
+    existing={
+      "id": signal_id,
+      "status": SignalStatusEnum.QUEUED,
+      "attempts": 2,
+      "last_attempt": datetime(2026, 1, 1, tzinfo=timezone.utc),
+      "raw": raw,
+    }
+  )
+  service = SignalProcessingService(
+    signal_repository=signal_repo,
+    setting_repository=FakeSettingRepository(),
+    publisher=publisher,
+    notifier=FakeNotifier(),
+    broadcaster=FakeBroadcaster(),
+    webhook_secret="secret",
+  )
+
+  result = await service.retry_signal(signal_id)
+
+  assert result["status"] == "accepted"
+  assert len(publisher.published) == 1
+  assert publisher.published[0].signal_uxid == raw["signal_uxid"]
+  assert signal_repo.published_ids == [signal_id]
 
 
 async def test_retry_signal_missing_row_returns_not_found():

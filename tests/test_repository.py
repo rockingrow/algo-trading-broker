@@ -140,6 +140,46 @@ async def test_log_signal_persists_row_and_returns_id(monkeypatch):
   assert str(row.id) == result
 
 
+async def test_log_signal_never_stores_the_webhook_token(monkeypatch):
+  """``token`` is WEBHOOK_SECRET: it was verified on the way in and must not
+  sit in every persisted row."""
+  session = FakeSession(results=[])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemySignalRepository().log_signal(_payload(token="super-secret"))
+
+  row = session.added[0]
+  assert "token" not in row.raw
+  assert "super-secret" not in repr(row.raw)
+  # Everything else the retry path rebuilds from is still there.
+  assert row.raw["strategy"] == "strat"
+  assert row.raw["position"]["action"] == "LONG"
+  assert row.raw["signal_uxid"] == row.signal_uxid
+
+
+async def test_list_recent_by_strategies_replays_only_sent_or_in_flight_rows(
+  monkeypatch,
+):
+  """A FAILED row (given up on, or dropped by the block gate) is never
+  replayed to a reconnecting worker."""
+  row_id = uuid.uuid4()
+  session = FakeSession(results=[[(row_id, {"strategy": "S"}), (uuid.uuid4(), None)]])
+  _patch_session(monkeypatch, session)
+
+  envelopes = await SqlAlchemySignalRepository().list_recent_by_strategies(
+    strategies=["S"], since_seconds=60
+  )
+
+  assert envelopes == [{"signal_id": str(row_id), "payload": {"strategy": "S"}}]
+  sql, params = _compiled(session.statements[0])
+  assert "signals.status IN" in sql
+  status_values = [value for value in params.values() if isinstance(value, list)]
+  assert [SignalStatusEnum.PUBLISHED, SignalStatusEnum.QUEUED] in status_values
+  assert not any(SignalStatusEnum.FAILED in values for values in status_values)
+  # Only the two columns the replay needs, not the JSONB-heavy row.
+  assert sql.split("\n")[0].strip() == "SELECT signals.id, signals.raw"
+
+
 async def test_log_signal_persists_the_cycle_id(monkeypatch):
   session = FakeSession(results=[])
   _patch_session(monkeypatch, session)
@@ -2002,3 +2042,23 @@ async def test_get_strict_raises_where_get_answers_none(monkeypatch):
   assert await SqlAlchemySettingRepository().get("signal_blocked") is None
   with pytest.raises(RuntimeError):
     await SqlAlchemySettingRepository().get_strict("signal_blocked")
+
+
+async def test_get_many_strict_returns_found_keys(monkeypatch):
+  row = BrokerSetting(id=uuid.uuid4(), key="a", value="1")
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  assert await SqlAlchemySettingRepository().get_many_strict(["a", "b"]) == {"a": "1"}
+
+
+async def test_get_many_strict_raises_where_get_many_answers_empty(monkeypatch):
+  @contextlib.asynccontextmanager
+  async def boom():
+    raise RuntimeError("db down")
+    yield
+
+  monkeypatch.setattr(repo_mod._session, "get_session", boom)
+  assert await SqlAlchemySettingRepository().get_many(["a"]) == {}
+  with pytest.raises(RuntimeError):
+    await SqlAlchemySettingRepository().get_many_strict(["a"])

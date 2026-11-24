@@ -72,7 +72,7 @@ from pydantic import ValidationError
 
 from broker.constants import SIGNAL_BLOCKED
 from broker.helpers.message_formatter import format_blocked_message
-from broker.helpers.signal_helper import parse_signal
+from broker.helpers.signal_helper import parse_signal, payload_from_stored
 from broker.interfaces import (
   Notifier,
   SettingRepository,
@@ -598,7 +598,7 @@ class SignalProcessingService:
       return {"status": "invalid", "signal_id": signal_id}
 
     try:
-      payload = WebhookPayload(**row.raw)
+      payload = payload_from_stored(row.raw)
     except Exception as exc:
       log.exception(
         "retry_signal id=%s: cannot rebuild WebhookPayload: %s", signal_id, exc

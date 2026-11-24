@@ -5,7 +5,6 @@ broker/db/repository/signal.py — the persisted inbound signals
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -79,13 +78,17 @@ class SqlAlchemySignalRepository:
       attempts=attempts if attempts is not None else settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       delivery_key=delivery_key,
-      indicators=json.loads(payload.indicators.model_dump_json())
+      indicators=payload.indicators.model_dump(mode="json")
       if payload.indicators is not None
       else {},
-      inputs=json.loads(payload.inputs.model_dump_json())
+      inputs=payload.inputs.model_dump(mode="json")
       if payload.inputs is not None
       else {},
-      raw=json.loads(payload.model_dump_json()),
+      # ``token`` is WEBHOOK_SECRET. It was verified before the envelope was
+      # queued and nothing downstream needs it, so it is never written to the
+      # table — every row would otherwise hold the key to the webhook. Readers
+      # rebuild the payload with ``payload_from_stored``.
+      raw=payload.model_dump(mode="json", exclude={"token"}),
     )
     try:
       async with _session.get_session() as session:
@@ -272,9 +275,16 @@ class SqlAlchemySignalRepository:
 
     Backs the ``retry_signals`` replay a worker gets on connect: rows
     whose ``strategy`` is in *strategies* and whose ``createdAt`` is within the
-    last *since_seconds*, newest first. Only the persisted ``raw`` JSON is
+    last *since_seconds*, oldest first. Only the persisted ``raw`` JSON is
     returned so callers can feed it straight through ``parse_signal`` — the
     same code path the JetStream handler uses to produce the SIGNAL payload.
+
+    Only rows the broker sent, or still means to send, are replayed:
+    ``PUBLISHED``, and ``QUEUED`` (a fan-out in flight or owned by the retry
+    job — workers de-duplicate it by ``signal_id``). A ``FAILED`` row is never
+    replayed: it is a signal the broker gave up on or refused, including a
+    redelivery the block gate dropped, and replaying it on reconnect would let
+    a worker execute what the gate stopped.
     """
     if not strategies or since_seconds <= 0:
       return []
@@ -282,25 +292,29 @@ class SqlAlchemySignalRepository:
     since_dt = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
     try:
       async with _session.get_session() as session:
+        # Two columns rather than whole rows: the replay needs nothing else,
+        # and a row also carries the indicators/inputs JSONB.
         result = await session.execute(
-          select(Signal)
+          select(Signal.id, Signal.raw)
           .where(Signal.strategy.in_(strategies))
           .where(Signal.createdAt >= since_dt)
+          .where(
+            Signal.status.in_([SignalStatusEnum.PUBLISHED, SignalStatusEnum.QUEUED])
+          )
           .order_by(Signal.createdAt.asc())
         )
-        rows = list(result.scalars().all())
+        rows = list(result.all())
     except Exception as exc:
       log.exception("Failed to list recent signals: %s", exc)
       return []
 
     envelopes: list[dict] = []
-    for row in rows:
-      raw = row.raw
+    for row_id, raw in rows:
       if not raw:
         continue
       envelopes.append(
         {
-          "signal_id": str(row.id),
+          "signal_id": str(row_id),
           "payload": raw,
         }
       )

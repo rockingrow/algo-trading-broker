@@ -13,6 +13,18 @@ from broker.helpers import emoji_constants as em
 log = get_logger(__name__)
 
 
+def payload_from_stored(raw: dict) -> WebhookPayload:
+  """Rebuild a ``WebhookPayload`` from a persisted ``signals.raw``.
+
+  ``raw`` is stored without ``token`` (it is WEBHOOK_SECRET, see
+  ``SqlAlchemySignalRepository.log_signal``), but the model requires one. The
+  token was verified before the signal was ever queued, so the rebuilt payload
+  carries an empty one; nothing past the webhook reads it. A row written
+  before the token was stripped keeps working, its value simply ignored.
+  """
+  return WebhookPayload(**{**raw, "token": ""})
+
+
 def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:
   """
   Validate and normalise a raw TradingView webhook payload into a TradingSignal.

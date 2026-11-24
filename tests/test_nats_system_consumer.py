@@ -41,14 +41,29 @@ class FakeSettingRepo:
     self._values = values or {}
     self.get_calls: list[str] = []
     self.get_many_calls: list[list[str]] = []
+    # When set, the strict reads raise like a database outage; the lenient
+    # ones keep answering as before (they swallow errors in production).
+    self.fail_strict = False
 
   async def get(self, key: str) -> str | None:
     self.get_calls.append(key)
     return self._values.get(key)
 
+  async def get_strict(self, key: str) -> str | None:
+    if self.fail_strict:
+      self.get_calls.append(key)
+      raise ConnectionError("database unavailable")
+    return await self.get(key)
+
   async def get_many(self, keys: list[str]) -> dict[str, str]:
     self.get_many_calls.append(list(keys))
     return {k: v for k, v in self._values.items() if k in keys and v is not None}
+
+  async def get_many_strict(self, keys: list[str]) -> dict[str, str]:
+    if self.fail_strict:
+      self.get_many_calls.append(list(keys))
+      raise ConnectionError("database unavailable")
+    return await self.get_many(keys)
 
   async def set(self, key: str, value: str) -> bool:
     self._values[key] = value
@@ -890,6 +905,71 @@ async def test_missing_settings_are_also_cached():
   assert publisher.acks == []
 
 
+# ── A failed settings read is an ERROR, never a cached empty answer ────────
+
+
+async def test_unreadable_crypto_settings_answer_error_not_not_configured():
+  """A database blip must not tell a crypto worker its settings are missing."""
+  consumer, repo, publisher = _make_consumer()
+  repo.fail_strict = True
+
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(), reply="_INBOX.c")
+  )
+
+  assert publisher.acks == []
+  assert publisher.order == ["WORKER_CONNECTED_ERROR"]
+  assert publisher.errors[0]["subject"] == "_INBOX.c"
+  assert publisher.errors[0]["reason"] == "broker settings unavailable"
+
+
+async def test_unreadable_magic_map_answers_error_instead_of_an_empty_map():
+  """An MT5 worker keeps its ACK until it reconnects, so an empty map handed
+  out on a failed read would strand it without magic numbers."""
+  consumer, repo, publisher = _make_consumer(
+    settings={STRATEGY_MAGIC_MAP_KEY: json.dumps({"S1": 101})}
+  )
+  repo.fail_strict = True
+
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-1234", market="FOREX", gateway="MT5", strategies=["S1"]
+      ),
+      reply="_INBOX.m",
+    )
+  )
+
+  assert publisher.acks == []
+  assert publisher.order == ["WORKER_CONNECTED_ERROR"]
+  assert publisher.errors[0]["reason"] == "broker settings unavailable"
+
+
+async def test_failed_settings_read_is_not_cached():
+  """The handshake after the database recovers reads again and gets the ACK."""
+  consumer, repo, publisher = _make_consumer(
+    settings={
+      CRYPTO_ALLOWED_SYMBOL_KEY: "BTC",
+      CRYPTO_MAX_LEVERAGE_KEY: "5",
+      STRATEGY_MAGIC_MAP_KEY: json.dumps({"S1": 101}),
+    }
+  )
+  repo.fail_strict = True
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["S1"]), reply="_INBOX.1")
+  )
+  assert publisher.acks == []
+
+  repo.fail_strict = False
+  await consumer.handle_subject_system(
+    FakeMsg(_worker_connected_payload(strategies=["S1"]), reply="_INBOX.2")
+  )
+
+  assert len(publisher.acks) == 1
+  assert publisher.acks[0]["strategy_magic_map"] == {"S1": 101}
+  assert publisher.acks[0]["crypto_leverage_init"].default_leverage == 5
+
+
 class FakeSubscription:
   def __init__(self):
     self.unsubscribed = False
@@ -980,6 +1060,29 @@ async def test_retry_signal_queries_and_replays_matching_signals():
   # Payload mirrors SIGNAL exactly (symbol normalised, strategy carried).
   assert ack["retry_signals"][0].symbol == "XAUUSD"
   assert ack["retry_signals"][0].strategy == "wt_cross_v1"
+
+
+async def test_retry_signal_replays_a_row_stored_without_the_token():
+  """``signals.raw`` no longer holds the webhook token; such a row must still
+  be replayed rather than skipped as invalid."""
+  envelope = _webhook_envelope("wt_cross_v1", signal_id="sig-no-token")
+  del envelope["payload"]["token"]
+  signals = FakeSignalRepo(envelopes=[envelope])
+  consumer, _repo, publisher = _make_consumer(signals=signals)
+  await consumer.handle_subject_system(
+    FakeMsg(
+      _worker_connected_payload(
+        account_id="FOREX-MT5-1",
+        market="FOREX",
+        gateway="MT5",
+        strategies=["wt_cross_v1"],
+      ),
+      reply="_INBOX.forex",
+    )
+  )
+
+  replayed = publisher.acks[0]["retry_signals"]
+  assert [signal.signal_id for signal in replayed] == ["sig-no-token"]
 
 
 async def test_retry_signal_replays_across_many_strategies():

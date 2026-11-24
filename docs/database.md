@@ -24,7 +24,7 @@
 | `delivery_key` | String(128) (Nullable, unique) | Identity of the JetStream message the row was persisted from (`seq:<stream>:<sequence>@<stored-at>` — unchanged by a redelivery; a producer-chosen `Nats-Msg-Id` is not used, since JetStream only de-duplicates it inside its window). A redelivery of the same message finds this row instead of creating a second `signal_id`. `NULL` on rows that predate the column. |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
-| `raw` | JSONB (Nullable) | Raw webhook payload |
+| `raw` | JSONB (Nullable) | Raw webhook payload **without `token`** (the token is `WEBHOOK_SECRET`; it is verified before queueing and never stored). The retry job and the handshake replay rebuild the payload from it. |
 | `createdAt` | DateTime | Broker log insertion time |
 
 ## `trades` table

@@ -89,6 +89,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
 | --------- | ------------ | ------- |
 | Config loaded | `WORKER_CONNECTED_ACK` | `strategy_magic_map`, `retry_signals`, `settings`, and `crypto_leverage_init` (crypto only) |
 | Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
+| Broker settings unreadable (database error), any market | `WORKER_CONNECTED_ERROR` | `reason: "broker settings unavailable"` — retry the handshake |
 
 ```json
 {
@@ -124,6 +125,8 @@ If a crypto worker's settings are missing or invalid, it gets an explicit error 
   "reason": "crypto settings not configured"
 }
 ```
+
+A worker of **either** market gets the same `WORKER_CONNECTED_ERROR` with `reason: "broker settings unavailable"` when the broker cannot read the crypto settings or the strategy magic map (a database outage). The ACK is what a worker runs on until it reconnects, so the broker refuses to answer with an empty magic map or a false "not configured" it would then keep; the worker should retry the handshake after a short delay.
 
 ### Strategy magic map
 
@@ -198,7 +201,7 @@ The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `W
 
 ### Signal replay on reconnect
 
-The `retry_signals` block of the ACK carries every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list. It is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler and de-duplicate against live signals by `signal_id`.
+The `retry_signals` block of the ACK carries every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list and whose status is `PUBLISHED` or `QUEUED`. A `FAILED` signal — one the broker gave up on, or one the block gate dropped — is never replayed. It is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler and de-duplicate against live signals by `signal_id`.
 
 Empty when the worker announced no strategies, or when there is nothing recent to replay.
 
