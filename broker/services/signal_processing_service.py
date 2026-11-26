@@ -769,6 +769,13 @@ class SignalProcessingService:
     # Without that split every redelivery re-ran the whole fan-out, publishing
     # to the workers again for as long as the database write kept failing.
     #
+    # Only a redelivery resumes it: on the retry-job path the JetStream message
+    # was acked long ago and ``list_retryable`` sees no ``QUEUED`` row, so a
+    # cycle write that fails on a *retried* signal stays owed and its line is
+    # missing from the message. That path only runs for a signal whose publish
+    # had already failed once, and the alternative — leaving the row QUEUED so
+    # the job re-picks it — is what made every retry publish again.
+    #
     # Deliberately *not* routed through ``record_attempt_failure``: the workers
     # already have the signal, so spending attempts on a database problem would
     # mark FAILED a signal that was in fact delivered, and a FAILED row is also
