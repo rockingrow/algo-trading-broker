@@ -22,6 +22,7 @@
 | `attempts` | Integer | Remaining fan-out attempts (seeded from `settings.signal.MAX_ATTEMPTS`, default `3`). Decremented on failure; `0` marks the row `FAILED`. |
 | `last_attempt` | DateTime (Nullable) | Timestamp of the most recent fan-out attempt (`NULL` before the first attempt). Drives the retry job's minimum-gap filter. |
 | `delivery_key` | String(128) (Nullable, unique) | Identity of the JetStream message the row was persisted from (`seq:<stream>:<sequence>@<stored-at>` — unchanged by a redelivery; a producer-chosen `Nats-Msg-Id` is not used, since JetStream only de-duplicates it inside its window). A redelivery of the same message finds this row instead of creating a second `signal_id`. `NULL` on rows that predate the column. |
+| `idempotency_key` | String(64) (Nullable, unique) | Identity of the *alert* rather than of its delivery: SHA-256 over the payload with `token` excluded and object keys sorted. `delivery_key` above only recognises the same stored JetStream message coming back; this recognises one alert arriving as two separate messages (a producer re-publishing to `SIGNALS.<strategy>`, a replayed request), which otherwise minted two `signal_id` values and so opened two positions. Looked up on every delivery. `NULL` on rows that predate the column, which an equality lookup never matches. |
 | `indicators` | JSONB (Nullable) | Full technical indicator snapshot |
 | `inputs` | JSONB (Nullable) | Strategy input parameters |
 | `raw` | JSONB (Nullable) | Raw webhook payload **without `token`** (the token is `WEBHOOK_SECRET`; it is verified before queueing and never stored). The retry job and the handshake replay rebuild the payload from it. |
@@ -166,7 +167,7 @@ posting a new one.
 | `trade_id` | UUID (FK) | `trades.id`, `ON DELETE CASCADE` |
 | `platform` | Enum | `TELEGRAM` |
 | `chat_id` | String(64) | Recipient's platform user id (their DM chat) |
-| `message_id` | Integer | The Telegram message to edit |
+| `message_id` | Integer (Nullable) | The Telegram message to edit. `NULL` when the send timed out: the card is in the chat but its id never came back, so it cannot be edited — the row exists purely to stop the next TRADE event posting a second copy, and the next status change replaces it with a fresh card. |
 | `status` | Enum | The trade status the card currently shows |
 | `createdAt` | DateTime | Record insertion time |
 | `updatedAt` | DateTime | Last update time |

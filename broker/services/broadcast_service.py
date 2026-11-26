@@ -94,6 +94,17 @@ from broker.settings import settings
 log = get_logger(__name__)
 
 
+class BroadcastRecordError(Exception):
+  """A cycle change could not be written to the database.
+
+  Raised rather than logged because this write is the *durable* record of the
+  change: the Telegram body is re-rendered from the stored events on every
+  later edit, so a write that is lost leaves the message wrong for the rest of
+  the trade, with nothing to replay it from. The signal path treats it like a
+  failed persist and leans on JetStream redelivery.
+  """
+
+
 def _parse(raw: str | list[str] | None) -> list[tuple[str, ChatTarget]]:
   """(raw entry, parsed ChatTarget) pairs for one chat-id setting.
 
@@ -131,7 +142,10 @@ def _raw_id(chat: ChatTarget) -> str:
 
 
 def build_broadcast_event(
-  payload: WebhookPayload, *, attempt_number: int | None = None
+  payload: WebhookPayload,
+  *,
+  attempt_number: int | None = None,
+  signal_id: str | None = None,
 ) -> dict:
   """The JSONB entry appended to a cycle for one signal.
 
@@ -139,12 +153,17 @@ def build_broadcast_event(
   is rebuilt from these events alone on every later edit — going back to the
   ``signals`` table for it would make rendering depend on rows this service
   does not own.
+
+  ``signal_id`` is not rendered: it is the event's identity, so a replay of one
+  signal is recognised wherever it lands in the list (see
+  ``_is_duplicate_event``). ``None`` for a drill, which has no persisted row.
   """
   pos = payload.position
   risk_percent = pos.risk_percent
   if risk_percent is None and payload.inputs is not None:
     risk_percent = payload.inputs.risk_percent
   return {
+    "signal_id": signal_id,
     "action": pos.action.value,
     "price": pos.price,
     "quantity": pos.quantity,
@@ -188,9 +207,22 @@ class SignalBroadcastService:
   # ── Signal path ────────────────────────────────────────────────────
 
   async def broadcast(
-    self, payload: WebhookPayload, *, attempt_number: int | None = None
+    self,
+    payload: WebhookPayload,
+    *,
+    attempt_number: int | None = None,
+    signal_id: str | None = None,
   ) -> None:
-    """Record *payload* on its cycle. Delivery is the dispatcher's job."""
+    """Record *payload* on its cycle. Delivery is the dispatcher's job.
+
+    Raises :class:`BroadcastRecordError` when the write does not land. The
+    write **is** the durable record the message is later rebuilt from, so
+    swallowing the failure left the cycle permanently missing that line — the
+    body is re-rendered from the events alone, and nothing revisits a row the
+    fan-out has already marked PUBLISHED. The caller on the signal path lets
+    it propagate so JetStream redelivery retries the whole fan-out instead
+    (see ``SignalProcessingService._fanout``).
+    """
     if not settings.telegram.ENABLED:
       return
 
@@ -200,14 +232,14 @@ class SignalBroadcastService:
       symbol=payload.symbol,
       timeframe=payload.timeframe,
       action=payload.position.action,
-      event=build_broadcast_event(payload, attempt_number=attempt_number),
+      event=build_broadcast_event(
+        payload, attempt_number=attempt_number, signal_id=signal_id
+      ),
     )
     if record is None:
-      log.error(
-        "Broadcast not recorded symbol=%s strategy=%s signal_uxid=%s",
-        payload.symbol,
-        payload.strategy,
-        payload.signal_uxid,
+      raise BroadcastRecordError(
+        f"broadcast not recorded symbol={payload.symbol} "
+        f"strategy={payload.strategy} signal_uxid={payload.signal_uxid}"
       )
 
   # ── Worker path ────────────────────────────────────────────────────
@@ -778,8 +810,9 @@ class BroadcastDispatcher:
     """Reply to *message_id* once per event this chat has not seen announced.
 
     Returns the new ``notified_event_count`` for the chat — only ever the count
-    of notices actually delivered, so a reply that failed is retried on the
-    next pass instead of being silently skipped.
+    of notices Telegram did not refuse, so a reply that failed is retried on
+    the next pass instead of being silently skipped, while one whose request
+    merely timed out counts as announced rather than being posted twice.
 
     ``already_notified`` is None for a chat row written before notices existed:
     what it announced is unknowable, so it is caught up silently rather than
@@ -800,13 +833,24 @@ class BroadcastDispatcher:
       if notice is None:
         sent = index + 1
         continue
-      if not await self._notifier.reply_message(chat, message_id, notice):
+      outcome = await self._notifier.reply_message(chat, message_id, notice)
+      if outcome is SendOutcome.FAILED:
         log.warning(
           "Broadcast notice failed chat_id=%s message_id=%s — retrying next pass",
           chat.label,
           message_id,
         )
         break
+      if outcome is SendOutcome.UNKNOWN:
+        # Telegram never answered, so the notice is probably in the chat
+        # already; counting it as announced is what stops the next pass
+        # posting a second copy of it. Same trade-off as a new send's UNKNOWN.
+        log.warning(
+          "Broadcast notice unanswered chat_id=%s message_id=%s — assuming it "
+          "landed, not re-sending",
+          chat.label,
+          message_id,
+        )
       sent = index + 1
     return sent
 

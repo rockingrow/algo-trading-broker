@@ -165,6 +165,14 @@ per-signal `signal_id` the broker mints on persist is still unique per
 alert (workers keep deduping on it) — the two ids serve different jobs and
 both travel on every downstream NATS payload.
 
+**Re-sending an identical alert is safe.** The broker keys each alert by a
+digest of the payload (`token` excluded), so delivering a byte-identical body
+again — a retried POST, a replayed alert — resolves to the signal already
+persisted instead of minting a second `signal_id`: no further message reaches a
+worker and the cycle's Telegram message gains no second line. Change any field
+(price, quantity, a level, the timestamp) and it is a different alert. See
+[One alert, one `signal_id`](nats.md#one-alert-one-signal_id).
+
 **Several cycles on one symbol + strategy at the same time:** a producer may
 run more than one trade on the same `symbol` + `strategy` concurrently. Each
 one mints its own `signal_uxid` and carries the full action trail from entry to

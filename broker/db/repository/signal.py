@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from broker.db.models import Signal
 from broker.db.repository import _session
+from broker.helpers.signal_helper import payload_idempotency_key
 from broker.logger import get_logger
 from broker.schemas.core import SignalStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
@@ -40,6 +41,11 @@ class SqlAlchemySignalRepository:
     *attempts* seeds the row's attempt budget — the service passes its own, so
     the row and the service count from the same number; defaults to
     ``settings.signal.MAX_ATTEMPTS``.
+
+    The row also carries ``idempotency_key``, the digest of the payload itself
+    (``payload_idempotency_key``), under its own unique constraint: that is
+    what stops two *different* JetStream messages carrying one alert from
+    minting two ``signal_id`` values and opening two positions.
 
     Returns
     -------
@@ -78,6 +84,7 @@ class SqlAlchemySignalRepository:
       attempts=attempts if attempts is not None else settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       delivery_key=delivery_key,
+      idempotency_key=payload_idempotency_key(payload),
       indicators=payload.indicators.model_dump(mode="json")
       if payload.indicators is not None
       else {},
@@ -137,6 +144,23 @@ class SqlAlchemySignalRepository:
     async with _session.get_session() as session:
       result = await session.execute(
         select(Signal).where(Signal.delivery_key == delivery_key)
+      )
+      return result.scalars().first()
+
+  async def get_by_idempotency_key(self, idempotency_key: str) -> Signal | None:
+    """Return the row already persisted for this *alert*, if there is one.
+
+    Raises on a database error rather than answering ``None``, for the same
+    reason as :meth:`get_by_delivery_key`: the caller is deciding whether this
+    alert has already been fanned out, and "unknown" must not be read as "not
+    yet" — that is how one alert becomes two positions.
+
+    Rows written before the column existed carry ``NULL``, which this equality
+    lookup never matches, so they are simply invisible to it.
+    """
+    async with _session.get_session() as session:
+      result = await session.execute(
+        select(Signal).where(Signal.idempotency_key == idempotency_key)
       )
       return result.scalars().first()
 

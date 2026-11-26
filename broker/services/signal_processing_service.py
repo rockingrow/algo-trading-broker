@@ -64,7 +64,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
-import uuid
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -72,7 +72,11 @@ from pydantic import ValidationError
 
 from broker.constants import SIGNAL_BLOCKED
 from broker.helpers.message_formatter import format_blocked_message
-from broker.helpers.signal_helper import parse_signal, payload_from_stored
+from broker.helpers.signal_helper import (
+  parse_signal,
+  payload_from_stored,
+  payload_idempotency_key,
+)
 from broker.interfaces import (
   Notifier,
   SettingRepository,
@@ -82,6 +86,7 @@ from broker.interfaces import (
 )
 from broker.logger import get_logger
 from broker.nats import (
+  JETSTREAM_DUPLICATE_WINDOW_SECONDS,
   JETSTREAM_SIGNAL_STREAM,
   JETSTREAM_SIGNAL_SUBJECT_FILTER,
   NatsClient,
@@ -124,6 +129,25 @@ class SignalParseError(Exception):
 # TradingView's alert cadence this is minutes' worth of backlog.
 DEFERRED_QUEUE_MAXSIZE = 500
 
+# How close to the stream's duplicate window a deferred envelope may get before
+# it is given up on. ``_attempt`` sleeps inside the single retry loop and puts a
+# failure back at the *end* of the queue, so with a real backlog one envelope
+# can wait far longer than the window: 60 failing items at
+# ``DEFERRED_ENQUEUE_INTERVAL`` already make one lap of the queue 120s. Past the
+# window JetStream no longer recognises the retry's ``Nats-Msg-Id``, so a first
+# publish that did land and was only slow to ack would be stored a second time.
+# The row's ``idempotency_key`` catches that too, and keeps it from reaching a
+# worker twice — this margin is the layer in front of it, and the reason the
+# give-up is logged at ERROR.
+DEFERRED_DEDUP_MARGIN_SECONDS = 10.0
+
+
+def _monotonic() -> float:
+  """Indirection over ``time.monotonic`` so a test can move this clock without
+  also moving the event loop's — patching ``time.monotonic`` itself breaks
+  every asyncio timer in the process."""
+  return time.monotonic()
+
 
 @dataclass
 class _DeferredEnvelope:
@@ -133,6 +157,12 @@ class _DeferredEnvelope:
   envelope: dict
   msg_id: str
   attempts: int = field(default=0)
+  #: Monotonic clock reading when the webhook handed this envelope over, used
+  #: to tell how much of the stream's duplicate window is left for it.
+  created_at: float = field(default_factory=_monotonic)
+
+  def age_seconds(self) -> float:
+    return _monotonic() - self.created_at
 
 
 class DeferredEnqueuer:
@@ -238,6 +268,9 @@ class DeferredEnqueuer:
       if remaining <= 0:
         lost += 1
         continue
+      if self._dedup_window_spent(item):
+        lost += 1
+        continue
       try:
         await asyncio.wait_for(
           self._publisher.publish_webhook_event(
@@ -307,8 +340,33 @@ class DeferredEnqueuer:
       finally:
         self._queue.task_done()
 
+  def _dedup_window_spent(self, item: _DeferredEnvelope) -> bool:
+    """True once *item* is too old for JetStream to recognise its ``msg_id``.
+
+    Publishing past that point risks storing an alert the stream already has
+    (a first publish that landed with a slow ack), so the envelope is dropped
+    here instead. It is reported at ERROR because the signal never became
+    durable — the same outcome as exhausting the attempts.
+    """
+    budget = JETSTREAM_DUPLICATE_WINDOW_SECONDS - DEFERRED_DEDUP_MARGIN_SECONDS
+    if item.age_seconds() < budget:
+      return False
+    log.error(
+      "Deferred enqueue gave up after %.0fs — past the %.0fs duplicate window, "
+      "re-publishing could store the alert twice; signal lost strategy=%s "
+      "msg_id=%s attempts=%d",
+      item.age_seconds(),
+      JETSTREAM_DUPLICATE_WINDOW_SECONDS,
+      item.strategy,
+      item.msg_id,
+      item.attempts,
+    )
+    return True
+
   async def _attempt(self, item: _DeferredEnvelope) -> None:
     """One publish attempt; re-queues the envelope when it fails again."""
+    if self._dedup_window_spent(item):
+      return
     item.attempts += 1
     try:
       await self._publisher.publish_webhook_event(
@@ -433,10 +491,12 @@ class SignalProcessingService:
     """
     self._verify_token(payload)
     envelope = {"payload": payload.model_dump(mode="json")}
-    # Stable across every retry of *this* alert, so a re-publish of an envelope
-    # whose first ack was merely slow is de-duplicated by JetStream instead of
-    # reaching workers twice.
-    msg_id = uuid.uuid4().hex
+    # Derived from the payload, not minted per request, so JetStream's
+    # duplicate window de-duplicates *the alert*: a re-publish whose first ack
+    # was merely slow, and equally a re-POST of the same alert, are dropped by
+    # the stream instead of reaching workers twice. Past that window the row's
+    # ``idempotency_key`` is what still catches it (see ``handle_enqueued``).
+    msg_id = payload_idempotency_key(payload)
     deadline = self._enqueue_timeout
 
     try:
@@ -508,9 +568,8 @@ class SignalProcessingService:
     the fact TradingView already got its 202), persists the row and delegates
     to the fan-out. Raises on persist failure so JetStream redelivers.
 
-    *delivery_key* is the JetStream message's identity. When a row already
-    carries it, this delivery is a redelivery — the broker crashed after the
-    first one, or its ack was lost — and the row decides what happens:
+    The row this alert may already own is looked up first, and whichever way
+    it is found the row decides what happens next:
 
     * ``QUEUED`` with no recorded attempt: the first fan-out was interrupted
       and may or may not have reached the workers. Fan out again **with the
@@ -519,12 +578,23 @@ class SignalProcessingService:
     * anything else (``PUBLISHED``, ``FAILED``, or a recorded failure the
       retry job now owns): already handled — ack and stop.
 
-    The lookup only runs when the message may have been seen before
-    (*redelivered*: JetStream's delivery count is above one, or the worker is
-    retrying it in place), so a first delivery costs no extra query.
+    The lookup is by ``idempotency_key`` — the digest of the payload — and it
+    runs on **every** delivery, not only on a redelivery. That costs one
+    indexed ``SELECT`` per signal, and it is the only thing that recognises
+    one alert arriving as two separate JetStream messages: a producer
+    re-publishing to ``SIGNALS.<strategy>``, a replayed request. Without it
+    each message minted its own ``signal_id``, which is exactly what workers
+    de-duplicate on, so the alert was executed twice.
+
+    *delivery_key* (the stored message's own identity) is still consulted as a
+    fallback on a redelivery, because a row written before
+    ``idempotency_key`` existed carries only that one — and missing it would
+    turn its redelivery into a unique-constraint failure redelivered for ever.
     """
-    existing = None
-    if delivery_key is not None and redelivered:
+    existing = await self._signals.get_by_idempotency_key(
+      payload_idempotency_key(payload)
+    )
+    if existing is None and delivery_key is not None and redelivered:
       existing = await self._signals.get_by_delivery_key(delivery_key)
 
     if await self._is_blocked(payload):
@@ -556,11 +626,15 @@ class SignalProcessingService:
     )
 
   async def _handle_redelivery(self, row, payload: WebhookPayload) -> Dict[str, Any]:
-    """A JetStream message came back for a row that already exists."""
+    """An envelope arrived for an alert that already has a row.
+
+    Either the same stored message came back, or a second message carrying the
+    same alert did; the row is what matters either way.
+    """
     signal_id = str(row.id)
     if _first_fanout_unconfirmed(row):
       log.warning(
-        "Redelivered signal_id=%s was never confirmed published — fanning out "
+        "Signal_id=%s was never confirmed published — fanning out "
         "again under the same signal_id",
         signal_id,
       )
@@ -570,7 +644,7 @@ class SignalProcessingService:
         attempts_before=row.attempts,
       )
     log.info(
-      "Redelivered signal_id=%s already handled (status=%s) — not re-sent",
+      "Signal_id=%s already handled (status=%s) — not re-sent",
       signal_id,
       row.status,
     )
@@ -655,9 +729,16 @@ class SignalProcessingService:
         "attempts_before": attempts_before,
       }
 
-    # Broadcast and mark-published are best-effort — they must not roll
-    # back a successful worker publish.
-    await self._broadcast(payload, attempts_before=attempts_before)
+    # Recording the broadcast comes *before* ``mark_published``, and that
+    # order is the invariant: a failure here raises, which leaves the row
+    # QUEUED with no recorded attempt, and that is exactly the state
+    # ``handle_enqueued`` resumes from — JetStream redelivers and the fan-out
+    # runs again under the same ``signal_id``, which the workers de-duplicate.
+    # Deliberately *not* routed through ``record_attempt_failure``: the
+    # workers already have the signal, so spending attempts on a database
+    # problem would mark FAILED a signal that was in fact delivered, and a
+    # FAILED row is also dropped from the reconnect replay.
+    await self._broadcast(payload, attempts_before=attempts_before, signal_id=signal_id)
     await self._signals.mark_published(signal_id)
 
     return {
@@ -716,25 +797,35 @@ class SignalProcessingService:
 
     await self._publisher.publish(signal=signal)
 
-  async def _broadcast(self, payload: WebhookPayload, *, attempts_before: int) -> None:
+  async def _broadcast(
+    self,
+    payload: WebhookPayload,
+    *,
+    attempts_before: int,
+    signal_id: str | None = None,
+  ) -> None:
     """Fold the signal into its cycle's Telegram message.
 
     The service no longer formats anything itself: the broadcaster owns the
     cycle (``strategy`` + ``signal_uxid``), the message ids per chat and the
     rendering, because a signal is a line inside a longer-lived message rather
     than a message of its own.
+
+    Failures are **not** swallowed. No Telegram call happens here — the
+    broadcaster only writes to the database, and that write is the record the
+    message is rebuilt from, so losing it silently left the cycle wrong for
+    good. Letting it raise hands the signal back to JetStream redelivery; see
+    the ordering note in ``_fanout``.
     """
     if self._broadcaster is None:
       return
-    try:
-      await self._broadcaster.broadcast(
-        payload,
-        attempt_number=_attempt_number_for_notification(
-          attempts_before, self._max_attempts
-        ),
-      )
-    except Exception as exc:
-      log.warning("Signal broadcast failed: %s", exc)
+    await self._broadcaster.broadcast(
+      payload,
+      attempt_number=_attempt_number_for_notification(
+        attempts_before, self._max_attempts
+      ),
+      signal_id=signal_id,
+    )
 
 
 def delivery_key_for(msg) -> str | None:

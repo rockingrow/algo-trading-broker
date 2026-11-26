@@ -11,6 +11,7 @@ from typing import Optional
 
 from sqlalchemy import cast, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 
 from broker.db.models import (
   Account,
@@ -55,45 +56,69 @@ class SqlAlchemyAccountRepository:
     matching either the exact gateway already on file or a legacy row whose
     gateway is still NULL (predates this column, being backfilled now).
     """
-    try:
-      async with _session.get_session() as session:
-        result = await session.execute(
-          select(Account).where(
-            Account.account_id == account_id,
-            Account.market == market,
-            or_(Account.gateway == gateway, Account.gateway.is_(None)),
+    # Read-then-insert, so two writers can both find nothing and both insert.
+    # That is not hypothetical: this runs on the SYSTEM subscription while
+    # ``TradeRepository._upsert_account`` runs on the TRADES consumer, and a
+    # worker that connects and reports a trade at once drives both. The loser
+    # gets a unique violation on uq_accounts_market_gateway_account_id, and the
+    # retry then finds the winner's row and takes the update branch — the same
+    # convergence ``BroadcastMessageRepository.record_event`` relies on.
+    for attempt in (1, 2):
+      try:
+        async with _session.get_session() as session:
+          result = await session.execute(
+            select(Account)
+            .where(
+              Account.account_id == account_id,
+              Account.market == market,
+              or_(Account.gateway == gateway, Account.gateway.is_(None)),
+            )
+            # An exact-gateway row wins over a legacy NULL one. Without an
+            # order the choice is up to Postgres, so repeated calls could pick
+            # different rows and write the gateway onto the legacy row —
+            # leaving two rows for one logical account.
+            .order_by(Account.gateway.is_(None))
           )
+          row: Optional[Account] = result.scalars().first()
+
+          if row is not None:
+            if row.market == market and row.gateway == gateway:
+              return
+            row.market = market
+            row.gateway = gateway
+          else:
+            new_account = Account(
+              id=uuid.uuid4(),
+              account_id=account_id,
+              market=market,
+              gateway=gateway,
+              last_activity_at=datetime.now(timezone.utc),
+            )
+            session.add(new_account)
+            session.add(_new_link_token(new_account.id))
+
+        log.debug(
+          "account gateway upserted account_id=%s market=%s gateway=%s",
+          account_id,
+          market.value,
+          gateway,
         )
-        row: Optional[Account] = result.scalars().first()
-
-        if row is not None:
-          if row.market == market and row.gateway == gateway:
-            return
-          row.market = market
-          row.gateway = gateway
-        else:
-          new_account = Account(
-            id=uuid.uuid4(),
-            account_id=account_id,
-            market=market,
-            gateway=gateway,
-            last_activity_at=datetime.now(timezone.utc),
-          )
-          session.add(new_account)
-          session.add(_new_link_token(new_account.id))
-
-      log.debug(
-        "account gateway upserted account_id=%s market=%s gateway=%s",
-        account_id,
-        market.value,
-        gateway,
-      )
-    except Exception as exc:
-      log.exception(
-        "Failed to upsert gateway for account_id=%s: %s",
-        account_id,
-        exc,
-      )
+        return
+      except IntegrityError:
+        if attempt == 1:
+          log.debug("account gateway insert raced account_id=%s — retrying", account_id)
+          continue
+        log.exception(
+          "Failed to upsert gateway for account_id=%s: lost the insert race twice",
+          account_id,
+        )
+      except Exception as exc:
+        log.exception(
+          "Failed to upsert gateway for account_id=%s: %s",
+          account_id,
+          exc,
+        )
+        return
 
   async def create_account(
     self,

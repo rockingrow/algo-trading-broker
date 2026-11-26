@@ -17,6 +17,14 @@ Each signal is published to the subject that matches its `strategy` field. Worke
 
 Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside the handshake's `retry_signals` replay, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
 
+### One alert, one `signal_id`
+
+Because a worker de-duplicates on `signal_id`, two `signal_id` values for one alert mean two positions. The broker therefore keys each alert by its own content — a SHA-256 over the `WebhookPayload` with `token` excluded and object keys sorted, stored as `signals.idempotency_key` under a unique constraint and looked up on every delivery.
+
+This matters to anything that publishes straight onto `SIGNALS.<strategy>` rather than through `POST /secret/webhook` (QTE does): **re-publishing a byte-identical payload is safe**, however many times and whether or not `Nats-Msg-Id` is set. The second message resolves to the row the first one wrote, so no further signal reaches a worker, and the cycle's Telegram message gains no second line. A payload that differs in any field — price, quantity, levels, `signal_uxid`, timestamp, indicators — is a different alert and is processed as one.
+
+On the HTTP path the same digest is sent as `Nats-Msg-Id`, so a re-POST inside the stream's duplicate window (`JETSTREAM_DUPLICATE_WINDOW_SECONDS`, 120s) is dropped by JetStream before it is ever stored.
+
 ## `TRADE` events
 
 Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(market, gateway, account_id, ref_id)` — not `account_id` alone, since the same bare `account_id` can exist under a different market/gateway (see [`accounts` table](database.md#accounts-table)) — translating the worker's position status into a broker trade `status`:

@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One alert can no longer open two positions.** Every de-duplication guard
+  on the signal path was about *transport*: `Nats-Msg-Id` covered one publish
+  inside the stream's 120s duplicate window, and `delivery_key` covered one
+  stored JetStream message however often it was redelivered. Neither
+  recognised one alert arriving as two separate stored messages — a producer
+  re-publishing to `SIGNALS.<strategy>`, a replayed request — so each minted
+  its own `signal_id`, which is exactly what a worker de-duplicates on. The
+  broadcast layer's own content check meanwhile kept the Telegram message
+  showing a single line, so nothing about it was visible. Alerts now carry
+  `signals.idempotency_key`, a SHA-256 over the payload (`token` excluded,
+  keys sorted) under a unique constraint and looked up on every delivery, and
+  the HTTP path sends that same digest as `Nats-Msg-Id`. Re-publishing a
+  byte-identical payload is safe; changing any field makes it a new alert.
+  Migration `60b00ea13191`.
+- **The deferred webhook enqueue stops before it can duplicate an alert.** Its
+  retry loop sleeps inline and re-queues failures at the back of a 500-slot
+  queue, so one envelope could wait well past the duplicate window — after
+  which a first publish that had landed with a slow ack would be stored
+  again. An envelope older than the window is now dropped with an ERROR.
+- **A replayed signal no longer doubles a line in its Telegram message.** The
+  cycle's duplicate check only compared the last recorded event, so an entry
+  re-fired by the retry job *after* its own TP had been recorded was appended
+  a second time, along with a notice announcing the entry after the trade had
+  taken profit. Events now carry their `signal_id` and are matched against the
+  whole list.
+- **A trade card whose send timed out is no longer posted once per event.**
+  `TradeCardService` collapsed `SendOutcome.UNKNOWN` into "failed", so the DM
+  sat in the chat with nothing recorded and every subsequent TRADE event
+  posted another copy. The card is now recorded with a NULL `message_id`
+  (migration `f0ce07c22a2d`), which suppresses the re-post; the next status
+  change replaces it, leaving at most one orphan.
+- **A broadcast reply notice whose send timed out is no longer repeated.**
+  `reply_message` returned a bool, so a timeout counted as a failure and the
+  next dispatcher pass posted the same notice again. It now reports a
+  `SendOutcome`, and an unanswered reply counts as announced.
+- **The `accounts` upserts converge under concurrency.** `upsert_gateway`
+  (SYSTEM subscription) and the trade path's account upsert (TRADES consumer)
+  both read-then-inserted with no lock, so a worker that connected and
+  reported a trade at once could make one of them fail on the unique key; and
+  with both an exact-gateway row and a legacy NULL-gateway one present, an
+  unordered `.first()` could pick either and write the gateway onto the wrong
+  row. Both now order the exact-gateway row first and retry once on an
+  integrity error.
+- **`broker_settings` writes are a single upsert.** The read-then-write lost a
+  concurrent writer: two admin calls on one key both read "missing" and both
+  inserted, so one reported the setting as not applied.
+- **A cycle change that fails to persist is retried instead of lost.** The
+  write is the durable record the Telegram body is re-rendered from, but a
+  failure was logged and swallowed while the fan-out marked the signal
+  PUBLISHED — so the line was missing for the rest of the trade with nothing
+  to replay it from. It now raises, which leaves the row QUEUED and hands the
+  envelope to JetStream redelivery under the same `signal_id`; attempts are
+  deliberately not spent, so a database problem cannot mark FAILED a signal
+  the workers already executed.
+
 - **A database blip no longer hands a worker an empty configuration.** The
   `WORKER_CONNECTED` handshake read the crypto settings and the strategy magic
   map through calls that turn a failed read into "not set", then cached that

@@ -24,5 +24,9 @@ class SignalBroadcaster(Protocol):
   """
 
   async def broadcast(
-    self, payload: "WebhookPayload", *, attempt_number: int | None = None
+    self,
+    payload: "WebhookPayload",
+    *,
+    attempt_number: int | None = None,
+    signal_id: str | None = None,
   ) -> None: ...

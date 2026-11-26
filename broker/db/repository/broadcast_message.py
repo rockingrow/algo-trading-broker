@@ -613,14 +613,30 @@ class SqlAlchemyBroadcastMessageRepository:
 
 
 def _is_duplicate_event(events: list | None, event: dict) -> bool:
-  """True when *event* repeats the cycle's last recorded signal.
+  """True when the cycle has already recorded *event*.
 
-  Keyed on action + payload timestamp: those two identify one TradingView
-  alert, so a redelivered or replayed signal is recognised while a genuine
+  Keyed on ``signal_id`` when the event carries one, and matched against
+  **every** stored event rather than only the last. A replay does not always
+  arrive last: an entry whose publish failed is re-fired by the retry job
+  after its own TP has been recorded, and comparing against the final event
+  alone appended the entry a second time — a duplicate line in the message,
+  plus a notice announcing the entry after the trade had already taken profit.
+
+  Events written before the id existed, and drills (which have no persisted
+  row), carry none; for those it falls back to the last event's action +
+  payload timestamp. That pair identifies one TradingView alert, so a genuine
   second TP1 at a later timestamp still lands.
   """
   if not events:
     return False
+
+  signal_id = event.get("signal_id")
+  if signal_id is not None:
+    return any(
+      isinstance(stored, dict) and stored.get("signal_id") == signal_id
+      for stored in events
+    )
+
   last = events[-1]
   if not isinstance(last, dict):
     return False

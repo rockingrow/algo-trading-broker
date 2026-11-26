@@ -470,7 +470,7 @@ class BroadcastNotifier:
 
   async def reply_message(
     self, target: ChatTarget, reply_to_message_id: str, text: str
-  ) -> bool:
+  ) -> SendOutcome:
     """Post *text* as a reply to an existing broadcast message.
 
     Editing a message notifies nobody: a reader who already opened the cycle
@@ -481,26 +481,32 @@ class BroadcastNotifier:
 
     ``allow_sending_without_reply`` keeps the notice from being lost when the
     message it answers has been deleted: it then lands as a plain message
-    rather than a 400. Best-effort, like every other Telegram call here — the
-    boolean is for logging and bookkeeping, failures never raise.
+    rather than a 400.
+
+    Reports a :class:`SendOutcome` rather than a bool, for the reason that
+    class exists: a reply whose request timed out is probably *in* the chat,
+    and treating that as a failure made the next dispatcher pass post the same
+    notice again. Best-effort throughout — failures never raise.
     """
     if not self._ready(target):
-      return False
+      return SendOutcome.FAILED
     payload = self._payload(target, text)
     payload["reply_to_message_id"] = reply_to_message_id
     payload["allow_sending_without_reply"] = True
     try:
       async with httpx.AsyncClient(timeout=_telegram_timeout()) as client:
         response = await client.post(self._api_url("sendMessage"), json=payload)
-      if response.status_code == 200:
-        return True
+    except _UNKNOWN_SEND_ERRORS as exc:
+      # Deliberately not ``logger.exception``: the traceback is httpx plumbing.
       logger.error(
-        "Telegram reply failed chat_id=%s reply_to=%s: %s",
+        "Telegram reply chat_id=%s reply_to=%s did not answer (%s: %s) — "
+        "the notice may be in the chat, not re-sending",
         target.label,
         reply_to_message_id,
-        response.text,
+        type(exc).__name__,
+        exc,
       )
-      return False
+      return SendOutcome.UNKNOWN
     except Exception as exc:
       logger.exception(
         "Exception on Telegram reply chat_id=%s reply_to=%s: %s",
@@ -508,7 +514,17 @@ class BroadcastNotifier:
         reply_to_message_id,
         exc,
       )
-      return False
+      return SendOutcome.FAILED
+
+    if response.status_code == 200:
+      return SendOutcome.OK
+    logger.error(
+      "Telegram reply failed chat_id=%s reply_to=%s: %s",
+      target.label,
+      reply_to_message_id,
+      response.text,
+    )
+    return SendOutcome.FAILED
 
   async def edit_message(
     self,
