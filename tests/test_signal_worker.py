@@ -327,3 +327,37 @@ async def test_a_rejected_envelope_never_logs_the_webhook_token(body, caplog):
     await worker._handle_one(msg)
   assert msg.termed is True
   assert "super-secret" not in caplog.text
+
+
+async def test_an_envelope_failing_for_an_hour_is_given_up_on(caplog):
+  """A handler that has failed the same way for ``SIGNAL_MAX_DELIVERIES``
+  deliveries is not waiting on anything transient, and the alert behind it is
+  far too stale to send to a worker. It is terminated with an ERROR to read in
+  the log rather than redelivered for ever — the same bound ``TRADE`` reports
+  have had all along."""
+  from broker.services.signal_processing_service import SIGNAL_MAX_DELIVERIES
+
+  service = FakeService(raise_exc=RuntimeError("db down"))
+  worker = SignalWorker(service=service, connection=object(), inline_retry_delays=())  # type: ignore[arg-type]
+  msg = _jetstream_msg(num_delivered=SIGNAL_MAX_DELIVERIES)
+
+  with caplog.at_level(logging.ERROR):
+    await worker._handle_one(msg)
+
+  assert msg.termed is True
+  assert msg.naked is False
+  assert msg.acked is False
+  assert "given up after" in caplog.text
+
+
+async def test_an_envelope_under_the_cap_is_still_redelivered():
+  from broker.services.signal_processing_service import SIGNAL_MAX_DELIVERIES
+
+  service = FakeService(raise_exc=RuntimeError("db down"))
+  worker = SignalWorker(service=service, connection=object(), inline_retry_delays=())  # type: ignore[arg-type]
+  msg = _jetstream_msg(num_delivered=SIGNAL_MAX_DELIVERIES - 1)
+
+  await worker._handle_one(msg)
+
+  assert msg.naked is True
+  assert msg.termed is False

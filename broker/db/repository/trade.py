@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from broker.db.models import (
@@ -23,6 +24,7 @@ from broker.logger import get_logger
 from broker.schemas.account_schema import MarketTypeEnum
 from broker.schemas.core import BotPlatformTypeEnum
 from broker.schemas.trade_event_schema import PositionEvent
+from broker.schemas.trade_schema import TradeStatusEnum
 
 log = get_logger(__name__)
 
@@ -40,15 +42,24 @@ class SqlAlchemyTradeRepository:
 
     Scoped by account_id + market (see ``upsert_gateway`` for why
     account_id alone isn't enough), matching either the exact gateway already
-    on file or a legacy row whose gateway is still NULL.
+    on file or a legacy row whose gateway is still NULL. The exact-gateway row
+    is ordered first so repeated events converge on one row rather than
+    sometimes writing onto the legacy one.
+
+    An insert here can lose a race against ``upsert_gateway`` on the SYSTEM
+    subscription; ``upsert_by_position_event`` retries the whole transaction,
+    which is the only place that can, since an ``IntegrityError`` poisons the
+    session this runs in.
     """
     market = MarketTypeEnum(event.market)
     result = await session.execute(
-      select(Account).where(
+      select(Account)
+      .where(
         Account.account_id == event.account_id,
         Account.market == market,
         or_(Account.gateway == event.gateway, Account.gateway.is_(None)),
       )
+      .order_by(Account.gateway.is_(None))
     )
     row: Optional[Account] = result.scalars().first()
     now = datetime.now(timezone.utc)
@@ -80,7 +91,14 @@ class SqlAlchemyTradeRepository:
     broker's `trades` table. Performs an upsert keyed by (market, gateway,
     account_id, ref_id) — account_id alone doesn't identify an account
     uniquely (see ``uq_accounts_market_gateway_account_id``); updates the row
-    if it exists, otherwise inserts a new one. Idempotent."""
+    if it exists, otherwise inserts a new one. Idempotent.
+
+    The transaction is retried once on an ``IntegrityError``: the accounts
+    upsert inside it can lose a race against ``AccountRepository.upsert_gateway``
+    on the SYSTEM subscription, and the retry then finds the winner's row. It
+    has to happen out here, because an ``IntegrityError`` poisons the session
+    the inner helpers run in.
+    """
     trade_status = self._policy.to_trade_status(event.status)
     if trade_status is None:
       log.warning("upsert_by_position_event: unknown position status=%s", event.status)
@@ -98,16 +116,55 @@ class SqlAlchemyTradeRepository:
     price = event.closed_price if event.closed_price else event.opened_price
     market = MarketTypeEnum(event.market)
 
+    for attempt in (1, 2):
+      try:
+        return await self._apply_position_event(
+          event,
+          trade_status=trade_status,
+          last_action=last_action,
+          is_running=is_running,
+          price=price,
+          market=market,
+        )
+      except IntegrityError:
+        if attempt == 1:
+          log.debug(
+            "upsert_by_position_event raced another writer account_id=%s "
+            "ref_id=%s — retrying",
+            event.account_id,
+            event.ref_source_id,
+          )
+          continue
+        # Still raised on the second pass: hand it to the TRADE consumer,
+        # which NAKs and lets JetStream redeliver the report.
+        raise
+    return None
+
+  async def _apply_position_event(
+    self,
+    event: PositionEvent,
+    *,
+    trade_status: TradeStatusEnum,
+    last_action: str | None,
+    is_running: bool,
+    price,
+    market: MarketTypeEnum,
+  ) -> Trade | None:
+    """One transaction's worth of :meth:`upsert_by_position_event`."""
     async with _session.get_session() as session:
       await self._upsert_account(session, event)
 
       result = await session.execute(
-        select(Trade).where(
+        select(Trade)
+        .where(
           Trade.account_id == event.account_id,
           Trade.ref_id == event.ref_source_id,
           Trade.market == market,
           or_(Trade.gateway == event.gateway, Trade.gateway.is_(None)),
         )
+        # Exact gateway first, so repeated events for one trade always land on
+        # the same row instead of sometimes picking a legacy NULL-gateway one.
+        .order_by(Trade.gateway.is_(None))
       )
       row: Optional[Trade] = result.scalars().first()
 

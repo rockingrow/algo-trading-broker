@@ -66,7 +66,10 @@ class Signal(Base):
   """
 
   __tablename__ = "signals"
-  __table_args__ = (UniqueConstraint("delivery_key", name="uq_signals_delivery_key"),)
+  __table_args__ = (
+    UniqueConstraint("delivery_key", name="uq_signals_delivery_key"),
+    UniqueConstraint("idempotency_key", name="uq_signals_idempotency_key"),
+  )
 
   # WebhookPayload columns
   strategy: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -122,6 +125,18 @@ class Signal(Base):
   last_attempt: Mapped[datetime | None] = mapped_column(
     DateTime(timezone=True), nullable=True
   )
+  # When this signal's line was written onto its broadcast cycle. The two
+  # halves of a fan-out settle separately: the publish to the workers is
+  # irrevocable, the cycle write is a database write that can fail on its own.
+  # ``status=PUBLISHED`` with ``NULL`` here therefore means "the workers have
+  # it, the cycle record is still owed", and that is the one state a
+  # redelivery resumes *without* publishing again (see
+  # ``SignalProcessingService._handle_redelivery``). Backfilled for rows that
+  # were already PUBLISHED when the column appeared, so none of them reads as
+  # owed.
+  broadcast_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
   # Identity of the JetStream message this row was persisted from: its stream
   # sequence and the time the stream stored it, both unchanged by a
   # redelivery. JetStream redelivers a message whose ack never arrived (a
@@ -130,6 +145,16 @@ class Signal(Base):
   # not recognise as the same alert. Unique, so a redelivery finds the row it
   # already wrote; nullable for rows that predate the column.
   delivery_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+  # Identity of the *alert* rather than of its delivery: a SHA-256 over the
+  # payload with ``token`` excluded (see
+  # ``signal_helper.payload_idempotency_key``). ``delivery_key`` above only
+  # recognises the same stored JetStream message coming back; two separate
+  # messages carrying one alert — a producer re-publishing to
+  # ``SIGNALS.<strategy>``, a replayed request — each minted their own
+  # ``signal_id``, which workers de-duplicate on, so the alert was executed
+  # twice. Unique, so the second insert loses and the handler reuses the row
+  # already written; nullable for rows that predate the column.
+  idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
   # Complex objects stored as JSONB
   indicators: Mapped[dict] = mapped_column(JSONB, nullable=True)
@@ -740,7 +765,12 @@ class TradeNotification(Base):
     Enum(BotPlatformTypeEnum), nullable=False
   )
   chat_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-  message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+  # Nullable for the send Telegram never answered: the card is almost certainly
+  # in the chat, only its id never came back. The row is written anyway, because
+  # its existence is what stops the next TRADE event posting a second copy —
+  # the same reasoning ``SendOutcome.UNKNOWN`` encodes for broadcasts. Such a
+  # card cannot be edited; the next status change replaces it with a fresh one.
+  message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
   status: Mapped[TradeStatusEnum] = mapped_column(Enum(TradeStatusEnum), nullable=False)
 
   def __repr__(self) -> str:

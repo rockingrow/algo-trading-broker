@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **One alert can no longer open two positions.** Every de-duplication guard
+  on the signal path was about *transport*: `Nats-Msg-Id` covered one publish
+  inside the stream's 120s duplicate window, and `delivery_key` covered one
+  stored JetStream message however often it was redelivered. Neither
+  recognised one alert arriving as two separate stored messages — a producer
+  re-publishing to `SIGNALS.<strategy>`, a replayed request — so each minted
+  its own `signal_id`, which is exactly what a worker de-duplicates on. The
+  broadcast layer's own content check meanwhile kept the Telegram message
+  showing a single line, so nothing about it was visible. Alerts now carry
+  `signals.idempotency_key`, a SHA-256 over the payload (`token` excluded,
+  keys sorted) under a unique constraint and looked up on every delivery, and
+  the HTTP path sends that same digest as `Nats-Msg-Id`. Re-publishing a
+  byte-identical payload is safe; changing any field makes it a new alert.
+  Migration `60b00ea13191`.
+- **The deferred webhook enqueue reports a spent duplicate window instead of
+  dropping the alert.** Its retry loop sleeps inline and re-queues failures at
+  the back of a 500-slot queue, so one envelope can wait well past the
+  window — after which a first publish that had landed with a slow ack is
+  stored again. The envelope is still published and the age logged at
+  `warning`: `signals.idempotency_key` resolves both stored messages to one
+  signal, so the copy reaches no worker, whereas dropping the envelope would
+  lose an alert that may never have been stored at all.
+- **A replayed signal no longer doubles a line in its Telegram message.** The
+  cycle's duplicate check only compared the last recorded event, so an entry
+  re-fired by the retry job *after* its own TP had been recorded was appended
+  a second time, along with a notice announcing the entry after the trade had
+  taken profit. Events now carry their `signal_id` and are matched against the
+  whole list.
+- **A trade card whose send timed out is no longer posted once per event.**
+  `TradeCardService` collapsed `SendOutcome.UNKNOWN` into "failed", so the DM
+  sat in the chat with nothing recorded and every subsequent TRADE event
+  posted another copy. The card is now recorded with a NULL `message_id`
+  (migration `f0ce07c22a2d`), which suppresses the re-post; the next status
+  change replaces it, leaving at most one orphan.
+- **A broadcast reply notice whose send timed out is no longer repeated.**
+  `reply_message` returned a bool, so a timeout counted as a failure and the
+  next dispatcher pass posted the same notice again. It now reports a
+  `SendOutcome`, and an unanswered reply counts as announced.
+- **The `accounts` upserts converge under concurrency.** `upsert_gateway`
+  (SYSTEM subscription) and the trade path's account upsert (TRADES consumer)
+  both read-then-inserted with no lock, so a worker that connected and
+  reported a trade at once could make one of them fail on the unique key; and
+  with both an exact-gateway row and a legacy NULL-gateway one present, an
+  unordered `.first()` could pick either and write the gateway onto the wrong
+  row. Both now order the exact-gateway row first and retry once on an
+  integrity error.
+- **`broker_settings` writes are a single upsert.** The read-then-write lost a
+  concurrent writer: two admin calls on one key both read "missing" and both
+  inserted, so one reported the setting as not applied. The statement sets
+  `updatedAt` itself, since the column's ORM `onupdate` hook does not run for
+  a conflict Postgres resolves.
+- **A cycle change that fails to persist is retried instead of lost — and
+  retried without publishing the signal again.** The write is the durable
+  record the Telegram body is re-rendered from, but a failure was logged and
+  swallowed while the fan-out marked the signal PUBLISHED, so the line was
+  missing for the rest of the trade with nothing to replay it from. It now
+  raises. The row records the fan-out's two halves separately, because only
+  one of them can be taken back: `status=PUBLISHED` once the workers have the
+  signal, `signals.broadcast_at` once the cycle write lands (migration
+  `125875cbf61f`, which backfills rows already PUBLISHED). A redelivery that
+  finds a published row with no `broadcast_at` retries **the cycle write
+  alone** — nothing goes to a worker twice. Attempts are deliberately not
+  spent either, so a database problem cannot mark FAILED a signal the workers
+  already executed.
+- **A `SIGNALS` envelope is no longer redelivered for ever.** One whose
+  handling keeps failing the same way is terminated at `error` after 720
+  deliveries — about an hour at the 5 s NAK delay, the same bound `TRADE`
+  reports already had. By then the failure is not transient and the alert is
+  far too stale to hand a worker.
+
+- **A database blip no longer hands a worker an empty configuration.** The
+  `WORKER_CONNECTED` handshake read the crypto settings and the strategy magic
+  map through calls that turn a failed read into "not set", then cached that
+  answer for 30s. A worker connecting during the blip got an empty
+  `strategy_magic_map` (which it keeps until it reconnects), and a crypto
+  worker was told its settings were not configured. Both reads now fail
+  loudly, are never cached when they fail, and the worker gets
+  `WORKER_CONNECTED_ERROR` with `reason: "broker settings unavailable"` so it
+  retries. Workers of either market may now receive that error.
+- **The reconnect replay no longer resends `FAILED` signals.** `retry_signals`
+  replayed every recent row regardless of status, including a redelivery the
+  block gate had marked `FAILED` — so a reconnecting worker could execute a
+  signal the gate stopped. Only `PUBLISHED` and `QUEUED` rows are replayed now,
+  and the query reads two columns instead of whole rows.
+- **The webhook secret is no longer stored in `signals.raw`.** Every persisted
+  payload kept its `token`, i.e. `WEBHOOK_SECRET`. New rows are written without
+  it, the retry job and the replay rebuild the payload without it, and the
+  migration `b7b5db860df2` strips it from existing rows (its downgrade is a
+  no-op: the secret is not restored). No wire contract changes.
+- **Startup and shutdown no longer wait on a throttled Telegram.** The
+  start/stop notices are capped at 3s. Unbounded, the startup notice kept the
+  webhook from serving and the shutdown notice could exhaust Docker's 10s stop
+  grace period, SIGKILLing the broker with deferred enqueues still in memory.
+  The broker service also gets `stop_grace_period: 30s`.
+
 ## [1.2.1] - 2026-11-07
 
 ### Fixed

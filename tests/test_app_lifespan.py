@@ -7,6 +7,8 @@ wiring in ``broker.app.lifespan`` — no NATS, no Postgres, no Telegram.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi import FastAPI
 
@@ -132,3 +134,48 @@ async def test_a_failed_start_unwinds_what_already_started(recorder):
   assert "SignalWorker" not in started
   assert stopped == list(reversed(started))
   assert "nats" in stopped and "db" in stopped
+
+
+class HangingTelegram:
+  """Telegram on a throttled network: the connection is accepted and no
+  answer ever comes back."""
+
+  def __init__(self, *args, **kwargs):
+    pass
+
+  async def send_message(self, text):
+    await asyncio.sleep(3600)
+
+
+async def test_a_hanging_telegram_holds_up_neither_startup_nor_shutdown(
+  recorder, monkeypatch
+):
+  """The start/stop notices are bounded: at startup the webhook is not served
+  until the lifespan finishes, and at shutdown every second spent waiting on
+  Telegram is taken from the container's stop grace period."""
+  monkeypatch.setattr(app_module, "TelegramNotification", HangingTelegram)
+  monkeypatch.setattr(app_module, "LIFECYCLE_NOTICE_TIMEOUT_SECONDS", 0.05)
+
+  loop = asyncio.get_running_loop()
+  started_at = loop.time()
+  async with app_module.lifespan(FastAPI()):
+    assert loop.time() - started_at < 1.0
+    entered_at = loop.time()
+  assert loop.time() - entered_at < 1.0
+
+  # Every service still started and stopped.
+  stops = [event[5:] for event in recorder.events if event.startswith("stop:")]
+  assert "DeferredEnqueuer" in stops and stops[-1] == "db"
+
+
+async def test_a_failing_telegram_does_not_break_startup(recorder, monkeypatch):
+  class FailingTelegram(FakeTelegram):
+    async def send_message(self, text):
+      raise RuntimeError("telegram down")
+
+  monkeypatch.setattr(app_module, "TelegramNotification", FailingTelegram)
+
+  async with app_module.lifespan(FastAPI()):
+    pass
+
+  assert "stop:db" in recorder.events

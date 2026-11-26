@@ -6,6 +6,7 @@ from typing import Optional
 
 import pytest
 
+from broker.helpers.signal_helper import payload_idempotency_key
 from broker.schemas.core import SignalActionEnum, SignalStatusEnum
 from broker.schemas.publisher_schema import TradingSignal
 from broker.schemas.webhook_schema import PositionSchema, WebhookPayload
@@ -27,6 +28,11 @@ class FakeSignalRepository:
     self.published_ids: list[str] = []
     self.failed_ids: list[str] = []
     self.marked_failed_ids: list[str] = []
+    self.broadcast_recorded_ids: list[str] = []
+    # Set to make the stamp fail, standing in for a row that stays owed.
+    self.stamp_fails = False
+    self.idempotency_lookups: list[str] = []
+    self.delivery_lookups: list[str] = []
     # Rows keyed by str(uuid). Each row is a SimpleNamespace with attributes
     # matching the ORM Signal model fields the service touches.
     self._rows: dict[str, SimpleNamespace] = {}
@@ -43,14 +49,28 @@ class FakeSignalRepository:
       status=SignalStatusEnum.QUEUED,
       attempts=attempts if attempts is not None else settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
+      broadcast_at=None,
       delivery_key=delivery_key,
-      raw=payload.model_dump(mode="json"),
+      # Both keys are written by the real repository, so the redelivery and
+      # the same-alert-twice paths are exercised on the same shape of row.
+      idempotency_key=payload_idempotency_key(payload),
+      # Stored like the real repository: without the webhook token, so the
+      # retry path is exercised on exactly what it reads in production.
+      raw=payload.model_dump(mode="json", exclude={"token"}),
     )
     return row_id
 
   async def get_by_delivery_key(self, delivery_key):
+    self.delivery_lookups.append(delivery_key)
     for row in self._rows.values():
       if getattr(row, "delivery_key", None) == delivery_key:
+        return row
+    return None
+
+  async def get_by_idempotency_key(self, idempotency_key):
+    self.idempotency_lookups.append(idempotency_key)
+    for row in self._rows.values():
+      if getattr(row, "idempotency_key", None) == idempotency_key:
         return row
     return None
 
@@ -68,6 +88,16 @@ class FakeSignalRepository:
     row = self._rows.get(signal_id)
     if row is not None:
       row.status = SignalStatusEnum.PUBLISHED
+    return True
+
+  async def mark_broadcast_recorded(self, signal_id: str) -> bool:
+    self.broadcast_recorded_ids.append(signal_id)
+    if self.stamp_fails:
+      return False
+    row = self._rows.get(signal_id)
+    if row is None:
+      return False
+    row.broadcast_at = datetime.now(timezone.utc)
     return True
 
   async def get_by_id(self, signal_id: str) -> Optional[SimpleNamespace]:
@@ -185,9 +215,11 @@ class FakeBroadcaster:
 
   def __init__(self):
     self.calls: list[tuple[WebhookPayload, int | None]] = []
+    self.signal_ids: list[str | None] = []
 
-  async def broadcast(self, payload, *, attempt_number=None):
+  async def broadcast(self, payload, *, attempt_number=None, signal_id=None):
     self.calls.append((payload, attempt_number))
+    self.signal_ids.append(signal_id)
 
 
 async def _wait_until(predicate, timeout: float = 2.0) -> None:
@@ -366,6 +398,64 @@ async def test_deferred_enqueue_gives_up_after_max_attempts():
   assert publisher.enqueued == []
 
 
+async def test_deferred_enqueue_keeps_publishing_past_the_dedup_window(monkeypatch):
+  """Past the stream's duplicate window JetStream no longer recognises the
+  envelope's ``Nats-Msg-Id``, so a first attempt that did land may be stored a
+  second time. The envelope is published anyway and the window is only
+  reported: the row's ``idempotency_key`` resolves both stored messages to one
+  signal, while dropping the envelope here would lose an alert that may never
+  have been stored at all."""
+  import broker.services.signal_processing_service as module
+
+  publisher = FakePublisher()
+  publisher.enqueue_failures = 1
+  deferred = DeferredEnqueuer(publisher, interval_seconds=0.01, max_attempts=99)
+  # Only the enqueuer's clock is moved; the event loop keeps its own. Driving
+  # ``_attempt`` directly keeps this deterministic — the retry loop would race
+  # the clock jump.
+  clock = {"now": 1_000.0}
+  monkeypatch.setattr(module, "_monotonic", lambda: clock["now"])
+  item = module._DeferredEnvelope(
+    strategy="strat",
+    envelope={"payload": {}},
+    msg_id="mid-old",
+    created_at=clock["now"],
+  )
+
+  # Inside the window, a failure is retried as before.
+  await deferred._attempt(item)
+  assert item.attempts == 1
+  assert publisher.enqueue_failures == 0
+  assert publisher.enqueued == []
+
+  # Past it, the publish still happens — and this one succeeds.
+  clock["now"] += module.JETSTREAM_DUPLICATE_WINDOW_SECONDS
+  await deferred._attempt(item)
+  assert item.attempts == 2
+  assert [entry["msg_id"] for entry in publisher.enqueued] == ["mid-old"]
+
+  # Same on the shutdown flush: the leftover is published, not written off.
+  assert await deferred._drain([item], 1.0) == 0
+  assert [entry["msg_id"] for entry in publisher.enqueued] == ["mid-old", "mid-old"]
+
+
+async def test_deferred_enqueue_warns_once_the_dedup_window_is_spent(caplog):
+  """The operator has to learn that the stream may hold a redundant copy."""
+  import logging
+
+  import broker.services.signal_processing_service as module
+
+  deferred = DeferredEnqueuer(FakePublisher(), interval_seconds=0.01)
+  item = module._DeferredEnvelope(
+    strategy="strat", envelope={"payload": {}}, msg_id="mid-old", created_at=0.0
+  )
+
+  with caplog.at_level(logging.WARNING):
+    deferred._note_dedup_window_spent(item)
+
+  assert "duplicate window" in caplog.text
+
+
 async def test_enqueue_reports_503_when_the_backlog_is_full():
   deferred = DeferredEnqueuer(FakePublisher(), interval_seconds=0.01, maxsize=1)
   service, publisher, _, _, _ = _make_service(deferred_enqueuer=deferred)
@@ -489,6 +579,39 @@ async def test_retry_signal_replays_fanout_and_marks_published_on_success():
   assert broadcaster.calls[0][1] == 2
 
 
+async def test_retry_signal_rebuilds_a_row_stored_without_the_token():
+  """``signals.raw`` no longer holds the webhook token; the retry path must
+  still rebuild and fan the signal out from it."""
+  publisher = FakePublisher()
+  signal_id = str(uuid.uuid4())
+  raw = _payload().model_dump(mode="json", exclude={"token"})
+  assert "token" not in raw
+  signal_repo = FakeSignalRepository(
+    existing={
+      "id": signal_id,
+      "status": SignalStatusEnum.QUEUED,
+      "attempts": 2,
+      "last_attempt": datetime(2026, 1, 1, tzinfo=timezone.utc),
+      "raw": raw,
+    }
+  )
+  service = SignalProcessingService(
+    signal_repository=signal_repo,
+    setting_repository=FakeSettingRepository(),
+    publisher=publisher,
+    notifier=FakeNotifier(),
+    broadcaster=FakeBroadcaster(),
+    webhook_secret="secret",
+  )
+
+  result = await service.retry_signal(signal_id)
+
+  assert result["status"] == "accepted"
+  assert len(publisher.published) == 1
+  assert publisher.published[0].signal_uxid == raw["signal_uxid"]
+  assert signal_repo.published_ids == [signal_id]
+
+
 async def test_retry_signal_missing_row_returns_not_found():
   service, _, _, _, _ = _make_service()
   result = await service.retry_signal(str(uuid.uuid4()))
@@ -565,17 +688,116 @@ async def test_broadcaster_receives_flat_the_same_way():
   assert broadcaster.calls[0][0].position.action == SignalActionEnum.FLAT
 
 
-async def test_broadcast_failure_does_not_block_mark_published():
-  """A Telegram outage must never roll back a successful worker publish."""
+async def test_a_failed_broadcast_record_is_handed_back_to_jetstream():
+  """The broadcast write is the durable record the message is rebuilt from.
+
+  Swallowing a failed write left the cycle missing that line for good: the row
+  went PUBLISHED, so neither the retry job nor a redelivery revisited it. It
+  now raises, and the row says exactly how far the fan-out got — PUBLISHED,
+  with no ``broadcast_at`` — which is the state a redelivery resumes from.
+  """
 
   class ExplodingBroadcaster:
-    async def broadcast(self, payload, *, attempt_number=None):
-      raise RuntimeError("telegram down")
+    async def broadcast(self, payload, *, attempt_number=None, signal_id=None):
+      raise RuntimeError("broadcast table unreachable")
 
   service, _, _, _, signal_repo = _make_service(broadcaster=ExplodingBroadcaster())
+
+  with pytest.raises(RuntimeError, match="broadcast table unreachable"):
+    await service.handle_enqueued(payload=_payload())
+
+  # No attempt was spent: the workers already have the signal, so burning
+  # attempts would mark FAILED something that was in fact sent.
+  assert signal_repo.failed_ids == []
+  row = signal_repo._rows[signal_repo.return_id]
+  assert row.status == SignalStatusEnum.PUBLISHED
+  assert row.broadcast_at is None
+  assert row.last_attempt is None
+
+
+async def test_a_redelivery_retries_the_cycle_write_without_republishing():
+  """The fix for the unbounded re-publication: once the workers have the
+  signal, a failing cycle write must be the only thing a redelivery retries.
+  Re-running the publish on each of them is what could turn a database
+  problem into a second position."""
+  broadcaster = FakeBroadcaster()
+  service, publisher, _, _, signal_repo = _make_service(broadcaster=broadcaster)
+  signal_id = await signal_repo.log_signal(_payload(), delivery_key="seq:abc")
+  row = signal_repo._rows[signal_id]
+  row.status = SignalStatusEnum.PUBLISHED
+  row.broadcast_at = None
+
+  result = await service.handle_enqueued(
+    payload=_payload(), delivery_key="seq:abc", redelivered=True
+  )
+
+  assert result == {"status": "recorded", "signal_id": signal_id}
+  # The cycle write ran again — and nothing was published a second time.
+  assert broadcaster.signal_ids == [signal_id]
+  assert publisher.published == []
+  assert publisher.flats == []
+  assert row.broadcast_at is not None
+
+
+async def test_a_recorded_broadcast_is_not_retried_by_a_later_delivery():
+  """``broadcast_at`` is what closes the resume path, so an ordinary duplicate
+  stays a no-op instead of re-recording the event on every delivery."""
+  broadcaster = FakeBroadcaster()
+  service, publisher, _, _, signal_repo = _make_service(broadcaster=broadcaster)
+
+  first = await service.handle_enqueued(payload=_payload(), delivery_key="seq:abc")
+  second = await service.handle_enqueued(
+    payload=_payload(), delivery_key="seq:abc", redelivered=True
+  )
+
+  signal_id = first["signal_id"]
+  assert second == {"status": "duplicate", "signal_id": signal_id}
+  assert broadcaster.signal_ids == [signal_id]
+  assert signal_repo._rows[signal_id].broadcast_at is not None
+
+
+async def test_a_signal_published_but_not_recorded_goes_back_to_jetstream():
+  """``mark_published`` is what the resume path reads, so a status that could
+  not be written is handed back rather than acked: the row would otherwise sit
+  QUEUED with no recorded attempt, which nothing ever revisits."""
+  service, publisher, _, broadcaster, signal_repo = _make_service()
+
+  async def refuse(signal_id: str) -> bool:
+    signal_repo.published_ids.append(signal_id)
+    return False
+
+  signal_repo.mark_published = refuse
+
+  with pytest.raises(RuntimeError, match="published but not recorded"):
+    await service.handle_enqueued(payload=_payload())
+
+  assert len(publisher.published) == 1
+  # The cycle write is never attempted on a row whose state is unknown.
+  assert broadcaster.calls == []
+
+
+async def test_a_failed_stamp_leaves_the_row_owed_without_failing_the_signal():
+  """The stamp is audit metadata: losing it must not fail a delivery the
+  workers and the cycle both completed. The row then reads as still owed, and
+  re-recording the event is a no-op the cycle de-duplicates."""
+  service, _, _, broadcaster, signal_repo = _make_service()
+  signal_repo.stamp_fails = True
+
   result = await service.handle_enqueued(payload=_payload())
+
   assert result["status"] == "accepted"
-  assert signal_repo.published_ids == [result["signal_id"]]
+  assert len(broadcaster.calls) == 1
+  assert signal_repo._rows[result["signal_id"]].broadcast_at is None
+
+
+async def test_the_broadcaster_is_told_which_signal_the_event_belongs_to():
+  """``signal_id`` on the event is what lets a replay be recognised wherever
+  it lands in the cycle's event list."""
+  service, _, _, broadcaster, _ = _make_service()
+
+  result = await service.handle_enqueued(payload=_payload())
+
+  assert broadcaster.signal_ids == [result["signal_id"]]
 
 
 async def test_second_and_third_attempts_carry_the_attempt_number():
@@ -682,6 +904,12 @@ async def test_redelivery_with_a_recorded_failure_is_left_to_the_retry_job():
 
 
 async def test_signals_without_a_delivery_key_are_persisted_each_time():
+  """Two *different* alerts still get a row each.
+
+  ``_payload()`` mints a fresh ``signal_uxid`` per call, so these two differ
+  and therefore key differently — the idempotency key merges identical alerts,
+  not merely similar ones.
+  """
   service, publisher, notifier, broadcaster, signal_repo = _make_service()
   await service.handle_enqueued(payload=_payload())
   await service.handle_enqueued(payload=_payload())
@@ -786,18 +1014,61 @@ async def test_stop_reports_envelopes_it_could_not_flush(caplog):
   assert "1 envelope(s) never queued" in caplog.text
 
 
-async def test_a_first_delivery_does_not_look_the_key_up():
+async def test_every_delivery_looks_the_alert_up_by_its_content():
+  """One indexed SELECT per signal, by idempotency key — including the first
+  delivery, which is the only way a second *message* carrying the same alert
+  can be recognised. The delivery key is not consulted on a first delivery."""
   service, publisher, notifier, broadcaster, signal_repo = _make_service()
-  lookups = []
-  original = signal_repo.get_by_delivery_key
+  payload = _payload()
 
-  async def counting_lookup(key):
-    lookups.append(key)
-    return await original(key)
+  await service.handle_enqueued(payload=payload, delivery_key="seq:abc")
 
-  signal_repo.get_by_delivery_key = counting_lookup
-  await service.handle_enqueued(payload=_payload(), delivery_key="seq:abc")
-  assert lookups == []
+  assert signal_repo.idempotency_lookups == [payload_idempotency_key(payload)]
+  assert signal_repo.delivery_lookups == []
+
+
+async def test_the_same_alert_in_two_messages_opens_one_position():
+  """The gap this key exists for: a producer re-publishing straight to
+  ``SIGNALS.<strategy>`` produced a second stored message, and with only the
+  per-message ``delivery_key`` to go on the broker minted a second
+  ``signal_id`` — which is exactly what a worker de-duplicates on, so the
+  alert was executed twice."""
+  service, publisher, _, broadcaster, signal_repo = _make_service()
+  payload = _payload(signal_uxid="9F2C4B7E18A3D605")
+
+  first = await service.handle_enqueued(payload=payload, delivery_key="seq:1")
+  second = await service.handle_enqueued(payload=payload, delivery_key="seq:2")
+
+  assert first["status"] == "accepted"
+  assert second == {"status": "duplicate", "signal_id": first["signal_id"]}
+  # One row, one publish to the workers, one line on the cycle.
+  assert len(signal_repo.logged) == 1
+  assert len(publisher.published) == 1
+  assert len(broadcaster.calls) == 1
+
+
+async def test_a_redelivered_legacy_row_is_still_found_by_its_delivery_key():
+  """A row written before ``idempotency_key`` existed carries only the
+  delivery key. Missing it would make its redelivery a unique-constraint
+  failure, redelivered for ever."""
+  service, publisher, _, _, signal_repo = _make_service()
+  signal_id = await signal_repo.log_signal(_payload(), delivery_key="seq:legacy")
+  legacy = signal_repo._rows[signal_id]
+  legacy.idempotency_key = None
+  legacy.status = SignalStatusEnum.PUBLISHED
+  # The migration backfills ``broadcast_at`` for rows that were already
+  # PUBLISHED, so none of them reads as still owing its cycle write — their
+  # stored events predate the ``signal_id`` the cycle de-duplicates on, and
+  # re-recording one would append a second line to the message.
+  legacy.broadcast_at = datetime.now(timezone.utc)
+
+  result = await service.handle_enqueued(
+    payload=_payload(), delivery_key="seq:legacy", redelivered=True
+  )
+
+  assert result == {"status": "duplicate", "signal_id": signal_id}
+  assert signal_repo.delivery_lookups == ["seq:legacy"]
+  assert publisher.published == []
 
 
 async def test_a_blocked_redelivery_closes_its_interrupted_row():

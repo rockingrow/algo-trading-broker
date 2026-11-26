@@ -51,14 +51,18 @@ class SqlAlchemyTradeNotificationRepository:
     self,
     trade_id: uuid.UUID,
     chat_id: str,
-    message_id: int,
+    message_id: int | None,
     status: TradeStatusEnum,
     platform: BotPlatformTypeEnum = BotPlatformTypeEnum.TELEGRAM,
   ) -> bool:
     """Remember a freshly posted card. Idempotent — a second call for the same
     recipient updates the existing row rather than violating the unique key,
     which is what happens if a card was posted, deleted by the user, and then
-    re-posted."""
+    re-posted.
+
+    *message_id* is ``None`` for a send Telegram never answered: the row is
+    written regardless, because its existence is what keeps the next TRADE
+    event from posting the card a second time."""
     try:
       async with _session.get_session() as session:
         result = await session.execute(

@@ -17,6 +17,14 @@ Each signal is published to the subject that matches its `strategy` field. Worke
 
 Every payload on `{strategy}` — whether it's a full `TradingSignal` (LONG/SHORT/TP/…) or the shorter FLAT directive — carries a `signal_id`. That is the same id the broker uses inside the handshake's `retry_signals` replay, so a worker that sees a signal live and then again as part of a reconnect replay can de-duplicate by `signal_id`.
 
+### One alert, one `signal_id`
+
+Because a worker de-duplicates on `signal_id`, two `signal_id` values for one alert mean two positions. The broker therefore keys each alert by its own content — a SHA-256 over the `WebhookPayload` with `token` excluded and object keys sorted, stored as `signals.idempotency_key` under a unique constraint and looked up on every delivery.
+
+This matters to anything that publishes straight onto `SIGNALS.<strategy>` rather than through `POST /secret/webhook` (QTE does): **re-publishing a byte-identical payload is safe**, however many times and whether or not `Nats-Msg-Id` is set. The second message resolves to the row the first one wrote, so no further signal reaches a worker, and the cycle's Telegram message gains no second line. A payload that differs in any field — price, quantity, levels, `signal_uxid`, timestamp, indicators — is a different alert and is processed as one.
+
+On the HTTP path the same digest is sent as `Nats-Msg-Id`, so a re-POST inside the stream's duplicate window (`JETSTREAM_DUPLICATE_WINDOW_SECONDS`, 120s) is dropped by JetStream before it is ever stored.
+
 ## `TRADE` events
 
 Workers publish a `TRADE` message (a `PositionEvent`) whenever a row in their local `positions` table is inserted or updated. The broker upserts it into the `trades` table keyed by `(market, gateway, account_id, ref_id)` — not `account_id` alone, since the same bare `account_id` can exist under a different market/gateway (see [`accounts` table](database.md#accounts-table)) — translating the worker's position status into a broker trade `status`:
@@ -40,15 +48,18 @@ The webhook endpoint is a fast enqueue-only path. Everything else runs from a ba
 1. **Webhook** (`POST /secret/webhook`) verifies the `token` and pushes the raw envelope onto the JetStream stream `SIGNALS` (subject `SIGNALS.<strategy>`). No DB write, no block check, no fan-out — the response is `202 {"status":"queued"}` as soon as JetStream ack-s the write, so TradingView is never held open across the pipeline.
    - That ack is waited for under a hard deadline (`WEBHOOK_ENQUEUE_TIMEOUT`, default `1.0s`). nats-py would otherwise wait `5s` for it, which is longer than TradingView waits for the whole request: one slow ack — a NATS reconnect, a busy file store — and the alert dies as **"request took too long and timed out"**, never to be re-sent.
    - Past the deadline the envelope goes to the in-memory **`DeferredEnqueuer`**, the response is `202 {"status":"deferred"}`, and a background task keeps re-publishing it every `WEBHOOK_DEFERRED_ENQUEUE_INTERVAL` seconds up to `WEBHOOK_DEFERRED_ENQUEUE_MAX_ATTEMPTS` times. Giving up (or a full backlog) is logged at `error`. If the queue cannot take the envelope at all, the webhook answers `503` immediately — a refusal TradingView shows in its alert log beats a timeout it can only report as "too slow".
-   - Every enqueue carries a `Nats-Msg-Id` header that stays the same across those retries, and the stream sets a 120s `duplicate_window`. So a first publish whose ack was merely *slow* (the message did land) is de-duplicated by JetStream instead of reaching the workers twice as a second position.
+   - Every enqueue carries a `Nats-Msg-Id` header — the payload digest — that stays the same across those retries, and the stream sets a 120s `duplicate_window`. So a first publish whose ack was merely *slow* (the message did land) is de-duplicated by JetStream instead of reaching the workers twice as a second position.
+   - A backlog can keep an envelope waiting longer than that window, past which the stream no longer recognises its id. It is published anyway and the age is logged at `warning`: the stream may then hold the alert twice, but `signals.idempotency_key` resolves both stored messages to one signal, whereas dropping the envelope would lose an alert that may never have been stored at all.
    - On shutdown the `DeferredEnqueuer` tries every envelope it still holds once more (5 s budget in total) before reporting the rest as lost — the backlog lives in memory only.
    - Each webhook response is logged with the elapsed milliseconds — raised to `warning` past the deadline — since TradingView's own timeout leaves no trace on the server.
-2. **`SignalWorker`** (`broker/services/signal_processing_service.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), sends the Telegram notification, and flips the DB row to `status=PUBLISHED`.
-   - Every row records the JetStream message it came from in `delivery_key` (stream sequence + store time). JetStream redelivers a message whose ack never arrived — the broker crashed after the fan-out, the ack was lost — and a redelivery (delivery count above one) that finds its row does **not** mint a second `signal_id`: a row still `QUEUED` with no recorded attempt is fanned out again under the **same** `signal_id` (workers de-duplicate on it), anything else is acked and dropped. A first delivery skips the lookup.
+2. **`SignalWorker`** (`broker/services/signal_processing_service.py`) is a durable pull consumer (`broker_signal_handler`) that fetches envelopes from the stream. On the first attempt it runs the block gate (drops + notifies if blocked), persists the row (`status=QUEUED`, `attempts=SIGNAL_MAX_ATTEMPTS`, `last_attempt=NULL`), and calls the shared fan-out (`_fanout`) which publishes to workers on `{strategy}` (or `ADMIN` for `FLAT`), flips the DB row to `status=PUBLISHED`, and then records the signal on its Telegram broadcast cycle.
+   - Every row records the JetStream message it came from in `delivery_key` (stream sequence + store time). JetStream redelivers a message whose ack never arrived — the broker crashed after the fan-out, the ack was lost — and a redelivery that finds its row does **not** mint a second `signal_id`: a row still `QUEUED` with no recorded attempt is fanned out again under the **same** `signal_id` (workers de-duplicate on it), anything else is acked and dropped.
+   - The fan-out's two halves are recorded separately, because only one of them can be taken back: `status=PUBLISHED` says the workers have the signal, `broadcast_at` says the Telegram cycle write landed. A row that is `PUBLISHED` with `broadcast_at IS NULL` is resumed by retrying **the cycle write alone** — nothing is published a second time, which is what a redelivery of a failing broadcast write used to do on every delivery.
    - The block gate **fails closed**: if `signal_blocked` cannot be read, the envelope is NAK-ed and retried rather than forwarded past a block the operator may have set.
    - A payload that cannot be turned into a `TradingSignal` is marked `FAILED` at once — the same input fails the same way on every retry.
    - An envelope whose handling raised (e.g. the database is down) is first retried **in place** — 0.5 s, 1 s, 2 s, 4 s — so a transient failure cannot let a later signal of the same cycle (its FLAT, its SL) overtake it. Only then is it NAK-ed with a 5 s delay, so a longer outage is retried at a steady pace instead of in a tight loop.
    - A fan-out failure (or an unparseable payload) whose outcome cannot be written to the row is handed back to JetStream too: a row left `QUEUED` with no recorded attempt is one the retry job never revisits.
+   - An envelope still failing the same way after 720 deliveries (about an hour at the 5 s NAK delay) is terminated at `error` rather than redelivered for ever — the same bound `TRADE` reports have. By then the failure is not transient and the alert is far too stale to send to a worker.
 3. On a fan-out failure the row stays `QUEUED` but `record_attempt_failure` decrements `attempts` and stamps `last_attempt`. The JetStream message is `ack`-ed regardless — retries are driven by the DB rather than JetStream redelivery so the two mechanisms cannot race.
 4. **`SignalRetryJob`** (`broker/services/signal_retry_job.py`) ticks every `settings.signal.RETRY_INTERVAL_SECONDS` (default `15`), looks up rows still `QUEUED` with `attempts > 0` and `last_attempt` older than that same interval, and hands each to `SignalProcessingService.retry_signal`. The retry rebuilds the `WebhookPayload` from `row.raw` and calls `_fanout` again.
 5. Once `attempts` would drop below `1`, the row is flipped to `status=FAILED` and no longer picked up.
@@ -89,6 +100,7 @@ Because the reply is worker-driven, a worker that connects while the broker is *
 | --------- | ------------ | ------- |
 | Config loaded | `WORKER_CONNECTED_ACK` | `strategy_magic_map`, `retry_signals`, `settings`, and `crypto_leverage_init` (crypto only) |
 | Crypto settings missing/invalid | `WORKER_CONNECTED_ERROR` | `reason` |
+| Broker settings unreadable (database error), any market | `WORKER_CONNECTED_ERROR` | `reason: "broker settings unavailable"` — retry the handshake |
 
 ```json
 {
@@ -124,6 +136,8 @@ If a crypto worker's settings are missing or invalid, it gets an explicit error 
   "reason": "crypto settings not configured"
 }
 ```
+
+A worker of **either** market gets the same `WORKER_CONNECTED_ERROR` with `reason: "broker settings unavailable"` when the broker cannot read the crypto settings or the strategy magic map (a database outage). The ACK is what a worker runs on until it reconnects, so the broker refuses to answer with an empty magic map or a false "not configured" it would then keep; the worker should retry the handshake after a short delay.
 
 ### Strategy magic map
 
@@ -198,7 +212,7 @@ The broker filters its own outgoing `SYSTEM` actions (`CRYPTO_LEVERAGE_INIT`, `W
 
 ### Signal replay on reconnect
 
-The `retry_signals` block of the ACK carries every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list. It is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler and de-duplicate against live signals by `signal_id`.
+The `retry_signals` block of the ACK carries every signal the broker persisted in the last `max_retry_timeout` seconds (default `60`, tunable via the `max_retry_timeout` broker setting) whose `strategy` is in the worker's announced `strategies` list and whose status is `PUBLISHED` or `QUEUED`. A `FAILED` signal — one the broker gave up on, or one the block gate dropped — is never replayed. It is a **list** of the same signal objects normally published on the `{strategy}` subject, so the worker can feed them straight back into its usual signal handler and de-duplicate against live signals by `signal_id`.
 
 Empty when the worker announced no strategies, or when there is nothing recent to replay.
 

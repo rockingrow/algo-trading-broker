@@ -366,6 +366,19 @@ async def test_a_timed_out_send_is_unknown_not_failed(monkeypatch):
   assert result.message_id is None
 
 
+async def test_a_reply_that_timed_out_is_unknown_not_failed(monkeypatch):
+  """A notice is a send like any other: the request was on the wire when it
+  broke, so the reply is probably threaded under the cycle message already.
+  Reporting FAILED made the next dispatcher pass post the same notice again."""
+  monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
+  monkeypatch.setattr(ns.settings.telegram, "BOT_TOKEN", "tok")
+  monkeypatch.setattr(httpx, "AsyncClient", _client_raiser(httpx.ReadTimeout("slow")))
+
+  outcome = await BroadcastNotifier().reply_message(ChatTarget("-100111"), "42", "TP1")
+
+  assert outcome is SendOutcome.UNKNOWN
+
+
 async def test_a_refused_send_is_failed(monkeypatch):
   """Telegram answered and said no, so nothing was posted — a retry is safe."""
   monkeypatch.setattr(ns.settings.telegram, "ENABLED", True)
@@ -414,7 +427,7 @@ async def test_broadcast_reply_threads_under_the_cycle_message(monkeypatch):
   ok = await notifier.reply_message(ChatTarget("-100111"), "42", "[CLOSED]\nTP2")
 
   url, payload = sent[0]
-  assert ok is True
+  assert ok is SendOutcome.OK
   assert url.endswith("/sendMessage")
   assert payload["reply_to_message_id"] == "42"
   # A deleted cycle message must not swallow the notice with it.
@@ -444,7 +457,9 @@ async def test_broadcast_reply_reports_a_failure(monkeypatch):
   )
 
   notifier = BroadcastNotifier()
-  assert await notifier.reply_message(ChatTarget("-100111"), "42", "TP1") is False
+  outcome = await notifier.reply_message(ChatTarget("-100111"), "42", "TP1")
+  # Telegram answered and refused, so nothing was posted: safe to retry.
+  assert outcome is SendOutcome.FAILED
 
 
 # ── QueuedNotifier ──────────────────────────────────────────────────

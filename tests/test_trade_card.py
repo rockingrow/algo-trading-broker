@@ -39,7 +39,7 @@ from broker.schemas.core import SignalActionEnum
 from broker.schemas.trade_event_schema import PositionEvent, PositionEventType
 from broker.schemas.trade_schema import TradeCard, TradeStatusEnum
 from broker.security.ensure_api_key import ensure_api_key
-from broker.services.notification_service import EditOutcome
+from broker.services.notification_service import EditOutcome, SendOutcome, SendResult
 from broker.services.trade_card_service import TradeCardService
 
 API_KEY = "test-api-key"
@@ -72,8 +72,18 @@ class FakeCardRepo:
     return list(self._cards.values())
 
   async def record(self, trade_id, chat_id, message_id, status, platform=None):
+    # Keyed on the chat, like ``uq_trade_notifications_trade_platform_chat``:
+    # recording twice for one recipient updates that row, it does not add a
+    # second card.
+    existing = next(
+      (c for c in self._cards.values() if c.chat_id == chat_id),
+      None,
+    )
     card = TradeCard(
-      id=uuid.uuid4(), chat_id=chat_id, message_id=message_id, status=status
+      id=existing.id if existing is not None else uuid.uuid4(),
+      chat_id=chat_id,
+      message_id=message_id,
+      status=status,
     )
     self._cards[card.id] = card
     return True
@@ -115,6 +125,25 @@ class FakeCardNotifier:
   async def edit_message(self, target, message_id, text, reply_markup=None):
     self.edits.append((target.chat_id, message_id, text, reply_markup))
     return self._edit_outcome
+
+
+class FakeOutcomeNotifier(FakeCardNotifier):
+  """A notifier that reports a :class:`SendOutcome`, like the real one.
+
+  ``FakeCardNotifier`` above only offers ``send_and_get_message_id``, which is
+  the older shape the service still tolerates; this one exercises the path
+  where a send that timed out is distinguished from one that was refused.
+  """
+
+  def __init__(self, outcome=SendOutcome.OK, message_id: int | None = 500, **kwargs):
+    super().__init__(message_id=message_id, **kwargs)
+    self._outcome = outcome
+
+  async def send_message(self, target, text, reply_markup=None):
+    self.sent.append((target.chat_id, text, reply_markup))
+    if self._outcome is SendOutcome.OK:
+      return SendResult(self._outcome, str(self._message_id))
+    return SendResult(self._outcome, None)
 
 
 class FakeTradeRepo:
@@ -397,6 +426,64 @@ async def test_transient_edit_failure_keeps_the_card_for_a_retry():
 async def test_failed_send_is_not_recorded_as_a_card():
   repo = FakeCardRepo()
   notifier = FakeCardNotifier(message_id=None)
+  svc = _service(targets=["111"], card_repo=repo, notifier=notifier)
+
+  await _deliver(svc, _event("OPENED"), _make_trade(TradeStatusEnum.OPENED))
+
+  assert await repo.list_for_trade(uuid.uuid4()) == []
+
+
+async def test_a_send_that_timed_out_is_recorded_so_it_is_not_posted_twice():
+  """A ``ReadTimeout`` is not a failed send: the DM is in the chat and only
+  its id never came back. Recording nothing meant the next TRADE event — and
+  workers emit plenty — posted the card again, one copy per event."""
+  repo = FakeCardRepo()
+  notifier = FakeOutcomeNotifier(outcome=SendOutcome.UNKNOWN)
+  svc = _service(targets=["111"], card_repo=repo, notifier=notifier)
+
+  await _deliver(svc, _event("OPENED"), _make_trade(TradeStatusEnum.OPENED))
+
+  cards = await repo.list_for_trade(uuid.uuid4())
+  assert len(cards) == 1
+  assert cards[0].message_id is None
+  assert cards[0].status is TradeStatusEnum.OPENED
+
+  # A second event at the same status must not send anything at all.
+  await _deliver(svc, _event("OPENED"), _make_trade(TradeStatusEnum.OPENED))
+  assert len(notifier.sent) == 1
+
+
+async def test_a_card_with_no_message_id_is_replaced_on_the_next_status():
+  """It cannot be edited, so the status change posts one fresh card and takes
+  over the row — at most one orphan, rather than one per event."""
+  repo = FakeCardRepo(
+    cards=[
+      TradeCard(
+        id=uuid.uuid4(),
+        chat_id="111",
+        message_id=None,
+        status=TradeStatusEnum.OPENED,
+      )
+    ]
+  )
+  notifier = FakeOutcomeNotifier(message_id=777)
+  svc = _service(targets=["111"], card_repo=repo, notifier=notifier)
+
+  await _deliver(svc, _event("CLOSED"), _make_trade(TradeStatusEnum.CLOSED))
+
+  assert notifier.edits == []
+  assert len(notifier.sent) == 1
+  cards = await repo.list_for_trade(uuid.uuid4())
+  assert len(cards) == 1
+  assert cards[0].message_id == 777
+  assert cards[0].status is TradeStatusEnum.CLOSED
+
+
+async def test_a_refused_send_still_records_nothing():
+  """Telegram answered and refused, so nothing was posted and a later event
+  may try again — unlike the timeout above."""
+  repo = FakeCardRepo()
+  notifier = FakeOutcomeNotifier(outcome=SendOutcome.FAILED)
   svc = _service(targets=["111"], card_repo=repo, notifier=notifier)
 
   await _deliver(svc, _event("OPENED"), _make_trade(TradeStatusEnum.OPENED))

@@ -44,6 +44,7 @@ event.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 from broker.constants import NOTIFICATION_TIMEZONE_KEY
 from broker.db.models import Trade
@@ -63,6 +64,8 @@ from broker.schemas.trade_schema import TradeCard, TradeStatusEnum
 from broker.services.notification_service import (
   ChatTarget,
   EditOutcome,
+  SendOutcome,
+  SendResult,
   TradeCardNotifier,
 )
 
@@ -184,7 +187,7 @@ class TradeCardService:
     carded = {card.chat_id for card in existing}
     edited = 0
     for card in existing:
-      if await self._refresh(card, body, markup, status):
+      if await self._refresh(card, trade.id, body, markup, status):
         edited += 1
 
     posted = 0
@@ -207,6 +210,7 @@ class TradeCardService:
   async def _refresh(
     self,
     card: TradeCard,
+    trade_id: uuid.UUID,
     body: str,
     markup: dict | None,
     status: TradeStatusEnum,
@@ -214,6 +218,13 @@ class TradeCardService:
     """Edit one existing card, unless it already shows this status."""
     if card.status == status:
       return False
+
+    if card.message_id is None:
+      # Telegram never answered this card's send, so there is no message to
+      # edit — but the chat has it. Post a fresh one and let ``record``
+      # overwrite the row: at most one orphan is left behind, where re-sending
+      # on every event would leave one per event.
+      return await self._post_card(card.chat_id, trade_id, body, markup, status)
 
     outcome = await self._notifier.edit_message(
       ChatTarget(card.chat_id),
@@ -246,15 +257,58 @@ class TradeCardService:
     A trade that is already over still gets its card; it simply arrives without
     buttons, which is exactly the completion DM the old broadcast sent.
     """
+    return await self._post_card(chat_id, trade.id, body, markup, status)
+
+  async def _post_card(
+    self,
+    chat_id: str,
+    trade_id: uuid.UUID,
+    body: str,
+    markup: dict | None,
+    status: TradeStatusEnum,
+  ) -> bool:
+    """Send one card and record what became of it.
+
+    The three outcomes are the ones :class:`SendOutcome` draws, and they matter
+    here for the same reason they do for a broadcast: a send that timed out is
+    **not** a send that failed. The DM is in the chat, only its id never came
+    back — so the row is written with no ``message_id``, which is what keeps
+    the next TRADE event (and workers emit plenty) from posting a second copy.
+    A send Telegram answered and refused records nothing, so a later event may
+    try again.
+    """
+    outcome, message_id = await self._send(chat_id, body, markup)
+    if outcome is SendOutcome.FAILED:
+      return False
+
+    await self._cards.record(
+      trade_id=trade_id,
+      chat_id=chat_id,
+      message_id=int(message_id) if message_id is not None else None,
+      status=status,
+    )
+    if outcome is SendOutcome.UNKNOWN:
+      log.warning(
+        "Trade card send unanswered chat_id=%s trade_id=%s — assuming it "
+        "landed, not re-sending",
+        chat_id,
+        trade_id,
+      )
+      return False
+    return True
+
+  async def _send(self, chat_id: str, body: str, markup: dict | None) -> SendResult:
+    """Post a card, tolerating a notifier that only hands back an id.
+
+    Mirrors ``BroadcastDispatcher._send``: the real notifier reports a
+    :class:`SendOutcome`, while a double in a test may only offer
+    ``send_and_get_message_id``, where an id means OK and its absence FAILED.
+    """
+    sender = getattr(self._notifier, "send_message", None)
+    if sender is not None:
+      return SendResult(*await sender(ChatTarget(chat_id), body, markup))
     message_id = await self._notifier.send_and_get_message_id(
       ChatTarget(chat_id), body, reply_markup=markup
     )
-    if message_id is None:
-      return False
-    await self._cards.record(
-      trade_id=trade.id,
-      chat_id=chat_id,
-      message_id=int(message_id),
-      status=status,
-    )
-    return True
+    outcome = SendOutcome.OK if message_id else SendOutcome.FAILED
+    return SendResult(outcome, message_id)

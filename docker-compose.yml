@@ -128,6 +128,12 @@ services:
     container_name: algo_trading_broker_broker
     restart: always
     mem_limit: 512m
+    # Docker's default 10s is shorter than a worst-case clean shutdown: the
+    # stop notice (≤3s), the JetStream workers finishing the message in hand
+    # (inline retries ≤7.5s), three notifier queues (≤3s each), the deferred
+    # enqueue flush (≤5s) and the NATS drain. A SIGKILL in the middle loses
+    # the deferred backlog — alerts TradingView was already answered 202 for.
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy

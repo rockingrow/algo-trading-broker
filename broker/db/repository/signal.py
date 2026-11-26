@@ -5,7 +5,6 @@ broker/db/repository/signal.py — the persisted inbound signals
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -14,6 +13,7 @@ from sqlalchemy import select
 
 from broker.db.models import Signal
 from broker.db.repository import _session
+from broker.helpers.signal_helper import payload_idempotency_key
 from broker.logger import get_logger
 from broker.schemas.core import SignalStatusEnum
 from broker.schemas.webhook_schema import WebhookPayload
@@ -41,6 +41,11 @@ class SqlAlchemySignalRepository:
     *attempts* seeds the row's attempt budget — the service passes its own, so
     the row and the service count from the same number; defaults to
     ``settings.signal.MAX_ATTEMPTS``.
+
+    The row also carries ``idempotency_key``, the digest of the payload itself
+    (``payload_idempotency_key``), under its own unique constraint: that is
+    what stops two *different* JetStream messages carrying one alert from
+    minting two ``signal_id`` values and opening two positions.
 
     Returns
     -------
@@ -79,13 +84,18 @@ class SqlAlchemySignalRepository:
       attempts=attempts if attempts is not None else settings.signal.MAX_ATTEMPTS,
       last_attempt=None,
       delivery_key=delivery_key,
-      indicators=json.loads(payload.indicators.model_dump_json())
+      idempotency_key=payload_idempotency_key(payload),
+      indicators=payload.indicators.model_dump(mode="json")
       if payload.indicators is not None
       else {},
-      inputs=json.loads(payload.inputs.model_dump_json())
+      inputs=payload.inputs.model_dump(mode="json")
       if payload.inputs is not None
       else {},
-      raw=json.loads(payload.model_dump_json()),
+      # ``token`` is WEBHOOK_SECRET. It was verified before the envelope was
+      # queued and nothing downstream needs it, so it is never written to the
+      # table — every row would otherwise hold the key to the webhook. Readers
+      # rebuild the payload with ``payload_from_stored``.
+      raw=payload.model_dump(mode="json", exclude={"token"}),
     )
     try:
       async with _session.get_session() as session:
@@ -123,6 +133,37 @@ class SqlAlchemySignalRepository:
       log.exception("Failed to mark signal published id=%s: %s", signal_id, exc)
       return False
 
+  async def mark_broadcast_recorded(self, signal_id: str) -> bool:
+    """Stamp ``broadcast_at`` once this signal's line is on its cycle.
+
+    The companion to ``mark_published``: together they say which half of the
+    fan-out has settled. A ``PUBLISHED`` row with ``broadcast_at IS NULL``
+    still owes its cycle write, and that is the only state a redelivery
+    resumes without publishing to the workers again.
+
+    Best-effort, like ``mark_published``: a failure here leaves the row
+    reading as owed, and re-recording the event is a no-op because the cycle
+    de-duplicates on ``signal_id``.
+    """
+    try:
+      row_id = uuid.UUID(signal_id)
+    except (TypeError, ValueError):
+      log.error("mark_broadcast_recorded: invalid signal_id=%r", signal_id)
+      return False
+
+    try:
+      async with _session.get_session() as session:
+        result = await session.execute(select(Signal).where(Signal.id == row_id))
+        row: Optional[Signal] = result.scalars().first()
+        if row is None:
+          log.warning("mark_broadcast_recorded: signal_id=%s not found", signal_id)
+          return False
+        row.broadcast_at = datetime.now(timezone.utc)
+      return True
+    except Exception as exc:
+      log.exception("Failed to stamp signal broadcast_at id=%s: %s", signal_id, exc)
+      return False
+
   async def get_by_delivery_key(self, delivery_key: str) -> Signal | None:
     """Return the row persisted from JetStream message *delivery_key*.
 
@@ -134,6 +175,23 @@ class SqlAlchemySignalRepository:
     async with _session.get_session() as session:
       result = await session.execute(
         select(Signal).where(Signal.delivery_key == delivery_key)
+      )
+      return result.scalars().first()
+
+  async def get_by_idempotency_key(self, idempotency_key: str) -> Signal | None:
+    """Return the row already persisted for this *alert*, if there is one.
+
+    Raises on a database error rather than answering ``None``, for the same
+    reason as :meth:`get_by_delivery_key`: the caller is deciding whether this
+    alert has already been fanned out, and "unknown" must not be read as "not
+    yet" — that is how one alert becomes two positions.
+
+    Rows written before the column existed carry ``NULL``, which this equality
+    lookup never matches, so they are simply invisible to it.
+    """
+    async with _session.get_session() as session:
+      result = await session.execute(
+        select(Signal).where(Signal.idempotency_key == idempotency_key)
       )
       return result.scalars().first()
 
@@ -272,9 +330,16 @@ class SqlAlchemySignalRepository:
 
     Backs the ``retry_signals`` replay a worker gets on connect: rows
     whose ``strategy`` is in *strategies* and whose ``createdAt`` is within the
-    last *since_seconds*, newest first. Only the persisted ``raw`` JSON is
+    last *since_seconds*, oldest first. Only the persisted ``raw`` JSON is
     returned so callers can feed it straight through ``parse_signal`` — the
     same code path the JetStream handler uses to produce the SIGNAL payload.
+
+    Only rows the broker sent, or still means to send, are replayed:
+    ``PUBLISHED``, and ``QUEUED`` (a fan-out in flight or owned by the retry
+    job — workers de-duplicate it by ``signal_id``). A ``FAILED`` row is never
+    replayed: it is a signal the broker gave up on or refused, including a
+    redelivery the block gate dropped, and replaying it on reconnect would let
+    a worker execute what the gate stopped.
     """
     if not strategies or since_seconds <= 0:
       return []
@@ -282,25 +347,29 @@ class SqlAlchemySignalRepository:
     since_dt = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
     try:
       async with _session.get_session() as session:
+        # Two columns rather than whole rows: the replay needs nothing else,
+        # and a row also carries the indicators/inputs JSONB.
         result = await session.execute(
-          select(Signal)
+          select(Signal.id, Signal.raw)
           .where(Signal.strategy.in_(strategies))
           .where(Signal.createdAt >= since_dt)
+          .where(
+            Signal.status.in_([SignalStatusEnum.PUBLISHED, SignalStatusEnum.QUEUED])
+          )
           .order_by(Signal.createdAt.asc())
         )
-        rows = list(result.scalars().all())
+        rows = list(result.all())
     except Exception as exc:
       log.exception("Failed to list recent signals: %s", exc)
       return []
 
     envelopes: list[dict] = []
-    for row in rows:
-      raw = row.raw
+    for row_id, raw in rows:
       if not raw:
         continue
       envelopes.append(
         {
-          "signal_id": str(row.id),
+          "signal_id": str(row_id),
           "payload": raw,
         }
       )

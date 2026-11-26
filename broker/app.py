@@ -187,12 +187,13 @@ async def lifespan(app: FastAPI):
     )
 
     # Notification: Startup
-    await notifier.send_message(
+    await _send_lifecycle_notice(
+      notifier,
       f"{em.BROKER_STARTED} <b>Broker Node Started</b>\n"
       f"{em.PLUG} NATS Publishing: <code>{nats_client.subjects_line()}</code> + dynamic (by strategy & per-account ADMIN)\n"
       f"{em.PLUG} NATS Listening: <code>{nats_client.listen_subjects_line()}</code>\n"
       f"{em.DEMO_SIGNAL} NATS Drill: <code>{DEMO_SIGNAL_SUBJECT_FILTER}</code> (Telegram only)\n"
-      f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
+      f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>",
     )
 
     try:
@@ -200,10 +201,39 @@ async def lifespan(app: FastAPI):
     finally:
       # Notification: Shutdown — sent before anything stops, while NATS and the
       # notifier queues are still up. The stack then unwinds every service.
-      await notifier.send_message(
+      await _send_lifecycle_notice(
+        notifier,
         f"{em.BROKER_STOPPED} <b>Broker Node Stopped</b>\n"
-        f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>"
+        f"{em.ENDPOINT} Endpoint: <code>{settings.broker_url}{api_prefix}</code>",
       )
+
+
+# Longest the start/stop notice may hold up the lifespan. Both are sent straight
+# to Telegram, where a throttled network holds a send for the full HTTP timeout
+# (connect + read, ~25s). At startup that keeps the webhook from serving — the
+# lifespan has not finished — and at shutdown it eats the container's stop grace
+# period before a single service has drained, so a SIGKILL takes the deferred
+# enqueue backlog (alerts TradingView was already answered 202 for) with it.
+LIFECYCLE_NOTICE_TIMEOUT_SECONDS = 3.0
+
+
+async def _send_lifecycle_notice(notifier, text: str) -> None:
+  """Send a broker start/stop notice, giving up after a short deadline.
+
+  Best-effort like every notification: a notice that cannot get through in
+  time is logged and skipped, never allowed to delay the services around it.
+  """
+  try:
+    await asyncio.wait_for(
+      notifier.send_message(text), timeout=LIFECYCLE_NOTICE_TIMEOUT_SECONDS
+    )
+  except asyncio.TimeoutError:
+    log.warning(
+      "Lifecycle notice not sent within %.1fs — skipped",
+      LIFECYCLE_NOTICE_TIMEOUT_SECONDS,
+    )
+  except Exception as exc:
+    log.warning("Lifecycle notice failed: %s", exc)
 
 
 async def _start(stack: AsyncExitStack, service) -> None:

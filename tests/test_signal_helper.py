@@ -1,7 +1,12 @@
 from datetime import datetime, timezone
 
 from broker.helpers import emoji_constants as em
-from broker.helpers.signal_helper import action_to_emoji, parse_signal
+from broker.helpers.signal_helper import (
+  action_to_emoji,
+  parse_signal,
+  payload_from_stored,
+  payload_idempotency_key,
+)
 from broker.schemas.core import SignalActionEnum
 from broker.schemas.webhook_schema import PositionSchema, ScalingSchema, WebhookPayload
 
@@ -124,3 +129,56 @@ def test_signal_id_stays_unique_per_action_while_the_cycle_id_is_shared():
   )
   assert entry.signal_id != close.signal_id
   assert entry.signal_uxid == close.signal_uxid == uxid
+
+
+# ── The alert's identity ────────────────────────────────────────────────────
+
+
+def test_idempotency_key_is_stable_for_the_same_alert():
+  uxid = "9F2C4B7E18A3D605"
+  assert payload_idempotency_key(_payload(signal_uxid=uxid)) == (
+    payload_idempotency_key(_payload(signal_uxid=uxid))
+  )
+
+
+def test_idempotency_key_ignores_the_token():
+  """The token is the shared secret, not a fact about which alert this is —
+  and it is excluded from the digest as well as from the persisted row."""
+  uxid = "9F2C4B7E18A3D605"
+  assert payload_idempotency_key(_payload(signal_uxid=uxid, token="a")) == (
+    payload_idempotency_key(_payload(signal_uxid=uxid, token="b"))
+  )
+
+
+def test_idempotency_key_survives_a_json_round_trip():
+  """The HTTP path keys the ``Nats-Msg-Id`` off the payload as received, while
+  the worker keys the row off the payload rebuilt from the envelope. Both must
+  land on the same digest, or the two layers would dedup on different keys."""
+  original = _payload(signal_uxid="9F2C4B7E18A3D605")
+  rebuilt = WebhookPayload(**original.model_dump(mode="json"))
+  assert payload_idempotency_key(rebuilt) == payload_idempotency_key(original)
+
+
+def test_a_scale_in_at_the_same_timestamp_keys_differently():
+  """The digest covers every field, so a second entry on the same bar at a
+  different price is its own alert — a business tuple of
+  (uxid, action, timestamp) would have swallowed it."""
+  uxid = "9F2C4B7E18A3D605"
+  first = _payload(
+    signal_uxid=uxid,
+    position=PositionSchema(action=SignalActionEnum.LONG, price=2500.5, quantity=1.0),
+  )
+  second = _payload(
+    signal_uxid=uxid,
+    position=PositionSchema(action=SignalActionEnum.LONG, price=2501.0, quantity=1.0),
+  )
+  assert first.timestamp == second.timestamp
+  assert payload_idempotency_key(first) != payload_idempotency_key(second)
+
+
+def test_payload_from_stored_accepts_a_row_without_a_token():
+  stored = _payload(signal_uxid="9F2C4B7E18A3D605").model_dump(
+    mode="json", exclude={"token"}
+  )
+  assert "token" not in stored
+  assert payload_from_stored(stored).signal_uxid == "9F2C4B7E18A3D605"

@@ -140,6 +140,46 @@ async def test_log_signal_persists_row_and_returns_id(monkeypatch):
   assert str(row.id) == result
 
 
+async def test_log_signal_never_stores_the_webhook_token(monkeypatch):
+  """``token`` is WEBHOOK_SECRET: it was verified on the way in and must not
+  sit in every persisted row."""
+  session = FakeSession(results=[])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemySignalRepository().log_signal(_payload(token="super-secret"))
+
+  row = session.added[0]
+  assert "token" not in row.raw
+  assert "super-secret" not in repr(row.raw)
+  # Everything else the retry path rebuilds from is still there.
+  assert row.raw["strategy"] == "strat"
+  assert row.raw["position"]["action"] == "LONG"
+  assert row.raw["signal_uxid"] == row.signal_uxid
+
+
+async def test_list_recent_by_strategies_replays_only_sent_or_in_flight_rows(
+  monkeypatch,
+):
+  """A FAILED row (given up on, or dropped by the block gate) is never
+  replayed to a reconnecting worker."""
+  row_id = uuid.uuid4()
+  session = FakeSession(results=[[(row_id, {"strategy": "S"}), (uuid.uuid4(), None)]])
+  _patch_session(monkeypatch, session)
+
+  envelopes = await SqlAlchemySignalRepository().list_recent_by_strategies(
+    strategies=["S"], since_seconds=60
+  )
+
+  assert envelopes == [{"signal_id": str(row_id), "payload": {"strategy": "S"}}]
+  sql, params = _compiled(session.statements[0])
+  assert "signals.status IN" in sql
+  status_values = [value for value in params.values() if isinstance(value, list)]
+  assert [SignalStatusEnum.PUBLISHED, SignalStatusEnum.QUEUED] in status_values
+  assert not any(SignalStatusEnum.FAILED in values for values in status_values)
+  # Only the two columns the replay needs, not the JSONB-heavy row.
+  assert sql.split("\n")[0].strip() == "SELECT signals.id, signals.raw"
+
+
 async def test_log_signal_persists_the_cycle_id(monkeypatch):
   session = FakeSession(results=[])
   _patch_session(monkeypatch, session)
@@ -644,6 +684,51 @@ async def test_upsert_gateway_swallows_db_error(monkeypatch):
   await SqlAlchemyAccountRepository().upsert_gateway(
     "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
   )
+
+
+async def test_upsert_gateway_prefers_the_exact_gateway_row(monkeypatch):
+  """Both an exact-gateway row and a legacy NULL-gateway one can match. Without
+  an explicit order Postgres picks either, so repeated handshakes could write
+  the gateway onto the legacy row and leave two rows for one account."""
+  session = FakeSession(results=[[]])
+  _patch_session(monkeypatch, session)
+
+  await SqlAlchemyAccountRepository().upsert_gateway(
+    "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+
+  sql, _ = _compiled(session.statements[0])
+  assert "ORDER BY accounts.gateway IS NULL" in sql
+
+
+async def test_upsert_gateway_retries_once_when_another_writer_inserts_first(
+  monkeypatch,
+):
+  """This runs on the SYSTEM subscription while ``_upsert_account`` runs on the
+  TRADES consumer, so a worker that connects and reports a trade at once drives
+  both: one insert loses on the unique key, and the retry finds the winner."""
+  winner = Account(account_id="acc-1", market=MarketTypeEnum.CRYPTO, gateway=None)
+  # First pass finds nothing and inserts; its commit then loses the unique key,
+  # which is where a real IntegrityError surfaces. Second pass sees the winner.
+  sessions = [FakeSession(results=[[]]), FakeSession(results=[[winner]])]
+  commits: list[int] = []
+
+  @contextlib.asynccontextmanager
+  async def fake_get_session():
+    yield sessions.pop(0)
+    commits.append(1)
+    if len(commits) == 1:
+      raise IntegrityError("insert", None, Exception("duplicate key"))
+
+  monkeypatch.setattr(repo_mod._session, "get_session", fake_get_session)
+
+  await SqlAlchemyAccountRepository().upsert_gateway(
+    "acc-1", MarketTypeEnum.CRYPTO, "BINANCE"
+  )
+
+  # Second pass took the update branch on the row the winner inserted.
+  assert winner.gateway == "BINANCE"
+  assert sessions == []
 
 
 # ── AccountRepository settings (accounts.settings JSONB) ──────────────
@@ -1491,6 +1576,76 @@ async def test_record_event_ignores_a_replayed_signal(monkeypatch):
   assert _added_logs(session) == []
 
 
+async def test_record_event_ignores_a_replay_that_is_no_longer_the_last_event(
+  monkeypatch,
+):
+  """A replay does not always arrive last.
+
+  An entry whose publish failed is re-fired by the retry job after its own TP
+  has been recorded. Comparing only against the final event appended the entry
+  a second time — a duplicate line, plus a notice announcing the entry after
+  the trade had already taken profit. The event's ``signal_id`` is matched
+  against the whole list instead.
+  """
+  existing = _cycle(
+    events=[
+      {
+        "signal_id": "11111111-1111-1111-1111-111111111111",
+        "action": "LONG",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+      },
+      {
+        "signal_id": "22222222-2222-2222-2222-222222222222",
+        "action": "TP1",
+        "timestamp": "2026-01-01T01:00:00+00:00",
+      },
+    ],
+    actions="LONG,TP1",
+  )
+  session = FakeSession(results=[[existing]])
+
+  row = await _record(
+    monkeypatch,
+    session,
+    action=SignalActionEnum.LONG,
+    signal_id="11111111-1111-1111-1111-111111111111",
+    timestamp="2026-01-01T00:00:00+00:00",
+  )
+
+  assert len(row.events) == 2
+  assert row.actions == "LONG,TP1"
+  assert row.last_seq == 1
+  assert _added_logs(session) == []
+
+
+async def test_record_event_keeps_a_second_signal_with_its_own_id(monkeypatch):
+  """Only a replay of the *same* signal is dropped: a genuine second alert on
+  the cycle carries a different ``signal_id`` and must still land, even when
+  its action and timestamp match an earlier one (a scale-in on one bar)."""
+  existing = _cycle(
+    events=[
+      {
+        "signal_id": "11111111-1111-1111-1111-111111111111",
+        "action": "LONG",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+      }
+    ],
+    actions="LONG",
+  )
+  session = FakeSession(results=[[existing]])
+
+  row = await _record(
+    monkeypatch,
+    session,
+    action=SignalActionEnum.LONG,
+    signal_id="33333333-3333-3333-3333-333333333333",
+    timestamp="2026-01-01T00:00:00+00:00",
+  )
+
+  assert len(row.events) == 2
+  assert row.last_seq == 2
+
+
 async def test_record_event_retries_once_when_another_writer_wins(monkeypatch):
   """Two signals of one cycle can race; the loser re-reads and updates."""
   existing = _cycle()
@@ -2002,3 +2157,52 @@ async def test_get_strict_raises_where_get_answers_none(monkeypatch):
   assert await SqlAlchemySettingRepository().get("signal_blocked") is None
   with pytest.raises(RuntimeError):
     await SqlAlchemySettingRepository().get_strict("signal_blocked")
+
+
+async def test_set_upserts_in_one_statement(monkeypatch):
+  """Read-then-write loses a concurrent writer: two admin calls on one key both
+  read "missing" and both insert, so one fails on the unique index."""
+  session = FakeSession(results=[])
+  _patch_session(monkeypatch, session)
+
+  assert await SqlAlchemySettingRepository().set("signal_blocked", "1") is True
+
+  assert session.added == []
+  sql, params = _compiled(session.statements[0])
+  assert sql.startswith("INSERT INTO broker_settings")
+  assert "ON CONFLICT (key) DO UPDATE SET value = excluded.value" in sql
+  assert params["value"] == "1"
+  assert params["key"] == "signal_blocked"
+  # ``updatedAt`` is set in the SET clause: the column's ``onupdate`` is an ORM
+  # hook on a flushed instance and nothing is flushed here, so without it the
+  # timestamp would stop moving the day this became an upsert.
+  assert '"updatedAt" = now()' in sql
+
+
+async def test_set_reports_failure_rather_than_raising(monkeypatch):
+  class BoomSession(FakeSession):
+    async def execute(self, _stmt):
+      raise RuntimeError("db down")
+
+  _patch_session(monkeypatch, BoomSession(results=[]))
+  assert await SqlAlchemySettingRepository().set("signal_blocked", "1") is False
+
+
+async def test_get_many_strict_returns_found_keys(monkeypatch):
+  row = BrokerSetting(id=uuid.uuid4(), key="a", value="1")
+  session = FakeSession(results=[[row]])
+  _patch_session(monkeypatch, session)
+
+  assert await SqlAlchemySettingRepository().get_many_strict(["a", "b"]) == {"a": "1"}
+
+
+async def test_get_many_strict_raises_where_get_many_answers_empty(monkeypatch):
+  @contextlib.asynccontextmanager
+  async def boom():
+    raise RuntimeError("db down")
+    yield
+
+  monkeypatch.setattr(repo_mod._session, "get_session", boom)
+  assert await SqlAlchemySettingRepository().get_many(["a"]) == {}
+  with pytest.raises(RuntimeError):
+    await SqlAlchemySettingRepository().get_many_strict(["a"])

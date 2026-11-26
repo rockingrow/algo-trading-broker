@@ -4,6 +4,9 @@ broker/helpers/signal_helper.py — Converts raw WebhookPayload into a validated
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from broker.schemas.webhook_schema import WebhookPayload
 from broker.schemas.publisher_schema import ScalingSchema, TradingSignal
 from broker.logger import get_logger
@@ -11,6 +14,49 @@ from broker.schemas.core import SignalActionEnum
 from broker.helpers import emoji_constants as em
 
 log = get_logger(__name__)
+
+
+def payload_idempotency_key(payload: WebhookPayload) -> str:
+  """Identity of one alert, derived from what the alert says.
+
+  Every other de-duplication guard on the signal path is about *transport*:
+  ``Nats-Msg-Id`` covers one publish inside the stream's duplicate window, and
+  ``delivery_key`` covers one stored JetStream message however often it is
+  redelivered. Neither recognises the same alert arriving as two different
+  stored messages — a producer that re-publishes straight to
+  ``SIGNALS.<strategy>``, a replayed request — and that produced two
+  ``signals`` rows, two ``signal_id`` values, and therefore two positions,
+  while the broadcast layer's own content check kept the Telegram message
+  showing a single line. This key is what makes "the same alert" a fact about
+  the payload instead.
+
+  The digest covers the whole payload bar ``token`` (the shared secret, which
+  says nothing about which alert this is), with object keys sorted so field
+  order cannot change the key. Covering *every* field is deliberate: it can
+  only ever merge two alerts that agree on price, quantity, levels,
+  indicators, timestamp and cycle id alike — and two alerts that agree on all
+  of those are indistinguishable to a worker too, so merging them cannot cost
+  a trade. A genuine second scale-in on the same bar differs in price or
+  quantity and therefore keys differently.
+  """
+  canonical = json.dumps(
+    payload.model_dump(mode="json", exclude={"token"}),
+    sort_keys=True,
+    separators=(",", ":"),
+  )
+  return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def payload_from_stored(raw: dict) -> WebhookPayload:
+  """Rebuild a ``WebhookPayload`` from a persisted ``signals.raw``.
+
+  ``raw`` is stored without ``token`` (it is WEBHOOK_SECRET, see
+  ``SqlAlchemySignalRepository.log_signal``), but the model requires one. The
+  token was verified before the signal was ever queued, so the rebuilt payload
+  carries an empty one; nothing past the webhook reads it. A row written
+  before the token was stripped keeps working, its value simply ignored.
+  """
+  return WebhookPayload(**{**raw, "token": ""})
 
 
 def parse_signal(payload: WebhookPayload, signal_id: str) -> TradingSignal:

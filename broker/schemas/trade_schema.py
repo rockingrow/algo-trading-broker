@@ -38,7 +38,10 @@ class TradeCard(BaseModel):
 
   id: uuid.UUID
   chat_id: str
-  message_id: int
+  # ``None`` when Telegram never answered the send: the card is in the chat but
+  # its id is unknown, so it cannot be edited (see ``TradeCardService._post``).
+  # The row still exists, which is what stops the card being posted again.
+  message_id: int | None
   status: TradeStatusEnum
 
   model_config = {"from_attributes": True}

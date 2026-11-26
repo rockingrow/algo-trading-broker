@@ -53,10 +53,11 @@ from broker.schemas.webhook_schema import (
 from broker.services import broadcast_service as bs
 from broker.services.broadcast_service import (
   BroadcastDispatcher,
+  BroadcastRecordError,
   SignalBroadcastService,
   build_broadcast_event,
 )
-from broker.services.notification_service import EditOutcome
+from broker.services.notification_service import EditOutcome, SendOutcome
 
 
 @pytest.fixture(autouse=True)
@@ -296,7 +297,7 @@ class FakeTelegram:
     edit_outcome: EditOutcome = EditOutcome.OK,
     send_ok: bool = True,
     enabled: bool = True,
-    reply_ok: bool = True,
+    reply_outcome: SendOutcome = SendOutcome.OK,
   ):
     self.sent: list[tuple[str, str]] = []
     self.edited: list[tuple[str, str, str]] = []
@@ -305,7 +306,7 @@ class FakeTelegram:
     self.edit_outcome = edit_outcome
     self.send_ok = send_ok
     self.enabled = enabled
-    self.reply_ok = reply_ok
+    self.reply_outcome = reply_outcome
     self._next_id = 100
 
   async def send_and_get_message_id(self, chat, text):
@@ -324,7 +325,7 @@ class FakeTelegram:
 
   async def reply_message(self, chat, reply_to_message_id, text):
     self.replied.append((chat.chat_id, reply_to_message_id, text))
-    return self.reply_ok
+    return self.reply_outcome
 
 
 class FakeListener:
@@ -793,7 +794,7 @@ async def test_a_redelivery_does_not_repeat_a_notice():
 
 async def test_a_failed_notice_is_retried_on_the_next_pass():
   writer, repo = _notice_writer()
-  channel = FakeTelegram(reply_ok=False)
+  channel = FakeTelegram(reply_outcome=SendOutcome.FAILED)
   dispatcher, _ = _dispatcher(repo, telegram=channel)
 
   await writer.broadcast(_payload())
@@ -803,11 +804,30 @@ async def test_a_failed_notice_is_retried_on_the_next_pass():
   await dispatcher.dispatch(cycle.id)
 
   assert repo.chats[cycle.id]["-100"].notified_event_count == 1
-  channel.reply_ok = True
+  channel.reply_outcome = SendOutcome.OK
   await writer.record_execution(_trade_event())
   await dispatcher.dispatch(cycle.id)
   assert [text for _, _, text in channel.replied][-1].endswith(f"{em.TP1} TP1")
   assert repo.chats[cycle.id]["-100"].notified_event_count == 2
+
+
+async def test_a_notice_that_timed_out_is_not_posted_again():
+  """The request broke on the wire, so the notice is probably in the chat.
+  Counting it as announced is what stops the next pass posting a second copy —
+  the same trade-off a new send's UNKNOWN already takes."""
+  writer, repo = _notice_writer()
+  channel = FakeTelegram(reply_outcome=SendOutcome.UNKNOWN)
+  dispatcher, _ = _dispatcher(repo, telegram=channel)
+
+  await writer.broadcast(_payload())
+  cycle = _only_cycle(repo)
+  await dispatcher.dispatch(cycle.id)
+  await writer.broadcast(_payload(action=SignalActionEnum.TP1))
+  await dispatcher.dispatch(cycle.id)
+
+  # Both events counted as announced, and each notice was attempted once.
+  assert repo.chats[cycle.id]["-100"].notified_event_count == 2
+  assert len(channel.replied) == 1
 
 
 async def test_a_chat_from_before_notices_existed_is_caught_up_silently():
@@ -1071,11 +1091,18 @@ async def test_a_missing_cycle_clears_its_log_entries():
   assert repo.logs[0].status == BroadcastLogStatusEnum.DELIVERED
 
 
-async def test_unpersisted_cycle_records_nothing():
+async def test_a_write_that_does_not_land_raises_instead_of_being_swallowed():
+  """This write is the durable record: the Telegram body is re-rendered from
+  the stored events on every later edit, so a lost write left the message
+  wrong for the rest of the trade with nothing to replay it from. The signal
+  path lets it propagate and leans on JetStream redelivery."""
   repo = FakeBroadcastRepository()
   repo.fail_record = True
   writer, _ = _writer(repo)
-  await writer.broadcast(_payload())
+
+  with pytest.raises(BroadcastRecordError):
+    await writer.broadcast(_payload())
+
   assert repo.logs == []
 
 
