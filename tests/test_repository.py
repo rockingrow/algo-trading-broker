@@ -2173,6 +2173,10 @@ async def test_set_upserts_in_one_statement(monkeypatch):
   assert "ON CONFLICT (key) DO UPDATE SET value = excluded.value" in sql
   assert params["value"] == "1"
   assert params["key"] == "signal_blocked"
+  # ``updatedAt`` is set in the SET clause: the column's ``onupdate`` is an ORM
+  # hook on a flushed instance and nothing is flushed here, so without it the
+  # timestamp would stop moving the day this became an upsert.
+  assert '"updatedAt" = now()' in sql
 
 
 async def test_set_reports_failure_rather_than_raising(monkeypatch):

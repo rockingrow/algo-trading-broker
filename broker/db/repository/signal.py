@@ -133,6 +133,37 @@ class SqlAlchemySignalRepository:
       log.exception("Failed to mark signal published id=%s: %s", signal_id, exc)
       return False
 
+  async def mark_broadcast_recorded(self, signal_id: str) -> bool:
+    """Stamp ``broadcast_at`` once this signal's line is on its cycle.
+
+    The companion to ``mark_published``: together they say which half of the
+    fan-out has settled. A ``PUBLISHED`` row with ``broadcast_at IS NULL``
+    still owes its cycle write, and that is the only state a redelivery
+    resumes without publishing to the workers again.
+
+    Best-effort, like ``mark_published``: a failure here leaves the row
+    reading as owed, and re-recording the event is a no-op because the cycle
+    de-duplicates on ``signal_id``.
+    """
+    try:
+      row_id = uuid.UUID(signal_id)
+    except (TypeError, ValueError):
+      log.error("mark_broadcast_recorded: invalid signal_id=%r", signal_id)
+      return False
+
+    try:
+      async with _session.get_session() as session:
+        result = await session.execute(select(Signal).where(Signal.id == row_id))
+        row: Optional[Signal] = result.scalars().first()
+        if row is None:
+          log.warning("mark_broadcast_recorded: signal_id=%s not found", signal_id)
+          return False
+        row.broadcast_at = datetime.now(timezone.utc)
+      return True
+    except Exception as exc:
+      log.exception("Failed to stamp signal broadcast_at id=%s: %s", signal_id, exc)
+      return False
+
   async def get_by_delivery_key(self, delivery_key: str) -> Signal | None:
     """Return the row persisted from JetStream message *delivery_key*.
 

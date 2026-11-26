@@ -23,11 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the HTTP path sends that same digest as `Nats-Msg-Id`. Re-publishing a
   byte-identical payload is safe; changing any field makes it a new alert.
   Migration `60b00ea13191`.
-- **The deferred webhook enqueue stops before it can duplicate an alert.** Its
-  retry loop sleeps inline and re-queues failures at the back of a 500-slot
-  queue, so one envelope could wait well past the duplicate window — after
-  which a first publish that had landed with a slow ack would be stored
-  again. An envelope older than the window is now dropped with an ERROR.
+- **The deferred webhook enqueue reports a spent duplicate window instead of
+  dropping the alert.** Its retry loop sleeps inline and re-queues failures at
+  the back of a 500-slot queue, so one envelope can wait well past the
+  window — after which a first publish that had landed with a slow ack is
+  stored again. The envelope is still published and the age logged at
+  `warning`: `signals.idempotency_key` resolves both stored messages to one
+  signal, so the copy reaches no worker, whereas dropping the envelope would
+  lose an alert that may never have been stored at all.
 - **A replayed signal no longer doubles a line in its Telegram message.** The
   cycle's duplicate check only compared the last recorded event, so an entry
   re-fired by the retry job *after* its own TP had been recorded was appended
@@ -54,15 +57,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integrity error.
 - **`broker_settings` writes are a single upsert.** The read-then-write lost a
   concurrent writer: two admin calls on one key both read "missing" and both
-  inserted, so one reported the setting as not applied.
-- **A cycle change that fails to persist is retried instead of lost.** The
-  write is the durable record the Telegram body is re-rendered from, but a
-  failure was logged and swallowed while the fan-out marked the signal
-  PUBLISHED — so the line was missing for the rest of the trade with nothing
-  to replay it from. It now raises, which leaves the row QUEUED and hands the
-  envelope to JetStream redelivery under the same `signal_id`; attempts are
-  deliberately not spent, so a database problem cannot mark FAILED a signal
-  the workers already executed.
+  inserted, so one reported the setting as not applied. The statement sets
+  `updatedAt` itself, since the column's ORM `onupdate` hook does not run for
+  a conflict Postgres resolves.
+- **A cycle change that fails to persist is retried instead of lost — and
+  retried without publishing the signal again.** The write is the durable
+  record the Telegram body is re-rendered from, but a failure was logged and
+  swallowed while the fan-out marked the signal PUBLISHED, so the line was
+  missing for the rest of the trade with nothing to replay it from. It now
+  raises. The row records the fan-out's two halves separately, because only
+  one of them can be taken back: `status=PUBLISHED` once the workers have the
+  signal, `signals.broadcast_at` once the cycle write lands (migration
+  `125875cbf61f`, which backfills rows already PUBLISHED). A redelivery that
+  finds a published row with no `broadcast_at` retries **the cycle write
+  alone** — nothing goes to a worker twice. Attempts are deliberately not
+  spent either, so a database problem cannot mark FAILED a signal the workers
+  already executed.
+- **A `SIGNALS` envelope is no longer redelivered for ever.** One whose
+  handling keeps failing the same way is terminated at `error` after 720
+  deliveries — about an hour at the 5 s NAK delay, the same bound `TRADE`
+  reports already had. By then the failure is not transient and the alert is
+  far too stale to hand a worker.
 
 - **A database blip no longer hands a worker an empty configuration.** The
   `WORKER_CONNECTED` handshake read the crypto settings and the strategy magic

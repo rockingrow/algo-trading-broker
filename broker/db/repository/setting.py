@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from broker.db.models import BrokerSetting
@@ -98,7 +98,11 @@ class SqlAlchemySettingRepository:
         await session.execute(
           statement.on_conflict_do_update(
             index_elements=[BrokerSetting.key],
-            set_={"value": statement.excluded.value},
+            # ``updatedAt`` is set explicitly: the column's ``onupdate`` is an
+            # ORM hook on a flushed instance, and nothing is flushed here —
+            # Postgres resolves the conflict itself, so without this the
+            # timestamp would stop moving the day this became an upsert.
+            set_={"value": statement.excluded.value, "updatedAt": func.now()},
           )
         )
       log.debug("broker setting upserted key=%s value=%s", key, value)

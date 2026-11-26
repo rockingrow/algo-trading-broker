@@ -125,6 +125,18 @@ class Signal(Base):
   last_attempt: Mapped[datetime | None] = mapped_column(
     DateTime(timezone=True), nullable=True
   )
+  # When this signal's line was written onto its broadcast cycle. The two
+  # halves of a fan-out settle separately: the publish to the workers is
+  # irrevocable, the cycle write is a database write that can fail on its own.
+  # ``status=PUBLISHED`` with ``NULL`` here therefore means "the workers have
+  # it, the cycle record is still owed", and that is the one state a
+  # redelivery resumes *without* publishing again (see
+  # ``SignalProcessingService._handle_redelivery``). Backfilled for rows that
+  # were already PUBLISHED when the column appeared, so none of them reads as
+  # owed.
+  broadcast_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True), nullable=True
+  )
   # Identity of the JetStream message this row was persisted from: its stream
   # sequence and the time the stream stored it, both unchanged by a
   # redelivery. JetStream redelivers a message whose ack never arrived (a
